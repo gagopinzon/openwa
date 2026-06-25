@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "deploy": "./deploy.sh",
     "stop": "./stop.sh",
     "restart": "./stop.sh && sleep 2 && ./start.sh",
     "dev": "./start.sh"

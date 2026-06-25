@@ -3,6 +3,7 @@ node_modules/
 user_data/
 user_data_session*/
 user_data_default/
+logs/
 *.log
 *.zip
 *:Zone.Identifier

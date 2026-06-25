@@ -97,10 +97,44 @@ Recomendado para probar PDF + IA antes de envíos reales.
 
 ## Despliegue en servidor
 
-1. Sube solo la carpeta `whatsapp-bulk-openwa` (sin `node_modules`, sin `.env`).
-2. En el servidor: `npm install --production`, crea `.env` con las variables anteriores.
-3. Usa `pm2`, `systemd` o similar para mantener `node server.js` activo.
-4. No necesitas Chrome ni Puppeteer en el servidor.
+### Primera vez
+
+```bash
+git clone https://github.com/gagopinzon/openwa.git
+cd openwa
+cp .env.example .env   # editar con tus claves
+chmod +x deploy.sh
+./deploy.sh
+```
+
+El script `deploy.sh` hace: `git pull` → `npm install` → `pm2 startOrReload ecosystem.config.cjs` → `pm2 save`.
+
+### Actualizaciones
+
+Desde la carpeta del proyecto en el servidor:
+
+```bash
+./deploy.sh
+# o
+npm run deploy
+```
+
+### PM2 manual
+
+```bash
+pm2 start ecosystem.config.cjs
+pm2 logs openwa
+pm2 restart openwa
+pm2 stop openwa
+```
+
+La app carga variables desde `.env` (no se sube a git). Logs en `logs/out.log` y `logs/error.log`.
+
+### Requisitos en el servidor
+
+- Node.js 18+
+- PM2: `npm install -g pm2`
+- Opcional al boot: `pm2 startup` y luego `pm2 save`
 
 ## Archivos principales
 
