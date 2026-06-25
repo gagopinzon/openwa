@@ -1,0 +1,1143 @@
+class CVAnalyzer {
+    constructor() {
+        this.selectedFiles = [];
+        this.cvsData = [];
+        this.testMode = false;
+        this.whatsappProvider = 'openwa';
+        this.eventSource = null;
+        this.initializeElements();
+        this.attachEventListeners();
+        this.setupSendingControls();
+        this.loadConfig();
+    }
+
+    initializeElements() {
+        this.dropzone = document.getElementById('dropzone');
+        this.fileInput = document.getElementById('fileInput');
+        this.fileList = document.getElementById('fileList');
+        this.fileItems = document.getElementById('fileItems');
+        this.uploadBtn = document.getElementById('uploadBtn');
+        this.resultsSection = document.getElementById('resultsSection');
+        this.generateMessagesBtn = document.getElementById('generateMessagesBtn');
+        this.sendWhatsAppBtn = document.getElementById('sendWhatsAppBtn');
+        this.openWhatsAppBtn = document.getElementById('openWhatsAppBtn');
+        this.sendWhatsAppBtn = document.getElementById('sendWhatsAppBtn');
+        this.openWhatsAppBtn = document.getElementById('openWhatsAppBtn');
+        this.sessionSelect = document.getElementById('sessionSelect');
+        this.session1Checkbox = document.getElementById('session1Checkbox');
+        this.session2Checkbox = document.getElementById('session2Checkbox');
+        this.session3Checkbox = document.getElementById('session3Checkbox');
+        this.clearDataBtn = document.getElementById('clearDataBtn');
+        this.cvsTableBody = document.getElementById('cvsTableBody');
+        this.statusMessage = document.getElementById('statusMessage');
+        this.progressSection = document.getElementById('progressSection');
+        this.progressFill = document.getElementById('progressFill');
+        this.progressText = document.getElementById('progressText');
+        this.currentMessage = document.getElementById('currentMessage');
+        this.logContainer = document.getElementById('logContainer');
+        this.loadingOverlay = document.getElementById('loadingOverlay');
+        this.loadingText = document.getElementById('loadingText');
+
+        // Cargar el sonido de notificación
+        this.notificationSound = new Audio('/notification-ping-372479.mp3');
+        this.notificationSound.volume = 0.7; // Volumen moderado
+    }
+
+    attachEventListeners() {
+        // Dropzone events
+        this.dropzone.addEventListener('click', () => this.fileInput.click());
+        this.dropzone.addEventListener('dragover', this.handleDragOver.bind(this));
+        this.dropzone.addEventListener('dragleave', this.handleDragLeave.bind(this));
+        this.dropzone.addEventListener('drop', this.handleDrop.bind(this));
+
+        // File input
+        this.fileInput.addEventListener('change', this.handleFileSelect.bind(this));
+
+        // Buttons
+        this.uploadBtn.addEventListener('click', this.uploadFiles.bind(this));
+        this.generateMessagesBtn.addEventListener('click', this.generateMessages.bind(this));
+        this.sendWhatsAppBtn.addEventListener('click', this.sendWhatsApp.bind(this));
+        this.openWhatsAppBtn.addEventListener('click', this.openWhatsApp.bind(this));
+        this.clearDataBtn.addEventListener('click', this.clearData.bind(this));
+    }
+
+    /** Devuelve array de sessionId de los checkboxes marcados (ej: ['session1','session3']) */
+    getSelectedSessionIds() {
+        const ids = [];
+        const checkboxes = [
+            this.session1Checkbox,
+            this.session2Checkbox,
+            this.session3Checkbox
+        ].filter(Boolean);
+        checkboxes.forEach(cb => {
+            if (cb.checked && cb.value) ids.push(cb.value);
+        });
+        return ids;
+    }
+
+    async loadConfig() {
+        try {
+            const response = await fetch('/config');
+            const config = await response.json();
+
+            if (config.success) {
+                this.testMode = config.testMode;
+                this.whatsappProvider = config.whatsappProvider || 'openwa';
+                this.updateTestModeDisplay();
+            }
+        } catch (error) {
+            console.error('Error cargando configuración:', error);
+        }
+    }
+
+    updateTestModeDisplay() {
+        const footer = document.querySelector('footer');
+        const isOpenWA = this.whatsappProvider === 'openwa';
+
+        // Mostrar u ocultar el botón de verificar sesiones según el modo
+        if (this.openWhatsAppBtn) {
+            this.openWhatsAppBtn.style.display = this.testMode ? 'none' : 'inline-block';
+            if (!this.testMode && isOpenWA) {
+                this.openWhatsAppBtn.textContent = 'Verificar sesiones OpenWA';
+            }
+        }
+
+        if (this.testMode) {
+            footer.innerHTML = `
+                <div style="background: #fef3c7; color: #92400e; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #fbbf24;">
+                    🧪 <strong>Modo de Prueba Activado</strong><br>
+                    Los mensajes de WhatsApp se simularán. No se enviarán por OpenWA.
+                </div>
+                <p>Asegúrate de tener configurada tu API key de DeepSeek</p>
+                <p>Para cambiar a modo producción, edita TEST_MODE=false en el archivo .env</p>
+            `;
+        } else if (isOpenWA) {
+            footer.innerHTML = `
+                <div style="background: #dbeafe; color: #1e40af; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #93c5fd;">
+                    <strong>OpenWA</strong><br>
+                    Los mensajes se envían vía API OpenWA. Verifica que las sesiones estén conectadas en el dashboard antes de enviar.
+                </div>
+                <div style="background: #d1fae5; color: #065f46; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #10b981;">
+                    🚀 <strong>Modo Producción</strong><br>
+                    Los mensajes se enviarán realmente por WhatsApp.
+                </div>
+                <p>Asegúrate de tener configurada tu API key de DeepSeek y las variables OPENWA_* en .env</p>
+            `;
+        } else {
+            footer.innerHTML = `
+                <div style="background: #d1fae5; color: #065f46; padding: 12px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #10b981;">
+                    🚀 <strong>Modo Producción</strong><br>
+                    Los mensajes se enviarán realmente por WhatsApp.
+                </div>
+                <p>Asegúrate de tener configurada tu API key de DeepSeek</p>
+                <p>WhatsApp se abrirá automáticamente cuando envíes mensajes</p>
+            `;
+        }
+    }
+
+    handleDragOver(e) {
+        e.preventDefault();
+        this.dropzone.classList.add('dragover');
+    }
+
+    handleDragLeave(e) {
+        e.preventDefault();
+        this.dropzone.classList.remove('dragover');
+    }
+
+    handleDrop(e) {
+        e.preventDefault();
+        this.dropzone.classList.remove('dragover');
+        const files = Array.from(e.dataTransfer.files).filter(file =>
+            file.type === 'application/pdf'
+        );
+        this.processSelectedFiles(files);
+    }
+
+    handleFileSelect(e) {
+        const files = Array.from(e.target.files).filter(file =>
+            file.type === 'application/pdf'
+        );
+        this.processSelectedFiles(files);
+    }
+
+    processSelectedFiles(files) {
+        if (files.length === 0) {
+            this.showStatus('Solo se pueden cargar archivos PDF', 'error');
+            return;
+        }
+
+        if (files.length > 100) {
+            this.showStatus('Máximo 100 archivos por carga', 'error');
+            return;
+        }
+
+        // Verificar tamaño de archivos
+        const oversizedFiles = files.filter(file => file.size > 10 * 1024 * 1024);
+        if (oversizedFiles.length > 0) {
+            this.showStatus(`Los siguientes archivos exceden 10MB: ${oversizedFiles.map(f => f.name).join(', ')}`, 'error');
+            return;
+        }
+
+        this.selectedFiles = files;
+        this.displaySelectedFiles();
+        this.showStatus(`${files.length} archivos seleccionados`, 'success');
+    }
+
+    displaySelectedFiles() {
+        this.fileItems.innerHTML = '';
+        this.selectedFiles.forEach((file, index) => {
+            const li = document.createElement('li');
+            li.innerHTML = `
+                <strong>${index + 1}.</strong> ${file.name} 
+                <span style="color: #7f8c8d;">(${(file.size / 1024 / 1024).toFixed(2)} MB)</span>
+            `;
+            this.fileItems.appendChild(li);
+        });
+        this.fileList.style.display = 'block';
+    }
+
+    async uploadFiles() {
+        if (this.selectedFiles.length === 0) {
+            this.showStatus('No hay archivos seleccionados', 'error');
+            return;
+        }
+
+        this.showLoading('Procesando archivos PDF...');
+
+        const formData = new FormData();
+        this.selectedFiles.forEach(file => {
+            formData.append('cvs', file);
+        });
+
+        try {
+            const response = await fetch('/upload-cvs', {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.cvsData = result.cvs;
+                this.displayResults();
+                this.showStatus(result.message, 'success');
+                this.generateMessagesBtn.disabled = false;
+            } else {
+                this.showStatus(`Error: ${result.message}`, 'error');
+            }
+
+        } catch (error) {
+            console.error('Error uploading files:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+        } finally {
+            this.hideLoading();
+        }
+    }
+
+    displayResults() {
+        this.cvsTableBody.innerHTML = '';
+
+        this.cvsData.forEach((cv, index) => {
+            const row = document.createElement('tr');
+            row.className = 'fade-in';
+
+            const estadoClass = cv.procesado ? 'procesado' : 'error';
+            const estadoText = cv.procesado ? 'Procesado' : 'Error';
+
+            const mensajeId = `mensaje-${index}`;
+            const mensajeTexto = cv.mensajeIA || 'Pendiente de generar...';
+
+            // Escapar HTML para seguridad pero preservar saltos de línea
+            const mensajeEscapado = mensajeTexto
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+
+            // Escapar HTML para nombre, teléfono y experiencia
+            const nombreEscapado = (cv.nombre || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+            const telefonoEscapado = (cv.telefono || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+            const experienciaEscapada = (cv.experiencia || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+
+            row.innerHTML = `
+                <td>${cv.archivoOriginal}</td>
+                <td class="nombre-cell editable-cell">
+                    <div class="editable-display" id="nombre-display-${index}" data-field="nombre" data-index="${index}">${nombreEscapado || '(sin nombre)'}</div>
+                    <input type="text" class="editable-input" id="nombre-input-${index}" data-field="nombre" data-index="${index}" value="${(cv.nombre || '').replace(/"/g, '&quot;')}" style="display: none;">
+                </td>
+                <td class="telefono-cell editable-cell">
+                    <div class="editable-display" id="telefono-display-${index}" data-field="telefono" data-index="${index}">${telefonoEscapado || '(sin teléfono)'}</div>
+                    <input type="text" class="editable-input" id="telefono-input-${index}" data-field="telefono" data-index="${index}" value="${(cv.telefono || '').replace(/"/g, '&quot;')}" style="display: none;">
+                </td>
+                <td class="experiencia-cell editable-cell">
+                    <div class="editable-display" id="experiencia-display-${index}" data-field="experiencia" data-index="${index}">${experienciaEscapada || '(sin experiencia)'}</div>
+                    <textarea class="editable-input editable-textarea" id="experiencia-input-${index}" data-field="experiencia" data-index="${index}" style="display: none;" rows="3">${(cv.experiencia || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>
+                </td>
+                <td class="mensaje-ia-cell">
+                    <div class="mensaje-display" id="display-${mensajeId}">${mensajeEscapado}</div>
+                    <textarea class="mensaje-edit" id="edit-${mensajeId}" style="display: none;" rows="6">${mensajeTexto}</textarea>
+                </td>
+                <td class="acciones-cell">
+                    <button class="btn-edit-mensaje" data-index="${index}" data-mensaje-id="${mensajeId}" title="Editar mensaje">
+                        ✏️ Editar
+                    </button>
+                    <button class="btn-save-mensaje" data-index="${index}" data-mensaje-id="${mensajeId}" style="display: none;" title="Guardar cambios">
+                        💾 Guardar
+                    </button>
+                    <button class="btn-cancel-edit" data-index="${index}" data-mensaje-id="${mensajeId}" style="display: none;" title="Cancelar">
+                        ❌ Cancelar
+                    </button>
+                </td>
+                <td class="estado ${estadoClass}">${estadoText}</td>
+            `;
+
+            this.cvsTableBody.appendChild(row);
+
+            // Configurar edición con doble clic para nombre, teléfono y experiencia
+            // Los elementos ya están en el DOM después de appendChild e innerHTML
+            this.setupEditableField(row, index, 'nombre', cv.nombre || '');
+            this.setupEditableField(row, index, 'telefono', cv.telefono || '');
+            this.setupEditableField(row, index, 'experiencia', cv.experiencia || '');
+
+            // Agregar event listeners para editar/guardar mensaje
+            const editBtn = row.querySelector('.btn-edit-mensaje');
+            const saveBtn = row.querySelector('.btn-save-mensaje');
+            const cancelBtn = row.querySelector('.btn-cancel-edit');
+            const displayDiv = row.querySelector(`#display-${mensajeId}`);
+            const editTextarea = row.querySelector(`#edit-${mensajeId}`);
+
+            editBtn.addEventListener('click', () => {
+                displayDiv.style.display = 'none';
+                editTextarea.style.display = 'block';
+                editBtn.style.display = 'none';
+                saveBtn.style.display = 'inline-block';
+                cancelBtn.style.display = 'inline-block';
+                editTextarea.focus();
+            });
+
+            saveBtn.addEventListener('click', () => {
+                const nuevoMensaje = editTextarea.value.trim();
+                if (nuevoMensaje) {
+                    // Actualizar en cvsData
+                    this.cvsData[index].mensajeIA = nuevoMensaje;
+                    // Actualizar display (escapar HTML pero preservar saltos de línea)
+                    const mensajeEscapado = nuevoMensaje
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#039;');
+                    displayDiv.innerHTML = mensajeEscapado;
+                    displayDiv.style.display = 'block';
+                    editTextarea.style.display = 'none';
+                    editBtn.style.display = 'inline-block';
+                    saveBtn.style.display = 'none';
+                    cancelBtn.style.display = 'none';
+                    this.showStatus('Mensaje guardado correctamente', 'success');
+                } else {
+                    this.showStatus('El mensaje no puede estar vacío', 'error');
+                }
+            });
+
+            cancelBtn.addEventListener('click', () => {
+                // Restaurar valor original
+                editTextarea.value = mensajeTexto;
+                displayDiv.style.display = 'block';
+                editTextarea.style.display = 'none';
+                editBtn.style.display = 'inline-block';
+                saveBtn.style.display = 'none';
+                cancelBtn.style.display = 'none';
+            });
+        });
+
+        this.resultsSection.style.display = 'block';
+    }
+
+    /**
+     * Configura un campo editable con doble clic
+     * @param {HTMLElement} row - Fila de la tabla
+     * @param {number} index - Índice del CV en cvsData
+     * @param {string} fieldName - Nombre del campo ('nombre', 'telefono', 'experiencia')
+     * @param {string} originalValue - Valor original del campo
+     */
+    setupEditableField(row, index, fieldName, originalValue) {
+        // Intentar múltiples formas de encontrar los elementos
+        const displayDiv = row.querySelector(`#${fieldName}-display-${index}`) || 
+                          row.querySelector(`[data-field="${fieldName}"][data-index="${index}"].editable-display`);
+        const inputElement = row.querySelector(`#${fieldName}-input-${index}`) || 
+                            row.querySelector(`[data-field="${fieldName}"][data-index="${index}"].editable-input`);
+        const isTextarea = fieldName === 'experiencia';
+
+        if (!displayDiv || !inputElement) {
+            console.error(`No se encontraron elementos para ${fieldName}-${index}`, { 
+                displayDiv, 
+                inputElement,
+                rowHTML: row.innerHTML.substring(0, 200)
+            });
+            return;
+        }
+
+        // Debug: verificar que los elementos existen
+        if (displayDiv && inputElement) {
+            console.log(`✅ Campo editable configurado: ${fieldName}-${index}`);
+        }
+
+        // Guardar valor original
+        let savedValue = originalValue;
+        let isCancelling = false;
+
+        // Función para escapar HTML
+        const escapeHtml = (text) => {
+            return (text || '').replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        };
+
+        // Función para activar modo edición
+        const activateEdit = () => {
+            displayDiv.style.display = 'none';
+            inputElement.style.display = 'block';
+            inputElement.value = savedValue;
+            inputElement.focus();
+            inputElement.select();
+            isCancelling = false;
+        };
+
+        // Función para guardar cambios
+        const saveEdit = () => {
+            if (isCancelling) return;
+            
+            const newValue = inputElement.value.trim();
+            savedValue = newValue;
+            
+            // Actualizar en cvsData
+            this.cvsData[index][fieldName] = newValue;
+            
+            // Actualizar display
+            displayDiv.innerHTML = escapeHtml(newValue) || '(vacío)';
+            displayDiv.style.display = 'block';
+            inputElement.style.display = 'none';
+            
+            this.showStatus(`${fieldName.charAt(0).toUpperCase() + fieldName.slice(1)} guardado correctamente`, 'success');
+        };
+
+        // Función para cancelar edición
+        const cancelEdit = () => {
+            isCancelling = true;
+            inputElement.value = savedValue;
+            displayDiv.style.display = 'block';
+            inputElement.style.display = 'none';
+            // Resetear flag después de un pequeño delay
+            setTimeout(() => {
+                isCancelling = false;
+            }, 100);
+        };
+
+        // Doble clic para editar
+        displayDiv.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            console.log(`Doble clic detectado en ${fieldName}-${index}`);
+            activateEdit();
+        });
+
+        // Manejar teclas
+        inputElement.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !isTextarea) {
+                e.preventDefault();
+                saveEdit();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelEdit();
+            } else if (e.key === 'Enter' && e.ctrlKey && isTextarea) {
+                // Ctrl+Enter para guardar en textarea
+                e.preventDefault();
+                saveEdit();
+            }
+        });
+
+        // Guardar al perder el foco (pero no si se canceló)
+        inputElement.addEventListener('blur', () => {
+            // Pequeño delay para permitir que Escape se procese primero
+            setTimeout(() => {
+                if (!isCancelling) {
+                    saveEdit();
+                }
+            }, 200);
+        });
+
+        // Prevenir que el doble clic se propague
+        displayDiv.style.cursor = 'pointer';
+        displayDiv.title = 'Doble clic para editar';
+    }
+
+    async generateMessages() {
+        if (this.cvsData.length === 0) {
+            this.showStatus('No hay CVs procesados', 'error');
+            return;
+        }
+
+        this.showLoading('Generando mensajes personalizados con IA...');
+        this.generateMessagesBtn.disabled = true;
+
+        try {
+            const response = await fetch('/generate-messages', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.cvsData = result.cvs;
+                this.displayResults();
+                this.showStatus(result.message, 'success');
+                this.sendWhatsAppBtn.disabled = false;
+            } else {
+                this.showStatus(`Error: ${result.message}`, 'error');
+            }
+
+        } catch (error) {
+            console.error('Error generating messages:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+        } finally {
+            this.hideLoading();
+            this.generateMessagesBtn.disabled = false;
+        }
+    }
+
+    async sendWhatsApp() {
+        const cvsToSend = this.cvsData.filter(cv =>
+            cv.procesado &&
+            cv.mensajeIA &&
+            cv.mensajeIA.trim() !== '' &&
+            cv.telefono !== 'No encontrado'
+        );
+
+        if (cvsToSend.length === 0) {
+            this.showStatus('No hay CVs válidos para enviar', 'error');
+            return;
+        }
+
+        const selectedSessions = this.getSelectedSessionIds();
+        let confirmMessage = `¿Estás seguro de enviar ${cvsToSend.length} mensajes por WhatsApp?\n\n`;
+        if (this.testMode) {
+            confirmMessage += '🧪 MODO PRUEBA: Los mensajes se simularán (no se abrirá WhatsApp Web).';
+        } else {
+            if (selectedSessions.length > 1) {
+                confirmMessage += `🔄 Se usarán ${selectedSessions.length} sesiones (${selectedSessions.map(s => s.replace('session', 'Sesión ')).join(', ')}) simultáneamente.\n`;
+                confirmMessage += 'Los mensajes se repartirán entre las sesiones seleccionadas.\n';
+                confirmMessage += 'Asegúrate de tener esas sesiones iniciadas.';
+            } else if (selectedSessions.length === 1) {
+                confirmMessage += `Se usará solo ${selectedSessions[0].replace('session', 'Sesión ')}.\n`;
+                confirmMessage += 'Esto abrirá WhatsApp Web y enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
+            } else {
+                const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+                confirmMessage += `Se usará la sesión del selector: ${sessionId.replace('session', 'Sesión ')}.\n`;
+                confirmMessage += 'Esto abrirá WhatsApp Web y enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
+            }
+        }
+
+        if (!confirm(confirmMessage)) {
+            return;
+        }
+
+        // Deshabilitar botones y mostrar controles inmediatamente
+        this.sendWhatsAppBtn.disabled = true;
+        this.generateMessagesBtn.disabled = true;
+
+        // Mostrar controles de envío inmediatamente (sin esperar respuesta del servidor)
+        this.showSendingControls();
+        this.showStatus(this.testMode ? 'Simulando envío...' : 'Iniciando envío de mensajes...', 'info');
+
+        try {
+            // Enviar los CVs con mensajes editados al servidor
+            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+
+            const response = await fetch('/send-whatsapp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    cvs: this.cvsData,
+                    sessionId: sessionId,
+                    selectedSessions: selectedSessions.length > 0 ? selectedSessions : undefined
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                let message = result.message;
+                if (result.testMode) {
+                    message += ' (Modo de Prueba)';
+                }
+                this.showStatus(message, 'success');
+
+                // Reproducir sonido inicial para el primer mensaje
+                this.playNotificationSound();
+
+                this.showProgress(cvsToSend.length);
+
+                // Simular progreso (en una implementación real, esto vendría del servidor)
+                this.simulateProgress(result.results || []);
+            } else {
+                this.showStatus(`Error: ${result.message}`, 'error');
+                this.sendWhatsAppBtn.disabled = false;
+                this.generateMessagesBtn.disabled = false;
+                this.hideSendingControls();
+            }
+
+        } catch (error) {
+            console.error('Error sending WhatsApp:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+            this.sendWhatsAppBtn.disabled = false;
+            this.generateMessagesBtn.disabled = false;
+            this.hideSendingControls();
+        }
+    }
+
+    showProgress(total) {
+        this.progressSection.style.display = 'block';
+        this.progressFill.style.width = '0%';
+        this.progressText.textContent = `0 / ${total}`;
+        this.currentMessage.innerHTML = 'Preparando envío...';
+        this.logContainer.innerHTML = '';
+
+        // Los controles ya se muestran en showSendingControls() antes de llamar a showProgress
+        // this.showSendingControls(); // Ya se muestra antes
+
+        // Ocultar vista previa del mensaje inicialmente
+        this.hideMessagePreview();
+
+        // Conectar a eventos en tiempo real para recibir notificaciones
+        this.connectToEvents();
+    }
+
+    simulateProgress(results) {
+        let current = 0;
+        const total = results.length;
+
+        const interval = setInterval(() => {
+            if (current >= total) {
+                clearInterval(interval);
+                this.addLogEntry('Envío completado', 'success');
+                this.hideSendingControls(); // Ocultar controles al finalizar
+                this.disconnectFromEvents(); // Desconectar eventos cuando termine el envío
+                this.sendWhatsAppBtn.disabled = false; // Re-habilitar botones
+                this.generateMessagesBtn.disabled = false;
+                return;
+            }
+
+            const result = results[current];
+            const progress = ((current + 1) / total) * 100;
+
+            // Reproducir sonido cuando está listo para enviar el siguiente mensaje
+            if (current > 0) {
+                this.playNotificationSound();
+            }
+
+            this.progressFill.style.width = `${progress}%`;
+            this.progressText.textContent = `${current + 1} / ${total}`;
+            this.currentMessage.innerHTML = `
+                <strong>Enviando a:</strong> ${result.nombre}<br>
+                <strong>Teléfono:</strong> ${result.telefono}<br>
+                <strong>Estado:</strong> ${result.success ? 'Enviado' : 'Error'}
+            `;
+
+            // Mostrar mensaje que se está enviando
+            if (result.mensajeIA) {
+                this.showMessagePreview(result.mensajeIA);
+            }
+
+            this.addLogEntry(
+                `${result.nombre} (${result.telefono}) - ${result.success ? 'Enviado' : 'Error'}`,
+                result.success ? 'success' : 'error'
+            );
+
+            current++;
+        }, 500); // Actualizar cada 500ms para simular progreso
+    }
+
+    addLogEntry(message, type = 'info') {
+        const logEntry = document.createElement('div');
+        logEntry.className = `log-entry ${type}`;
+        logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        this.logContainer.appendChild(logEntry);
+        this.logContainer.scrollTop = this.logContainer.scrollHeight;
+    }
+
+    async openWhatsApp() {
+        if (this.testMode) {
+            this.showStatus('No se puede verificar sesiones OpenWA en modo de prueba', 'error');
+            return;
+        }
+
+        this.openWhatsAppBtn.disabled = true;
+
+        try {
+            const response = await fetch('/open-whatsapp', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ openAllSessions: true })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                let msg = result.message || 'Listo';
+                if (Array.isArray(result.results) && result.results.length > 1) {
+                    const failed = result.results.filter((r) => !r.success);
+                    if (failed.length) {
+                        msg += ` Fallos: ${failed.map((f) => f.sessionId + (f.error ? ` (${f.error})` : '')).join(', ')}`;
+                    }
+                }
+                this.showStatus(msg, 'success');
+            } else {
+                this.showStatus(`Error: ${result.error || result.message}`, 'error');
+            }
+
+        } catch (error) {
+            console.error('Error opening WhatsApp:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+        } finally {
+            this.openWhatsAppBtn.disabled = false;
+        }
+    }
+
+    async clearData() {
+        if (confirm('¿Estás seguro de limpiar todos los datos?')) {
+            try {
+                const response = await fetch('/clear-data', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    this.cvsData = [];
+                    this.selectedFiles = [];
+                    this.fileList.style.display = 'none';
+                    this.resultsSection.style.display = 'none';
+                    this.progressSection.style.display = 'none';
+                    this.generateMessagesBtn.disabled = true;
+                    this.sendWhatsAppBtn.disabled = true;
+                    this.fileInput.value = '';
+                    this.hideSendingControls();
+                    this.hideMessagePreview();
+                    this.disconnectFromEvents(); // Desconectar eventos al limpiar
+                    this.showStatus('Datos limpiados correctamente', 'success');
+                }
+            } catch (error) {
+                console.error('Error clearing data:', error);
+                this.showStatus('Error limpiando datos', 'error');
+            }
+        }
+    }
+
+    showStatus(message, type = 'info') {
+        this.statusMessage.textContent = message;
+        this.statusMessage.className = `status-message ${type}`;
+        this.statusMessage.style.display = 'block';
+
+        // Auto-hide después de 5 segundos
+        setTimeout(() => {
+            this.statusMessage.style.display = 'none';
+        }, 5000);
+    }
+
+    showLoading(text = 'Procesando...') {
+        this.loadingText.textContent = text;
+        this.loadingOverlay.style.display = 'flex';
+    }
+
+    hideLoading() {
+        this.loadingOverlay.style.display = 'none';
+    }
+
+    // Configurar controles de envío
+    setupSendingControls() {
+        this.pauseBtn = document.getElementById('pauseBtn');
+        this.resumeBtn = document.getElementById('resumeBtn');
+        this.pauseTimeBtn = document.getElementById('pauseTimeBtn');
+        this.resumeTimeBtn = document.getElementById('resumeTimeBtn');
+        this.skipWaitBtn = document.getElementById('skipWaitBtn');
+        this.abortBtn = document.getElementById('abortBtn');
+        this.sendingControls = document.getElementById('sendingControls');
+        this.messagePreview = document.getElementById('messagePreview');
+        this.messageContent = document.getElementById('messageContent');
+
+        console.log('setupSendingControls - sendingControls encontrado:', !!this.sendingControls);
+        console.log('setupSendingControls - pauseBtn encontrado:', !!this.pauseBtn);
+        console.log('setupSendingControls - pauseTimeBtn encontrado:', !!this.pauseTimeBtn);
+        console.log('setupSendingControls - skipWaitBtn encontrado:', !!this.skipWaitBtn);
+
+        if (this.pauseBtn) {
+            this.pauseBtn.addEventListener('click', () => this.pauseSending());
+        }
+        if (this.resumeBtn) {
+            this.resumeBtn.addEventListener('click', () => this.resumeSending());
+        }
+        if (this.pauseTimeBtn) {
+            this.pauseTimeBtn.addEventListener('click', () => this.pauseTime());
+        }
+        if (this.resumeTimeBtn) {
+            this.resumeTimeBtn.addEventListener('click', () => this.resumeTime());
+        }
+        if (this.skipWaitBtn) {
+            this.skipWaitBtn.addEventListener('click', () => this.skipWaitSending());
+        }
+        if (this.abortBtn) {
+            this.abortBtn.addEventListener('click', () => this.abortSending());
+        }
+    }
+
+    // Mostrar controles de envío (solo en producción)
+    showSendingControls() {
+        console.log('showSendingControls llamado, testMode:', this.testMode);
+        console.log('sendingControls existe:', !!this.sendingControls);
+
+        // Verificar si estamos en modo de prueba
+        if (!this.testMode) {
+            if (this.sendingControls) {
+                this.sendingControls.style.display = 'block';
+                this.sendingControls.style.visibility = 'visible';
+                // Asegurar que los botones estén en el estado correcto
+                if (this.pauseBtn) {
+                    this.pauseBtn.style.display = 'inline-block';
+                    this.pauseBtn.style.visibility = 'visible';
+                }
+                if (this.resumeBtn) {
+                    this.resumeBtn.style.display = 'none';
+                }
+                if (this.pauseTimeBtn) {
+                    this.pauseTimeBtn.style.display = 'inline-block';
+                    this.pauseTimeBtn.style.visibility = 'visible';
+                }
+                if (this.resumeTimeBtn) {
+                    this.resumeTimeBtn.style.display = 'none';
+                }
+                if (this.skipWaitBtn) {
+                    this.skipWaitBtn.style.display = 'inline-block';
+                    this.skipWaitBtn.style.visibility = 'visible';
+                }
+                if (this.abortBtn) {
+                    this.abortBtn.style.display = 'inline-block';
+                    this.abortBtn.style.visibility = 'visible';
+                }
+                console.log('Controles configurados, display:', this.sendingControls.style.display);
+            } else {
+                console.error('sendingControls no encontrado!');
+            }
+        } else {
+            console.log('En modo prueba, no se muestran controles');
+        }
+    }
+
+    // Ocultar controles de envío
+    hideSendingControls() {
+        if (this.sendingControls) {
+            this.sendingControls.style.display = 'none';
+        }
+        if (this.messagePreview) {
+            this.messagePreview.style.display = 'none';
+        }
+    }
+
+    // Pausar envío
+    async pauseSending() {
+        try {
+            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const response = await fetch('/pause-sending', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ sessionId })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.pauseBtn.style.display = 'none';
+                this.resumeBtn.style.display = 'inline-block';
+                this.addLogEntry('⏸️ Envío pausado', 'warning');
+            } else {
+                this.showStatus(result.error, 'error');
+            }
+        } catch (error) {
+            console.error('Error pausing sending:', error);
+            this.showStatus('Error pausando envío', 'error');
+        }
+    }
+
+    // Reanudar envío
+    async resumeSending() {
+        try {
+            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const response = await fetch('/resume-sending', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ sessionId })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.pauseBtn.style.display = 'inline-block';
+                this.resumeBtn.style.display = 'none';
+                this.addLogEntry('▶️ Envío reanudado', 'success');
+            } else {
+                this.showStatus(result.error, 'error');
+            }
+        } catch (error) {
+            console.error('Error resuming sending:', error);
+            this.showStatus('Error reanudando envío', 'error');
+        }
+    }
+
+    // Pausar el tiempo de espera
+    async pauseTime() {
+        try {
+            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const response = await fetch('/pause-time', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ sessionId })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.pauseTimeBtn.style.display = 'none';
+                this.resumeTimeBtn.style.display = 'inline-block';
+                this.addLogEntry('⏸️  Tiempo de espera pausado', 'warning');
+                this.showStatus('Tiempo de espera pausado', 'success');
+            } else {
+                this.showStatus(result.error, 'error');
+            }
+        } catch (error) {
+            console.error('Error pausing time:', error);
+            this.showStatus('Error pausando tiempo', 'error');
+        }
+    }
+
+    // Reanudar el tiempo de espera
+    async resumeTime() {
+        try {
+            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const response = await fetch('/resume-time', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ sessionId })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.pauseTimeBtn.style.display = 'inline-block';
+                this.resumeTimeBtn.style.display = 'none';
+                this.addLogEntry('▶️ Tiempo de espera reanudado', 'success');
+                this.showStatus('Tiempo de espera reanudado', 'success');
+            } else {
+                this.showStatus(result.error, 'error');
+            }
+        } catch (error) {
+            console.error('Error resuming time:', error);
+            this.showStatus('Error reanudando tiempo', 'error');
+        }
+    }
+
+    // Enviar siguiente mensaje manualmente (saltar espera)
+    async skipWaitSending() {
+        try {
+            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const response = await fetch('/skip-wait', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ sessionId })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                // Reanudar el tiempo si estaba pausado
+                this.pauseTimeBtn.style.display = 'inline-block';
+                this.resumeTimeBtn.style.display = 'none';
+                this.addLogEntry('⏩ Saltando espera - el siguiente mensaje se enviará inmediatamente', 'info');
+                this.showStatus('El siguiente mensaje se enviará inmediatamente', 'success');
+            } else {
+                this.showStatus(result.error, 'error');
+            }
+        } catch (error) {
+            console.error('Error skipping wait:', error);
+            this.showStatus('Error saltando espera', 'error');
+        }
+    }
+
+    // Abortar envío
+    async abortSending() {
+        if (confirm('¿Estás seguro de abortar el envío? Esto no se puede deshacer.')) {
+            try {
+                const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+                const response = await fetch('/abort-sending', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ sessionId })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    this.addLogEntry('🛑 Envío abortado por el usuario', 'error');
+                    // Resetear estados de los botones
+                    if (this.pauseTimeBtn) {
+                        this.pauseTimeBtn.style.display = 'inline-block';
+                    }
+                    if (this.resumeTimeBtn) {
+                        this.resumeTimeBtn.style.display = 'none';
+                    }
+                    // Re-habilitar botones principales
+                    this.sendWhatsAppBtn.disabled = false;
+                    this.generateMessagesBtn.disabled = false;
+                    this.hideSendingControls();
+                    this.disconnectFromEvents(); // Desconectar eventos al abortar
+                } else {
+                    this.showStatus(result.error, 'error');
+                }
+            } catch (error) {
+                console.error('Error aborting sending:', error);
+                this.showStatus('Error abortando envío', 'error');
+            }
+        }
+    }
+
+    // Mostrar mensaje que se está enviando
+    showMessagePreview(mensaje) {
+        if (this.messagePreview && this.messageContent) {
+            this.messageContent.textContent = mensaje;
+            this.messagePreview.style.display = 'block';
+        }
+    }
+
+    // Ocultar vista previa del mensaje
+    hideMessagePreview() {
+        if (this.messagePreview) {
+            this.messagePreview.style.display = 'none';
+        }
+    }
+
+    // Reproducir sonido de notificación
+    playNotificationSound() {
+        if (this.notificationSound) {
+            // Resetear el audio al inicio para poder reproducirlo múltiples veces
+            this.notificationSound.currentTime = 0;
+            this.notificationSound.play().catch(error => {
+                console.log('No se pudo reproducir el sonido:', error);
+                // Algunos navegadores requieren interacción del usuario primero
+            });
+        }
+    }
+
+    // Conectar a Server-Sent Events para recibir notificaciones en tiempo real
+    connectToEvents() {
+        // Cerrar conexión anterior si existe
+        if (this.eventSource) {
+            this.eventSource.close();
+        }
+
+        // Crear nueva conexión SSE
+        this.eventSource = new EventSource('/events');
+
+        // Escuchar evento cuando está listo para enviar el siguiente mensaje
+        this.eventSource.addEventListener('readyToSend', (event) => {
+            const data = JSON.parse(event.data);
+
+            // Filtrar eventos por sesión seleccionada
+            const currentSessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            if (data.sessionId && data.sessionId !== currentSessionId) {
+                return; // Ignorar eventos de otras sesiones
+            }
+
+            console.log('🔔 Listo para enviar mensaje:', data);
+
+            // Reproducir sonido de notificación
+            this.playNotificationSound();
+
+            // Actualizar la interfaz si es necesario
+            if (data.nombre) {
+                this.addLogEntry(`🔔 Listo para enviar a ${data.nombre}`, 'info');
+                // Actualizar el mensaje actual
+                if (this.currentMessage) {
+                    this.currentMessage.innerHTML = `
+                        <strong>Próximo envío a:</strong> ${data.nombre}<br>
+                        <strong>Teléfono:</strong> ${data.telefono}<br>
+                        <strong>Estado:</strong> Listo para enviar
+                    `;
+                }
+                // Actualizar progreso si está disponible
+                if (this.progressText && data.total) {
+                    this.progressText.textContent = `${data.current} / ${data.total}`;
+                    const progress = (data.current / data.total) * 100;
+                    if (this.progressFill) {
+                        this.progressFill.style.width = `${progress}%`;
+                    }
+                }
+            }
+        });
+
+        // Manejar errores de conexión
+        this.eventSource.onerror = (error) => {
+            console.error('Error en conexión de eventos:', error);
+            // Intentar reconectar después de un delay
+            setTimeout(() => {
+                if (this.eventSource && this.eventSource.readyState === EventSource.CLOSED) {
+                    this.connectToEvents();
+                }
+            }, 5000);
+        };
+    }
+
+    // Desconectar de eventos
+    disconnectFromEvents() {
+        if (this.eventSource) {
+            this.eventSource.close();
+            this.eventSource = null;
+        }
+    }
+}
+
+// Inicializar la aplicación cuando el DOM esté listo
+document.addEventListener('DOMContentLoaded', () => {
+    new CVAnalyzer();
+});
+
+// Las sesiones WhatsApp se gestionan en el dashboard de OpenWA (no hay Chrome local que cerrar)
+window.closeWhatsApp = async function () {
+    alert(
+        'Las sesiones WhatsApp se gestionan en el dashboard de OpenWA (openwa.protalentconnections.com). ' +
+            'Este botón no aplica en la versión OpenWA.'
+    );
+};

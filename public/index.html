@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Análisis de CVs con IA</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Análisis de CVs con IA</h1>
+            <p class="subtitle">Carga tus CVs de OCC, genera mensajes personalizados y envíalos por WhatsApp</p>
+            <div style="text-align: center; margin-top: 20px;">
+                <div class="session-selector" style="margin-bottom: 15px;">
+                    <label for="sessionSelect" style="font-weight: bold; margin-right: 10px;">Sesión:</label>
+                    <select id="sessionSelect" class="form-select"
+                        style="padding: 8px; border-radius: 4px; border: 1px solid #ccc;">
+                        <option value="session1">Sesión 1</option>
+                        <option value="session2">Sesión 2</option>
+                        <option value="session3">Sesión 3</option>
+                    </select>
+                </div>
+                <button id="openWhatsAppBtn" class="btn btn-primary">
+                    Verificar sesiones OpenWA
+                </button>
+            </div>
+        </header>
+
+        <!-- Sección 1: Carga de archivos -->
+        <section class="upload-section">
+            <h2>Cargar CVs</h2>
+            <div class="dropzone" id="dropzone">
+                <div class="dropzone-content">
+                    <div class="upload-icon">📄</div>
+                    <p class="dropzone-text">
+                        Arrastra tus archivos PDF aquí<br>
+                        o <span class="click-here">haz clic para seleccionar</span>
+                    </p>
+                    <p class="dropzone-hint">Máximo 100 archivos, 10MB cada uno</p>
+                </div>
+                <input type="file" id="fileInput" multiple accept=".pdf" style="display: none;">
+            </div>
+
+            <div class="file-list" id="fileList" style="display: none;">
+                <h3>Archivos seleccionados</h3>
+                <ul id="fileItems"></ul>
+                <button id="uploadBtn" class="btn btn-primary">Procesar</button>
+            </div>
+        </section>
+
+        <!-- Sección 2: Tabla de resultados -->
+        <section class="results-section" id="resultsSection" style="display: none;">
+            <h2>Resultados</h2>
+
+            <div class="controls">
+                <button id="generateMessagesBtn" class="btn btn-secondary" disabled>
+                    ✨ Generar Mensajes
+                </button>
+                <button id="sendWhatsAppBtn" class="btn btn-success" disabled>
+                    Enviar por WhatsApp
+                </button>
+                <button id="clearDataBtn" class="btn btn-danger">
+                    Limpiar
+                </button>
+            </div>
+
+            <!-- Enviar mensajes con sesiones seleccionadas -->
+            <div class="sending-options" style="margin-bottom: 15px; text-align: center;">
+                <p style="font-weight: 600; color: #0369a1; margin-bottom: 10px;">Enviar mensajes con sesiones:</p>
+                <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 12px 20px;">
+                    <label style="display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;">
+                        <input type="checkbox" id="session1Checkbox" class="session-send-checkbox" value="session1" style="margin-right: 8px; width: 18px; height: 18px;">
+                        <span style="font-weight: 500; color: #0369a1;">Sesión 1</span>
+                    </label>
+                    <label style="display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;">
+                        <input type="checkbox" id="session2Checkbox" class="session-send-checkbox" value="session2" style="margin-right: 8px; width: 18px; height: 18px;">
+                        <span style="font-weight: 500; color: #0369a1;">Sesión 2</span>
+                    </label>
+                    <label style="display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;">
+                        <input type="checkbox" id="session3Checkbox" class="session-send-checkbox" value="session3" style="margin-right: 8px; width: 18px; height: 18px;">
+                        <span style="font-weight: 500; color: #0369a1;">Sesión 3</span>
+                    </label>
+                </div>
+                <p style="font-size: 12px; color: #64748b; margin-top: 8px;">Si no marcas ninguna, se usará la sesión del selector superior.</p>
+            </div>
+
+            <div class="sending-controls" id="sendingControls" style="display: none;">
+                <button id="pauseBtn" class="btn btn-warning">
+                    ⏸️ Pausar
+                </button>
+                <button id="resumeBtn" class="btn btn-secondary" style="display: none;">
+                    ▶️ Reanudar
+                </button>
+                <button id="pauseTimeBtn" class="btn btn-warning">
+                    ⏸️ Pausar Tiempo
+                </button>
+                <button id="resumeTimeBtn" class="btn btn-secondary" style="display: none;">
+                    ▶️ Reanudar Tiempo
+                </button>
+                <button id="skipWaitBtn" class="btn btn-info">
+                    ⏩ Enviar Siguiente
+                </button>
+                <button id="abortBtn" class="btn btn-danger">
+                    🛑 Abortar
+                </button>
+            </div>
+
+            <div class="status-message" id="statusMessage"></div>
+
+            <div class="table-container">
+                <table class="cvs-table" id="cvsTable">
+                    <thead>
+                        <tr>
+                            <th>Archivo</th>
+                            <th>Nombre</th>
+                            <th>Teléfono</th>
+                            <th>Experiencia</th>
+                            <th>Mensaje IA</th>
+                            <th>Acciones</th>
+                            <th>Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cvsTableBody">
+                        <!-- Los datos se cargarán dinámicamente -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Sección 3: Progreso de envío -->
+        <section class="progress-section" id="progressSection" style="display: none;">
+            <h2>Enviando Mensajes</h2>
+
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-text" id="progressText">0 / 0</div>
+            </div>
+            <div class="current-message" id="currentMessage"></div>
+            <div class="message-preview" id="messagePreview" style="display: none;">
+                <h4>Mensaje que se está enviando:</h4>
+                <div class="message-content" id="messageContent"></div>
+            </div>
+            <div class="log-container" id="logContainer"></div>
+        </section>
+
+        <!-- Footer -->
+        <footer>
+            <p>Asegúrate de tener configurada tu API key de DeepSeek</p>
+            <p>WhatsApp se abrirá automáticamente cuando envíes mensajes</p>
+        </footer>
+    </div>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <p id="loadingText">Procesando...</p>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
