@@ -215,8 +215,11 @@ class CVAnalyzer {
             });
         } catch (error) {
             console.error('Error listando sesiones OpenWA:', error);
-            this.openwaSessionPicker.innerHTML =
-                '<option value="">Error al cargar OpenWA (revisa OPENWA_API_KEY)</option>';
+            const hint =
+                error.message && /ENOTFOUND/i.test(error.message)
+                    ? 'OpenWA no alcanzable (revisa OPENWA_BASE_URL / DNS)'
+                    : 'Error al cargar OpenWA (revisa OPENWA_API_KEY y OPENWA_BASE_URL)';
+            this.openwaSessionPicker.innerHTML = `<option value="">${hint}</option>`;
         }
     }
 

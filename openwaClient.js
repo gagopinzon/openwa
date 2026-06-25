@@ -24,7 +24,7 @@ function normalizeOpenWASessionRow(row) {
     id: String(id),
     name: String(row.name || row.profileName || id),
     status: String(row.status || row.state || ''),
-    phoneNumber: row.phoneNumber ? String(row.phoneNumber) : ''
+    phoneNumber: row.phoneNumber || row.phone ? String(row.phoneNumber || row.phone) : ''
   };
 }
 
