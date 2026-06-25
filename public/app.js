@@ -89,6 +89,10 @@ class CVAnalyzer {
         return ids;
     }
 
+    getControlSessionId() {
+        return this.activeControlSessionId || '__roundrobin__';
+    }
+
     renderSessionUI() {
         const sessions = this.configuredSessions || [];
 
@@ -116,6 +120,13 @@ class CVAnalyzer {
         }
 
         if (this.sessionCheckboxes) {
+            const previouslyChecked = new Set(
+                [...this.sessionCheckboxes.querySelectorAll('.session-send-checkbox:checked')].map(
+                    (cb) => cb.value
+                )
+            );
+            const defaultAllChecked = !this._sessionsCheckboxesInitialized;
+
             this.sessionCheckboxes.innerHTML = '';
             sessions.forEach((s) => {
                 const label = document.createElement('label');
@@ -125,6 +136,7 @@ class CVAnalyzer {
                 cb.type = 'checkbox';
                 cb.className = 'session-send-checkbox';
                 cb.value = s.id;
+                cb.checked = defaultAllChecked || previouslyChecked.has(s.id);
                 cb.style.cssText = 'margin-right: 8px; width: 18px; height: 18px;';
                 const span = document.createElement('span');
                 span.style.cssText = 'font-weight: 500; color: #0369a1;';
@@ -133,6 +145,7 @@ class CVAnalyzer {
                 label.appendChild(span);
                 this.sessionCheckboxes.appendChild(label);
             });
+            this._sessionsCheckboxesInitialized = true;
         }
 
         if (this.sessionsList) {
@@ -743,26 +756,25 @@ class CVAnalyzer {
         }
 
         const selectedSessions = this.getSelectedSessionIds();
+        if (selectedSessions.length === 0) {
+            this.showStatus('Marca al menos una sesión para enviar mensajes', 'error');
+            return;
+        }
+
+        const sessionLabels = selectedSessions.map((s) => this.getSessionLabel(s)).join(', ');
         let confirmMessage = `¿Estás seguro de enviar ${cvsToSend.length} mensajes por WhatsApp?\n\n`;
         if (this.testMode) {
             confirmMessage += '🧪 MODO PRUEBA: Los mensajes se simularán (no se abrirá WhatsApp Web).';
         } else {
             if (selectedSessions.length > 1) {
-                confirmMessage += `🔄 Se usarán ${selectedSessions.length} sesiones (${selectedSessions.map((s) => this.getSessionLabel(s)).join(', ')}) simultáneamente.\n`;
-                confirmMessage += 'Los mensajes se repartirán entre las sesiones seleccionadas.\n';
-                confirmMessage += 'Asegúrate de tener esas sesiones verificadas en OpenWA.';
-            } else if (selectedSessions.length === 1) {
-                confirmMessage += `Se usará solo ${this.getSessionLabel(selectedSessions[0])}.\n`;
-                confirmMessage += 'Se enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
+                confirmMessage += `🔄 Round-robin entre ${selectedSessions.length} sesiones: ${sessionLabels}\n`;
+                confirmMessage += 'Mensaje 1 → sesión 1, mensaje 2 → sesión 2, y así sucesivamente.\n';
+                confirmMessage += 'Delay aleatorio de 1-5 minutos entre cada mensaje.\n';
             } else {
-                const sessionId = this.sessionSelect && this.sessionSelect.value ? this.sessionSelect.value : '';
-                if (!sessionId) {
-                    this.showStatus('Configura al menos una sesión WhatsApp antes de enviar', 'error');
-                    return;
-                }
-                confirmMessage += `Se usará la sesión del selector: ${this.getSessionLabel(sessionId)}.\n`;
+                confirmMessage += `Se usará la sesión: ${sessionLabels}.\n`;
                 confirmMessage += 'Se enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
             }
+            confirmMessage += '\nAsegúrate de tener las sesiones verificadas en OpenWA.';
         }
 
         if (!confirm(confirmMessage)) {
@@ -777,10 +789,11 @@ class CVAnalyzer {
         this.showSendingControls();
         this.showStatus(this.testMode ? 'Simulando envío...' : 'Iniciando envío de mensajes...', 'info');
 
-        try {
-            // Enviar los CVs con mensajes editados al servidor
-            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+        this.activeSendingSessionIds = [...selectedSessions];
+        this.activeControlSessionId =
+            selectedSessions.length > 1 ? '__roundrobin__' : selectedSessions[0];
 
+        try {
             const response = await fetch('/send-whatsapp', {
                 method: 'POST',
                 headers: {
@@ -788,8 +801,7 @@ class CVAnalyzer {
                 },
                 body: JSON.stringify({
                     cvs: this.cvsData,
-                    sessionId: sessionId,
-                    selectedSessions: selectedSessions.length > 0 ? selectedSessions : undefined
+                    selectedSessions
                 })
             });
 
@@ -867,8 +879,10 @@ class CVAnalyzer {
 
             this.progressFill.style.width = `${progress}%`;
             this.progressText.textContent = `${current + 1} / ${total}`;
+            const sessionLabel = result.sessionId ? this.getSessionLabel(result.sessionId) : '';
+            const viaSession = sessionLabel ? ` · ${sessionLabel}` : '';
             this.currentMessage.innerHTML = `
-                <strong>Enviando a:</strong> ${result.nombre}<br>
+                <strong>Enviando a:</strong> ${result.nombre}${viaSession}<br>
                 <strong>Teléfono:</strong> ${result.telefono}<br>
                 <strong>Estado:</strong> ${result.success ? 'Enviado' : 'Error'}
             `;
@@ -879,7 +893,7 @@ class CVAnalyzer {
             }
 
             this.addLogEntry(
-                `${result.nombre} (${result.telefono}) - ${result.success ? 'Enviado' : 'Error'}`,
+                `${result.nombre} (${result.telefono})${sessionLabel ? ` [${sessionLabel}]` : ''} - ${result.success ? 'Enviado' : 'Error'}`,
                 result.success ? 'success' : 'error'
             );
 
@@ -1080,7 +1094,7 @@ class CVAnalyzer {
     // Pausar envío
     async pauseSending() {
         try {
-            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const sessionId = this.getControlSessionId();
             const response = await fetch('/pause-sending', {
                 method: 'POST',
                 headers: {
@@ -1107,7 +1121,7 @@ class CVAnalyzer {
     // Reanudar envío
     async resumeSending() {
         try {
-            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const sessionId = this.getControlSessionId();
             const response = await fetch('/resume-sending', {
                 method: 'POST',
                 headers: {
@@ -1134,7 +1148,7 @@ class CVAnalyzer {
     // Pausar el tiempo de espera
     async pauseTime() {
         try {
-            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const sessionId = this.getControlSessionId();
             const response = await fetch('/pause-time', {
                 method: 'POST',
                 headers: {
@@ -1162,7 +1176,7 @@ class CVAnalyzer {
     // Reanudar el tiempo de espera
     async resumeTime() {
         try {
-            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const sessionId = this.getControlSessionId();
             const response = await fetch('/resume-time', {
                 method: 'POST',
                 headers: {
@@ -1190,7 +1204,7 @@ class CVAnalyzer {
     // Enviar siguiente mensaje manualmente (saltar espera)
     async skipWaitSending() {
         try {
-            const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+            const sessionId = this.getControlSessionId();
             const response = await fetch('/skip-wait', {
                 method: 'POST',
                 headers: {
@@ -1220,7 +1234,7 @@ class CVAnalyzer {
     async abortSending() {
         if (confirm('¿Estás seguro de abortar el envío? Esto no se puede deshacer.')) {
             try {
-                const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
+                const sessionId = this.getControlSessionId();
                 const response = await fetch('/abort-sending', {
                     method: 'POST',
                     headers: {
@@ -1297,9 +1311,14 @@ class CVAnalyzer {
             const data = JSON.parse(event.data);
 
             // Filtrar eventos por sesión seleccionada
-            const currentSessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
-            if (data.sessionId && data.sessionId !== currentSessionId) {
-                return; // Ignorar eventos de otras sesiones
+            const activeIds = this.activeSendingSessionIds || [];
+            if (
+                data.sessionId &&
+                activeIds.length > 0 &&
+                !activeIds.includes(data.sessionId) &&
+                data.sessionId !== this.activeControlSessionId
+            ) {
+                return;
             }
 
             console.log('🔔 Listo para enviar mensaje:', data);

@@ -7,6 +7,7 @@ require('dotenv').config();
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
+const { sendRoundRobinBulk, ROUND_ROBIN_CONTROL_ID } = WhatsAppService;
 const sessionsStore = require('./sessionsStore');
 const {
   getSessionStatus,
@@ -68,6 +69,19 @@ function getSessionState(sessionId) {
     sessionStates.set(sessionId, new SessionState());
   }
   return sessionStates.get(sessionId);
+}
+
+function getBulkControlId(sessionIds) {
+  return sessionIds.length > 1 ? ROUND_ROBIN_CONTROL_ID : sessionIds[0];
+}
+
+function resetBulkControlState(controlId) {
+  const finalState = getSessionState(controlId);
+  finalState.sendingInProgress = false;
+  finalState.sendingPaused = false;
+  finalState.sendingAborted = false;
+  finalState.skipWait = false;
+  finalState.timePaused = false;
 }
 
 // Event emitters para notificaciones en tiempo real (Server-Sent Events)
@@ -473,8 +487,6 @@ app.post('/send-whatsapp', async (req, res) => {
     console.log(`Iniciando envío de ${finalCvsToSend.length} mensajes por WhatsApp (${duplicates.length} duplicados eliminados)...`);
     console.log(`Modo de prueba: ${TEST_MODE ? 'ACTIVADO (simulando envíos)' : 'DESACTIVADO (enviando real)'}`);
 
-    const sessionId = req.body.sessionId || 'default';
-
     if (TEST_MODE) {
       const results = await simulateWhatsAppSending(finalCvsToSend);
       return res.status(200).json({
@@ -489,17 +501,21 @@ app.post('/send-whatsapp', async (req, res) => {
     let results;
 
     try {
-        const selectedSessions = Array.isArray(req.body.selectedSessions) && req.body.selectedSessions.length > 0
-          ? req.body.selectedSessions
-          : null;
+        const configuredIds = getConfiguredSessionIds();
+        const selectedSessions =
+          Array.isArray(req.body.selectedSessions) && req.body.selectedSessions.length > 0
+            ? req.body.selectedSessions.map((id) => String(id)).filter(Boolean)
+            : configuredIds.length > 0
+              ? configuredIds
+              : null;
 
         if (selectedSessions && selectedSessions.length >= 1) {
-          // Envío con una o más sesiones seleccionadas (distribución entre las marcadas)
           const sessionIds = selectedSessions;
           const N = sessionIds.length;
-          console.log(`🔄 Iniciando envío con sesiones: ${sessionIds.join(', ')}`);
+          const controlId = getBulkControlId(sessionIds);
+          console.log(`🔄 Envío round-robin con ${N} sesión(es): ${sessionIds.join(', ')}`);
 
-          const services = sessionIds.map(sId => {
+          const services = sessionIds.map((sId) => {
             let svc = whatsappServices.get(sId);
             if (!svc) {
               svc = new WhatsAppService(sId);
@@ -512,31 +528,29 @@ app.post('/send-whatsapp', async (req, res) => {
             if (!svc.isReady()) await svc.initWhatsApp();
           }
 
-          const contactLists = sessionIds.map(() => []);
+          const servicesBySessionId = new Map(sessionIds.map((sId, i) => [sId, services[i]]));
 
-          finalCvsToSend.forEach((cv, index) => {
-            const contact = {
-              nombre: cv.nombre,
-              telefono: cv.telefono,
-              mensajeIA: cv.mensajeIA
-            };
-            contactLists[index % N].push(contact);
+          const contactsToSend = finalCvsToSend.map((cv) => ({
+            nombre: cv.nombre,
+            telefono: cv.telefono,
+            mensajeIA: cv.mensajeIA
+          }));
+
+          const distribution = sessionIds.map((sId, i) => {
+            const count = contactsToSend.filter((_, idx) => idx % N === i).length;
+            return `${sId}: ${count}`;
           });
+          console.log(`📊 Distribución round-robin → ${distribution.join(', ')}`);
 
-          const distLog = contactLists.map((list, i) => `${list.length} (${sessionIds[i]})`).join(', ');
-          console.log(`📊 Distribución: ${distLog}`);
+          const bulkState = getSessionState(controlId);
+          bulkState.sendingInProgress = true;
+          bulkState.sendingPaused = false;
+          bulkState.sendingAborted = false;
+          bulkState.skipWait = false;
+          bulkState.timePaused = false;
 
-          if (!TEST_MODE) {
-            sessionIds.forEach(sId => {
-              const st = getSessionState(sId);
-              st.sendingInProgress = true;
-              st.sendingPaused = false;
-              st.sendingAborted = false;
-            });
-          }
-
-          const createCheckControls = (sId) => () => {
-            const currentState = getSessionState(sId);
+          const checkControls = () => {
+            const currentState = getSessionState(controlId);
             const shouldSkip = currentState.skipWait;
             if (shouldSkip) currentState.skipWait = false;
             return {
@@ -547,110 +561,46 @@ app.post('/send-whatsapp', async (req, res) => {
             };
           };
 
-          const createOnProgress = (sId) => (progressData) => {
+          const onProgress = (progressData) => {
             if (progressData.readyToSend) {
               broadcastEvent('readyToSend', {
                 current: progressData.current,
                 total: progressData.total,
                 nombre: progressData.nombre,
                 telefono: progressData.telefono,
-                sessionId: sId
+                sessionId: progressData.sessionId || controlId
               });
             }
           };
 
-          const resetSessionState = (sId) => {
-            const finalState = getSessionState(sId);
-            finalState.sendingInProgress = false;
-            finalState.sendingPaused = false;
-            finalState.sendingAborted = false;
-            finalState.skipWait = false;
-            finalState.timePaused = false;
-          };
-
-          sessionIds.forEach((sId, i) => {
-            services[i]
-              .sendBulkMessages(contactLists[i], 2, createOnProgress(sId), createCheckControls(sId), mongoRecordHook)
-              .finally(() => resetSessionState(sId));
-          });
-
-          const countMsg = contactLists.map((list, i) => `${sessionIds[i]}: ${list.length}`).join(', ');
-          return res.json({
-            success: true,
-            message: `Envío iniciado con ${N} sesión(es): ${countMsg}`,
-            distributed: N > 1,
-            selectedSessions: sessionIds,
-            counts: contactLists.map(l => l.length),
-            skippedAlreadyContacted
-          });
+          try {
+            if (N === 1) {
+              results = await services[0].sendBulkMessages(
+                contactsToSend,
+                2,
+                onProgress,
+                checkControls,
+                mongoRecordHook
+              );
+            } else {
+              results = await sendRoundRobinBulk(
+                servicesBySessionId,
+                sessionIds,
+                contactsToSend,
+                onProgress,
+                checkControls,
+                mongoRecordHook
+              );
+            }
+          } finally {
+            resetBulkControlState(controlId);
+          }
 
         } else {
-          // Una sola sesión (selector o sin checkboxes marcados)
-          if (!TEST_MODE) {
-            const sessionState = getSessionState(sessionId);
-            sessionState.sendingInProgress = true;
-            sessionState.sendingPaused = false;
-            sessionState.sendingAborted = false;
-          }
-
-          // Obtener o inicializar el servicio de WhatsApp para esta sesión
-          let whatsappService = whatsappServices.get(sessionId);
-
-          if (!whatsappService) {
-            whatsappService = new WhatsAppService(sessionId);
-            whatsappServices.set(sessionId, whatsappService);
-            await whatsappService.initWhatsApp();
-          } else if (!whatsappService.isReady()) {
-            await whatsappService.initWhatsApp();
-          }
-
-          // Preparar datos para envío
-          const contactsToSend = finalCvsToSend.map(cv => ({
-            nombre: cv.nombre,
-            telefono: cv.telefono,
-            mensajeIA: cv.mensajeIA
-          }));
-
-          // Función para verificar controles
-          const checkControls = () => {
-            const currentState = getSessionState(sessionId);
-            const shouldSkip = currentState.skipWait;
-            // Resetear skipWait después de leerlo (para que solo afecte un ciclo)
-            if (shouldSkip) {
-              currentState.skipWait = false;
-            }
-            return {
-              paused: currentState.sendingPaused,
-              aborted: currentState.sendingAborted,
-              skipWait: shouldSkip,
-              timePaused: currentState.timePaused
-            };
-          };
-
-          // Callback para notificar progreso y eventos
-          const onProgress = (progressData) => {
-            // Emitir evento cuando está listo para enviar el siguiente mensaje
-            if (progressData.readyToSend) {
-              broadcastEvent('readyToSend', {
-                current: progressData.current,
-                total: progressData.total,
-                nombre: progressData.nombre,
-                telefono: progressData.telefono,
-                sessionId: sessionId
-              });
-            }
-          };
-
-          // Iniciar envío masivo (delay aleatorio de 1-5 minutos entre mensajes)
-          results = await whatsappService.sendBulkMessages(contactsToSend, 2, onProgress, checkControls, mongoRecordHook);
-
-          // Marcar que el envío terminó (esto estaba en finally antes, pero ahora necesitamos manejar el return temprano del modo distribuido)
-          const finalState = getSessionState(sessionId);
-          finalState.sendingInProgress = false;
-          finalState.sendingPaused = false;
-          finalState.sendingAborted = false;
-          finalState.skipWait = false;
-          finalState.timePaused = false;
+          return res.status(400).json({
+            success: false,
+            error: 'No hay sesiones configuradas. Agrega sesiones en la interfaz web.'
+          });
         }
       } catch (error) {
         console.error('Error enviando mensajes por WhatsApp:', error);
