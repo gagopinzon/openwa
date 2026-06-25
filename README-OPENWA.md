@@ -16,7 +16,7 @@ El proyecto original (`whatsapp-bulk/`) no se modifica y sigue usando WhatsApp W
 Copia `.env.example` a `.env` y completa:
 
 ```bash
-PORT=3000
+PORT=3445
 TEST_MODE=true
 DEEPSEEK_API_KEY=tu_clave_deepseek
 
@@ -53,7 +53,7 @@ npm install
 npm start
 ```
 
-Interfaz: http://localhost:3000
+Interfaz: http://localhost:3445
 
 ## Flujo de uso
 

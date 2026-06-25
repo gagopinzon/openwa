@@ -16,7 +16,8 @@ module.exports = {
       max_memory_restart: '512M',
       time: true,
       env: {
-        NODE_ENV: 'production'
+        NODE_ENV: 'production',
+        PORT: 3445
       },
       error_file: path.join(logsDir, 'error.log'),
       out_file: path.join(logsDir, 'out.log'),

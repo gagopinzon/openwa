@@ -14,7 +14,7 @@ const {
 const contactHistory = require('./contactHistoryStore');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3445;
 
 // Middleware
 app.use(express.json({ limit: '1mb' }));
