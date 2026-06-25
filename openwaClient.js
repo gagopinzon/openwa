@@ -16,26 +16,34 @@ function assertOpenWAConfigured() {
   }
 }
 
+function normalizeOpenWASessionRow(row) {
+  if (!row || typeof row !== 'object') return null;
+  const id = row.id || row.sessionId;
+  if (!id) return null;
+  return {
+    id: String(id),
+    name: String(row.name || row.profileName || id),
+    status: String(row.status || row.state || ''),
+    phoneNumber: row.phoneNumber ? String(row.phoneNumber) : ''
+  };
+}
+
 /**
- * Mapea session1/session2/session3 (UI) al ID de sesión en el dashboard OpenWA.
- * @param {string} logicalId - session1, session2, session3, default, etc.
- * @returns {string}
+ * Lista sesiones disponibles en el servidor OpenWA.
+ * @param {{ status?: string, limit?: number }} [params]
  */
-function resolveOpenWASessionId(logicalId = 'default') {
-  const key = String(logicalId || 'default').toUpperCase().replace(/[^A-Z0-9]/g, '_');
-  const envKey = `OPENWA_SESSION_${key}`;
-  const mapped = process.env[envKey];
-  if (mapped && String(mapped).trim()) {
-    return String(mapped).trim();
-  }
-  const fallback = process.env.OPENWA_SESSION_ID;
-  if (fallback && String(fallback).trim()) {
-    return String(fallback).trim();
-  }
-  throw new Error(
-    `No hay sesión OpenWA configurada para "${logicalId}". ` +
-      `Define ${envKey} o OPENWA_SESSION_ID en .env`
-  );
+async function listOpenWASessions(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set('status', params.status);
+  if (params.limit) qs.set('limit', String(params.limit));
+  const query = qs.toString() ? `?${qs.toString()}` : '';
+
+  const data = await openwaRequest('GET', `/sessions${query}`);
+  const rawList = Array.isArray(data)
+    ? data
+    : data.data || data.sessions || [];
+
+  return rawList.map(normalizeOpenWASessionRow).filter(Boolean);
 }
 
 /** Formatea número MX a chatId de OpenWA (ej. 521234567890@c.us) */
@@ -118,9 +126,10 @@ async function sendTextMessage(openwaSessionId, chatId, text) {
 
 module.exports = {
   assertOpenWAConfigured,
-  resolveOpenWASessionId,
   formatPhoneToChatId,
   getSessionStatus,
   sendTextMessage,
-  isConnectedStatus
+  isConnectedStatus,
+  listOpenWASessions,
+  normalizeOpenWASessionRow
 };

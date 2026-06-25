@@ -7,9 +7,11 @@ require('dotenv').config();
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
+const sessionsStore = require('./sessionsStore');
 const {
-  resolveOpenWASessionId,
-  getSessionStatus
+  getSessionStatus,
+  listOpenWASessions,
+  isConnectedStatus
 } = require('./openwaClient');
 const contactHistory = require('./contactHistoryStore');
 
@@ -41,8 +43,9 @@ const upload = multer({
 let cvsData = [];
 const whatsappServices = new Map(); // Map<sessionId, WhatsAppService>
 
-/** Sesiones en paralelo (alineado con `sessionSelect` / checkboxes en la UI). */
-const PARALLEL_SESSION_IDS = ['session1', 'session2', 'session3'];
+function getConfiguredSessionIds() {
+  return sessionsStore.getLogicalSessionIds();
+}
 
 // Configuración de modo de prueba
 const TEST_MODE = process.env.TEST_MODE === 'true';
@@ -281,10 +284,88 @@ app.get('/config', (req, res) => {
     success: true,
     testMode: TEST_MODE,
     whatsappProvider: 'openwa',
+    sessions: sessionsStore.getAllSessions(),
     message: TEST_MODE
       ? 'Sistema en modo de prueba - los mensajes se simularán'
       : 'Sistema en modo producción - se enviarán mensajes reales vía OpenWA'
   });
+});
+
+// --- Gestión de sesiones WhatsApp (persistidas en data/sessions.json) ---
+
+app.get('/api/sessions', (req, res) => {
+  try {
+    res.json({ success: true, sessions: sessionsStore.getAllSessions() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/sessions', (req, res) => {
+  try {
+    const session = sessionsStore.addSession({
+      openwaSessionId: req.body.openwaSessionId,
+      label: req.body.label
+    });
+    res.status(201).json({ success: true, session });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/sessions/:id', (req, res) => {
+  try {
+    const session = sessionsStore.updateSession(req.params.id, {
+      label: req.body.label,
+      openwaSessionId: req.body.openwaSessionId
+    });
+    res.json({ success: true, session });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/sessions/:id', (req, res) => {
+  try {
+    const logicalId = req.params.id;
+    sessionsStore.removeSession(logicalId);
+    const cached = whatsappServices.get(logicalId);
+    if (cached) {
+      cached.close().catch(() => {});
+      whatsappServices.delete(logicalId);
+    }
+    res.json({ success: true, message: `Sesión ${logicalId} eliminada` });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/openwa/sessions', async (req, res) => {
+  try {
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const sessions = await listOpenWASessions({ status, limit: 100 });
+    res.json({ success: true, sessions });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/sessions/import-connected', async (req, res) => {
+  try {
+    const remote = await listOpenWASessions({ limit: 100 });
+    const connected = remote.filter((s) => isConnectedStatus(s.status));
+    const added = sessionsStore.importOpenWASessions(connected);
+    res.json({
+      success: true,
+      added,
+      message:
+        added.length > 0
+          ? `Se agregaron ${added.length} sesión(es) conectada(s)`
+          : 'No hay sesiones nuevas para importar (todas ya estaban registradas o ninguna conectada)'
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // Ruta para enviar mensajes por WhatsApp
@@ -609,8 +690,14 @@ app.post('/open-whatsapp', async (req, res) => {
     const openAllSessions = req.body.openAllSessions === true;
     /** @type {string[]} */
     let sessionIds;
+    const configuredIds = getConfiguredSessionIds();
     if (openAllSessions) {
-      sessionIds = [...PARALLEL_SESSION_IDS];
+      sessionIds = configuredIds.length > 0 ? [...configuredIds] : [];
+      if (sessionIds.length === 0) {
+        return res.status(400).json({
+          error: 'No hay sesiones configuradas. Agrega sesiones en la interfaz web.'
+        });
+      }
     } else if (Array.isArray(req.body.sessionIds) && req.body.sessionIds.length > 0) {
       sessionIds = req.body.sessionIds.map((id) => String(id)).filter(Boolean);
     } else {
@@ -621,7 +708,7 @@ app.post('/open-whatsapp', async (req, res) => {
     const checkOneSession = async (logicalSessionId) => {
       let openwaSessionId;
       try {
-        openwaSessionId = resolveOpenWASessionId(logicalSessionId);
+        openwaSessionId = sessionsStore.resolveOpenWASessionId(logicalSessionId);
       } catch (err) {
         return {
           sessionId: logicalSessionId,
@@ -988,10 +1075,13 @@ process.on('SIGTERM', async () => {
 });
 
 // Iniciar servidor
+sessionsStore.migrateFromEnvIfEmpty();
+
 app.listen(PORT, () => {
   console.log(`🚀 Servidor iniciado en http://localhost:${PORT}`);
   console.log(`📁 Interfaz web disponible en http://localhost:${PORT}`);
-  console.log(`📋 Asegúrate de configurar DEEPSEEK_API_KEY en el archivo .env`);
+  console.log(`📋 Sesiones WhatsApp: data/sessions.json (${sessionsStore.getAllSessions().length} configurada(s))`);
+  console.log(`📋 Asegúrate de configurar DEEPSEEK_API_KEY y OPENWA_API_KEY en el archivo .env`);
 });
 
 module.exports = app;

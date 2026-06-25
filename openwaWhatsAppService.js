@@ -1,5 +1,5 @@
+const { resolveOpenWASessionId } = require('./sessionsStore');
 const {
-  resolveOpenWASessionId,
   formatPhoneToChatId,
   getSessionStatus,
   sendTextMessage

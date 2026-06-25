@@ -18,15 +18,32 @@
                     <label for="sessionSelect" style="font-weight: bold; margin-right: 10px;">Sesión:</label>
                     <select id="sessionSelect" class="form-select"
                         style="padding: 8px; border-radius: 4px; border: 1px solid #ccc;">
-                        <option value="session1">Sesión 1</option>
-                        <option value="session2">Sesión 2</option>
-                        <option value="session3">Sesión 3</option>
                     </select>
                 </div>
                 <button id="openWhatsAppBtn" class="btn btn-primary">
                     Verificar sesiones OpenWA
                 </button>
             </div>
+
+            <section class="sessions-panel" id="sessionsPanel" style="margin-top: 24px; text-align: left;">
+                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Sesiones WhatsApp (OpenWA)</h2>
+                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+                    Configura aquí las sesiones. Se guardan en el servidor y no necesitas editar el .env cada vez que cambien.
+                </p>
+                <div id="sessionsList" class="sessions-list"></div>
+                <div class="sessions-add-form" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px;">
+                    <select id="openwaSessionPicker" class="form-select" style="min-width: 220px; padding: 8px;">
+                        <option value="">— Cargar sesiones de OpenWA —</option>
+                    </select>
+                    <input type="text" id="sessionLabelInput" placeholder="Nombre (opcional)" class="form-select" style="padding: 8px; min-width: 160px;">
+                    <button type="button" id="addSessionBtn" class="btn btn-secondary">Agregar sesión</button>
+                    <button type="button" id="importConnectedBtn" class="btn btn-secondary">Importar conectadas</button>
+                    <button type="button" id="refreshOpenwaListBtn" class="btn btn-secondary" title="Actualizar lista de OpenWA">↻</button>
+                </div>
+                <p id="sessionsEmptyHint" style="font-size: 12px; color: #b45309; margin-top: 10px; display: none;">
+                    No hay sesiones configuradas. Agrega al menos una antes de enviar mensajes.
+                </p>
+            </section>
         </header>
 
         <!-- Sección 1: Carga de archivos -->
@@ -70,19 +87,7 @@
             <!-- Enviar mensajes con sesiones seleccionadas -->
             <div class="sending-options" style="margin-bottom: 15px; text-align: center;">
                 <p style="font-weight: 600; color: #0369a1; margin-bottom: 10px;">Enviar mensajes con sesiones:</p>
-                <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 12px 20px;">
-                    <label style="display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;">
-                        <input type="checkbox" id="session1Checkbox" class="session-send-checkbox" value="session1" style="margin-right: 8px; width: 18px; height: 18px;">
-                        <span style="font-weight: 500; color: #0369a1;">Sesión 1</span>
-                    </label>
-                    <label style="display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;">
-                        <input type="checkbox" id="session2Checkbox" class="session-send-checkbox" value="session2" style="margin-right: 8px; width: 18px; height: 18px;">
-                        <span style="font-weight: 500; color: #0369a1;">Sesión 2</span>
-                    </label>
-                    <label style="display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;">
-                        <input type="checkbox" id="session3Checkbox" class="session-send-checkbox" value="session3" style="margin-right: 8px; width: 18px; height: 18px;">
-                        <span style="font-weight: 500; color: #0369a1;">Sesión 3</span>
-                    </label>
+                <div id="sessionCheckboxes" style="display: flex; flex-wrap: wrap; justify-content: center; gap: 12px 20px;">
                 </div>
                 <p style="font-size: 12px; color: #64748b; margin-top: 8px;">Si no marcas ninguna, se usará la sesión del selector superior.</p>
             </div>

@@ -23,27 +23,27 @@ DEEPSEEK_API_KEY=tu_clave_deepseek
 OPENWA_BASE_URL=https://openwa.protalentconnections.com/api
 OPENWA_API_KEY=tu_api_key_openwa
 
-# IDs de sesión del dashboard OpenWA (mapeo con la UI)
-OPENWA_SESSION_SESSION1=id-sesion-1
-OPENWA_SESSION_SESSION2=id-sesion-2
-OPENWA_SESSION_SESSION3=id-sesion-3
-
-# Si solo tienes una sesión, puedes usar solo:
-# OPENWA_SESSION_ID=id-unico
+# Las sesiones se configuran en la web (persisten en data/sessions.json en el servidor).
+# Opcional: si data/sessions.json está vacío al primer arranque, se importan desde .env:
+# OPENWA_SESSION_SESSION1=id-sesion-1
+# OPENWA_SESSION_SESSION2=id-sesion-2
 
 # Historial separado del proyecto Puppeteer (opcional)
 # MONGODB_URI=mongodb://whatsapp_app:PASSWORD@localhost:27017/whatsapp_bulk_openwa?authSource=whatsapp_bulk_openwa
 ```
 
-### Mapeo sesiones UI → OpenWA
+### Configurar sesiones (sin editar .env cada vez)
 
-| Selector en la web | Variable `.env` |
-|--------------------|-----------------|
-| Sesión 1 | `OPENWA_SESSION_SESSION1` |
-| Sesión 2 | `OPENWA_SESSION_SESSION2` |
-| Sesión 3 | `OPENWA_SESSION_SESSION3` |
+1. En la interfaz web, sección **Sesiones WhatsApp (OpenWA)**.
+2. Pulsa **↻** para cargar las sesiones del dashboard OpenWA.
+3. Elige una en el desplegable y **Agregar sesión**, o usa **Importar conectadas** para traer todas las que estén `CONNECTED`.
+4. Las sesiones quedan guardadas en `data/sessions.json` en el servidor (sobreviven reinicios y deploys).
 
-Si falta la variable específica, se usa `OPENWA_SESSION_ID` como respaldo.
+Puedes tener 2, 8 o las que necesites. El selector y los checkboxes de envío se generan solos según lo guardado.
+
+### Migración desde .env (solo primera vez)
+
+Si `data/sessions.json` está vacío al arrancar, el servidor importa automáticamente `OPENWA_SESSION_SESSION1/2/3` si existen en `.env`.
 
 ## Instalación y arranque
 
@@ -58,8 +58,9 @@ Interfaz: http://localhost:3445
 ## Flujo de uso
 
 1. Conecta las sesiones en el dashboard de OpenWA (escanear QR).
-2. En la web, pulsa **Verificar sesiones OpenWA**.
-3. Sube PDFs, genera mensajes con IA y envía (o usa `TEST_MODE=true` para simular).
+2. En la web, configura las sesiones en **Sesiones WhatsApp** (agregar o importar conectadas).
+3. Pulsa **Verificar sesiones OpenWA**.
+4. Sube PDFs, genera mensajes con IA y envía (o usa `TEST_MODE=true` para simular).
 
 ## Verificar sesión con curl
 
@@ -141,6 +142,7 @@ La app carga variables desde `.env` (no se sube a git). Logs en `logs/out.log` y
 | Archivo | Rol |
 |---------|-----|
 | `server.js` | API Express e interfaz web |
+| `sessionsStore.js` | Sesiones guardadas en `data/sessions.json` |
 | `openwaClient.js` | Cliente HTTP OpenWA |
 | `openwaWhatsAppService.js` | Envío masivo y delays |
 | `pdfProcessor.js` / `aiService.js` | Igual que el proyecto original |

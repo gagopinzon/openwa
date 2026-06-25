@@ -4,11 +4,12 @@ class CVAnalyzer {
         this.cvsData = [];
         this.testMode = false;
         this.whatsappProvider = 'openwa';
+        this.configuredSessions = [];
         this.eventSource = null;
         this.initializeElements();
         this.attachEventListeners();
         this.setupSendingControls();
-        this.loadConfig();
+        this.loadConfig().then(() => this.loadSessions());
     }
 
     initializeElements() {
@@ -21,12 +22,15 @@ class CVAnalyzer {
         this.generateMessagesBtn = document.getElementById('generateMessagesBtn');
         this.sendWhatsAppBtn = document.getElementById('sendWhatsAppBtn');
         this.openWhatsAppBtn = document.getElementById('openWhatsAppBtn');
-        this.sendWhatsAppBtn = document.getElementById('sendWhatsAppBtn');
-        this.openWhatsAppBtn = document.getElementById('openWhatsAppBtn');
         this.sessionSelect = document.getElementById('sessionSelect');
-        this.session1Checkbox = document.getElementById('session1Checkbox');
-        this.session2Checkbox = document.getElementById('session2Checkbox');
-        this.session3Checkbox = document.getElementById('session3Checkbox');
+        this.sessionCheckboxes = document.getElementById('sessionCheckboxes');
+        this.sessionsList = document.getElementById('sessionsList');
+        this.sessionsEmptyHint = document.getElementById('sessionsEmptyHint');
+        this.openwaSessionPicker = document.getElementById('openwaSessionPicker');
+        this.sessionLabelInput = document.getElementById('sessionLabelInput');
+        this.addSessionBtn = document.getElementById('addSessionBtn');
+        this.importConnectedBtn = document.getElementById('importConnectedBtn');
+        this.refreshOpenwaListBtn = document.getElementById('refreshOpenwaListBtn');
         this.clearDataBtn = document.getElementById('clearDataBtn');
         this.cvsTableBody = document.getElementById('cvsTableBody');
         this.statusMessage = document.getElementById('statusMessage');
@@ -59,20 +63,226 @@ class CVAnalyzer {
         this.sendWhatsAppBtn.addEventListener('click', this.sendWhatsApp.bind(this));
         this.openWhatsAppBtn.addEventListener('click', this.openWhatsApp.bind(this));
         this.clearDataBtn.addEventListener('click', this.clearData.bind(this));
+        if (this.addSessionBtn) {
+            this.addSessionBtn.addEventListener('click', this.addSession.bind(this));
+        }
+        if (this.importConnectedBtn) {
+            this.importConnectedBtn.addEventListener('click', this.importConnectedSessions.bind(this));
+        }
+        if (this.refreshOpenwaListBtn) {
+            this.refreshOpenwaListBtn.addEventListener('click', this.loadOpenWASessionPicker.bind(this));
+        }
     }
 
-    /** Devuelve array de sessionId de los checkboxes marcados (ej: ['session1','session3']) */
+    getSessionLabel(sessionId) {
+        const found = this.configuredSessions.find((s) => s.id === sessionId);
+        return found ? found.label : sessionId;
+    }
+
+    /** Devuelve array de sessionId de los checkboxes marcados */
     getSelectedSessionIds() {
+        if (!this.sessionCheckboxes) return [];
         const ids = [];
-        const checkboxes = [
-            this.session1Checkbox,
-            this.session2Checkbox,
-            this.session3Checkbox
-        ].filter(Boolean);
-        checkboxes.forEach(cb => {
-            if (cb.checked && cb.value) ids.push(cb.value);
+        this.sessionCheckboxes.querySelectorAll('.session-send-checkbox:checked').forEach((cb) => {
+            if (cb.value) ids.push(cb.value);
         });
         return ids;
+    }
+
+    renderSessionUI() {
+        const sessions = this.configuredSessions || [];
+
+        if (this.sessionSelect) {
+            const prev = this.sessionSelect.value;
+            this.sessionSelect.innerHTML = '';
+            if (sessions.length === 0) {
+                const opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = 'Sin sesiones configuradas';
+                this.sessionSelect.appendChild(opt);
+                this.sessionSelect.disabled = true;
+            } else {
+                this.sessionSelect.disabled = false;
+                sessions.forEach((s) => {
+                    const opt = document.createElement('option');
+                    opt.value = s.id;
+                    opt.textContent = s.label;
+                    this.sessionSelect.appendChild(opt);
+                });
+                if (prev && sessions.some((s) => s.id === prev)) {
+                    this.sessionSelect.value = prev;
+                }
+            }
+        }
+
+        if (this.sessionCheckboxes) {
+            this.sessionCheckboxes.innerHTML = '';
+            sessions.forEach((s) => {
+                const label = document.createElement('label');
+                label.style.cssText =
+                    'display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'session-send-checkbox';
+                cb.value = s.id;
+                cb.style.cssText = 'margin-right: 8px; width: 18px; height: 18px;';
+                const span = document.createElement('span');
+                span.style.cssText = 'font-weight: 500; color: #0369a1;';
+                span.textContent = s.label;
+                label.appendChild(cb);
+                label.appendChild(span);
+                this.sessionCheckboxes.appendChild(label);
+            });
+        }
+
+        if (this.sessionsList) {
+            if (sessions.length === 0) {
+                this.sessionsList.innerHTML =
+                    '<p style="color:#64748b;font-size:13px;">Aún no hay sesiones guardadas.</p>';
+            } else {
+                this.sessionsList.innerHTML = sessions
+                    .map(
+                        (s) => `
+                    <div class="session-row" data-session-id="${s.id}" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
+                        <strong style="min-width:120px;">${this.escapeHtml(s.label)}</strong>
+                        <code style="font-size:12px;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${this.escapeHtml(s.openwaSessionId)}</code>
+                        <button type="button" class="btn btn-danger btn-sm remove-session-btn" data-id="${s.id}" style="margin-left:auto;padding:4px 10px;font-size:12px;">Quitar</button>
+                    </div>`
+                    )
+                    .join('');
+
+                this.sessionsList.querySelectorAll('.remove-session-btn').forEach((btn) => {
+                    btn.addEventListener('click', () => this.removeSession(btn.dataset.id));
+                });
+            }
+        }
+
+        if (this.sessionsEmptyHint) {
+            this.sessionsEmptyHint.style.display = sessions.length === 0 ? 'block' : 'none';
+        }
+    }
+
+    escapeHtml(str) {
+        return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    async loadSessions() {
+        try {
+            const response = await fetch('/api/sessions');
+            const data = await response.json();
+            if (data.success) {
+                this.configuredSessions = data.sessions || [];
+                this.renderSessionUI();
+            }
+        } catch (error) {
+            console.error('Error cargando sesiones:', error);
+        }
+
+        if (!this.testMode) {
+            this.loadOpenWASessionPicker();
+        }
+    }
+
+    async loadOpenWASessionPicker() {
+        if (!this.openwaSessionPicker || this.testMode) return;
+
+        try {
+            const response = await fetch('/api/openwa/sessions');
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || 'No se pudo cargar OpenWA');
+            }
+
+            const configuredIds = new Set(
+                (this.configuredSessions || []).map((s) => s.openwaSessionId.toLowerCase())
+            );
+
+            this.openwaSessionPicker.innerHTML = '<option value="">— Elegir sesión de OpenWA —</option>';
+            (data.sessions || []).forEach((row) => {
+                const already = configuredIds.has(String(row.id).toLowerCase());
+                const status = row.status ? ` [${row.status}]` : '';
+                const phone = row.phoneNumber ? ` (${row.phoneNumber})` : '';
+                const opt = document.createElement('option');
+                opt.value = row.id;
+                opt.textContent = `${row.name || row.id}${phone}${status}${already ? ' ✓' : ''}`;
+                opt.disabled = already;
+                opt.dataset.name = row.name || row.id;
+                this.openwaSessionPicker.appendChild(opt);
+            });
+        } catch (error) {
+            console.error('Error listando sesiones OpenWA:', error);
+            this.openwaSessionPicker.innerHTML =
+                '<option value="">Error al cargar OpenWA (revisa OPENWA_API_KEY)</option>';
+        }
+    }
+
+    async addSession() {
+        const openwaSessionId = this.openwaSessionPicker ? this.openwaSessionPicker.value : '';
+        if (!openwaSessionId) {
+            this.showStatus('Selecciona una sesión de OpenWA en el desplegable', 'error');
+            return;
+        }
+
+        const selectedOpt = this.openwaSessionPicker.selectedOptions[0];
+        const label =
+            (this.sessionLabelInput && this.sessionLabelInput.value.trim()) ||
+            (selectedOpt && selectedOpt.dataset.name) ||
+            openwaSessionId;
+
+        try {
+            const response = await fetch('/api/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ openwaSessionId, label })
+            });
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || 'No se pudo agregar');
+            }
+
+            if (this.sessionLabelInput) this.sessionLabelInput.value = '';
+            await this.loadSessions();
+            this.showStatus(`Sesión "${label}" guardada`, 'success');
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async importConnectedSessions() {
+        try {
+            const response = await fetch('/api/sessions/import-connected', { method: 'POST' });
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || 'Importación fallida');
+            }
+            await this.loadSessions();
+            this.showStatus(data.message || 'Importación completada', 'success');
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async removeSession(sessionId) {
+        const label = this.getSessionLabel(sessionId);
+        if (!confirm(`¿Quitar la sesión "${label}" de la configuración?`)) return;
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+                method: 'DELETE'
+            });
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || 'No se pudo eliminar');
+            }
+            await this.loadSessions();
+            this.showStatus(`Sesión "${label}" eliminada`, 'success');
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
     }
 
     async loadConfig() {
@@ -83,6 +293,10 @@ class CVAnalyzer {
             if (config.success) {
                 this.testMode = config.testMode;
                 this.whatsappProvider = config.whatsappProvider || 'openwa';
+                if (Array.isArray(config.sessions)) {
+                    this.configuredSessions = config.sessions;
+                    this.renderSessionUI();
+                }
                 this.updateTestModeDisplay();
             }
         } catch (error) {
@@ -121,7 +335,7 @@ class CVAnalyzer {
                     🚀 <strong>Modo Producción</strong><br>
                     Los mensajes se enviarán realmente por WhatsApp.
                 </div>
-                <p>Asegúrate de tener configurada tu API key de DeepSeek y las variables OPENWA_* en .env</p>
+                <p>Asegúrate de tener configurada tu API key de DeepSeek y OPENWA_API_KEY en .env. Las sesiones WhatsApp se configuran arriba y se guardan en el servidor.</p>
             `;
         } else {
             footer.innerHTML = `
@@ -531,16 +745,20 @@ class CVAnalyzer {
             confirmMessage += '🧪 MODO PRUEBA: Los mensajes se simularán (no se abrirá WhatsApp Web).';
         } else {
             if (selectedSessions.length > 1) {
-                confirmMessage += `🔄 Se usarán ${selectedSessions.length} sesiones (${selectedSessions.map(s => s.replace('session', 'Sesión ')).join(', ')}) simultáneamente.\n`;
+                confirmMessage += `🔄 Se usarán ${selectedSessions.length} sesiones (${selectedSessions.map((s) => this.getSessionLabel(s)).join(', ')}) simultáneamente.\n`;
                 confirmMessage += 'Los mensajes se repartirán entre las sesiones seleccionadas.\n';
-                confirmMessage += 'Asegúrate de tener esas sesiones iniciadas.';
+                confirmMessage += 'Asegúrate de tener esas sesiones verificadas en OpenWA.';
             } else if (selectedSessions.length === 1) {
-                confirmMessage += `Se usará solo ${selectedSessions[0].replace('session', 'Sesión ')}.\n`;
-                confirmMessage += 'Esto abrirá WhatsApp Web y enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
+                confirmMessage += `Se usará solo ${this.getSessionLabel(selectedSessions[0])}.\n`;
+                confirmMessage += 'Se enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
             } else {
-                const sessionId = this.sessionSelect ? this.sessionSelect.value : 'default';
-                confirmMessage += `Se usará la sesión del selector: ${sessionId.replace('session', 'Sesión ')}.\n`;
-                confirmMessage += 'Esto abrirá WhatsApp Web y enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
+                const sessionId = this.sessionSelect && this.sessionSelect.value ? this.sessionSelect.value : '';
+                if (!sessionId) {
+                    this.showStatus('Configura al menos una sesión WhatsApp antes de enviar', 'error');
+                    return;
+                }
+                confirmMessage += `Se usará la sesión del selector: ${this.getSessionLabel(sessionId)}.\n`;
+                confirmMessage += 'Se enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
             }
         }
 
