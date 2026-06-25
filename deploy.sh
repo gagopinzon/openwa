@@ -19,7 +19,7 @@ ok()   { echo -e "${GREEN}✅${NC} $1"; }
 warn() { echo -e "${YELLOW}⚠️${NC} $1"; }
 fail() { echo -e "${RED}❌${NC} $1"; exit 1; }
 
-echo "🚀 Despliegue openwa — $ROOT"
+echo "🚀 Despliegue msg — $ROOT"
 echo ""
 
 if ! command -v git >/dev/null 2>&1; then
@@ -80,4 +80,4 @@ fi
 
 echo ""
 ok "Despliegue completado"
-pm2 status openwa 2>/dev/null || pm2 status
+pm2 status msg 2>/dev/null || pm2 status

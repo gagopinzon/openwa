@@ -6,7 +6,7 @@ const logsDir = path.join(appRoot, 'logs');
 module.exports = {
   apps: [
     {
-      name: 'openwa',
+      name: 'msg',
       cwd: appRoot,
       script: 'server.js',
       exec_mode: 'fork',

@@ -123,9 +123,9 @@ npm run deploy
 
 ```bash
 pm2 start ecosystem.config.cjs
-pm2 logs openwa
-pm2 restart openwa
-pm2 stop openwa
+pm2 logs msg
+pm2 restart msg
+pm2 stop msg
 ```
 
 La app carga variables desde `.env` (no se sube a git). Logs en `logs/out.log` y `logs/error.log`.
