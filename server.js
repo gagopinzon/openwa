@@ -59,6 +59,8 @@ class SessionState {
     this.sendingAborted = false;
     this.skipWait = false;
     this.timePaused = false;
+    /** @type {{ phase: string, nombre?: string, telefono?: string, sessionCurrent?: number, sessionTotal?: number, remainingMs?: number, totalWaitMs?: number }|null} */
+    this.liveStatus = null;
   }
 }
 
@@ -75,13 +77,64 @@ function getBulkControlId(sessionIds) {
   return sessionIds.length > 1 ? ROUND_ROBIN_CONTROL_ID : sessionIds[0];
 }
 
-function resetBulkControlState(controlId) {
-  const finalState = getSessionState(controlId);
-  finalState.sendingInProgress = false;
-  finalState.sendingPaused = false;
-  finalState.sendingAborted = false;
-  finalState.skipWait = false;
-  finalState.timePaused = false;
+function resetBulkControlState(controlId, sessionIds = []) {
+  const resetOne = (id) => {
+    const state = getSessionState(id);
+    state.sendingInProgress = false;
+    state.sendingPaused = false;
+    state.sendingAborted = false;
+    state.skipWait = false;
+    state.timePaused = false;
+    state.liveStatus = null;
+  };
+
+  if (controlId === ROUND_ROBIN_CONTROL_ID) {
+    for (const sId of sessionIds) {
+      resetOne(sId);
+    }
+  }
+  resetOne(controlId);
+}
+
+function initSessionSendingState(sessionId) {
+  const state = getSessionState(sessionId);
+  state.sendingInProgress = true;
+  state.sendingPaused = false;
+  state.sendingAborted = false;
+  state.skipWait = false;
+  state.timePaused = false;
+  state.liveStatus = { phase: 'starting' };
+  return state;
+}
+
+function makeSessionCheckControls(sessionId, globalControlId) {
+  return () => {
+    const sessionState = getSessionState(sessionId);
+    const globalState = globalControlId ? getSessionState(globalControlId) : null;
+
+    const shouldSkipSession = sessionState.skipWait;
+    if (shouldSkipSession) sessionState.skipWait = false;
+
+    const shouldSkipGlobal = globalState?.skipWait;
+    if (shouldSkipGlobal) globalState.skipWait = false;
+
+    return {
+      paused: sessionState.sendingPaused || Boolean(globalState?.sendingPaused),
+      aborted: sessionState.sendingAborted || Boolean(globalState?.sendingAborted),
+      skipWait: shouldSkipSession || Boolean(shouldSkipGlobal),
+      timePaused: sessionState.timePaused || Boolean(globalState?.timePaused)
+    };
+  };
+}
+
+function abortAllActiveSessions() {
+  for (const [, state] of sessionStates) {
+    if (state.sendingInProgress) {
+      state.sendingAborted = true;
+      state.sendingPaused = false;
+      state.timePaused = false;
+    }
+  }
 }
 
 // Event emitters para notificaciones en tiempo real (Server-Sent Events)
@@ -513,7 +566,7 @@ app.post('/send-whatsapp', async (req, res) => {
           const sessionIds = selectedSessions;
           const N = sessionIds.length;
           const controlId = getBulkControlId(sessionIds);
-          console.log(`🔄 Envío round-robin con ${N} sesión(es): ${sessionIds.join(', ')}`);
+          console.log(`📱 Envío paralelo con ${N} sesión(es): ${sessionIds.join(', ')}`);
 
           const services = sessionIds.map((sId) => {
             let svc = whatsappServices.get(sId);
@@ -542,45 +595,79 @@ app.post('/send-whatsapp', async (req, res) => {
           });
           console.log(`📊 Distribución round-robin → ${distribution.join(', ')}`);
 
-          const bulkState = getSessionState(controlId);
-          bulkState.sendingInProgress = true;
-          bulkState.sendingPaused = false;
-          bulkState.sendingAborted = false;
-          bulkState.skipWait = false;
-          bulkState.timePaused = false;
+          initSessionSendingState(controlId);
+          for (const sId of sessionIds) {
+            initSessionSendingState(sId);
+          }
 
-          const checkControls = () => {
-            const currentState = getSessionState(controlId);
-            const shouldSkip = currentState.skipWait;
-            if (shouldSkip) currentState.skipWait = false;
-            return {
-              paused: currentState.sendingPaused,
-              aborted: currentState.sendingAborted,
-              skipWait: shouldSkip,
-              timePaused: currentState.timePaused
-            };
-          };
+          const checkControlsBySession = (sId) =>
+            makeSessionCheckControls(sId, controlId);
 
           const onProgress = (progressData) => {
+            if (progressData.sessionId) {
+              const st = getSessionState(progressData.sessionId);
+              st.liveStatus = {
+                phase: progressData.phase || (progressData.readyToSend ? 'sending' : 'sent'),
+                nombre: progressData.nombre,
+                telefono: progressData.telefono,
+                sessionCurrent: progressData.sessionCurrent,
+                sessionTotal: progressData.sessionTotal
+              };
+            }
+
             if (progressData.readyToSend) {
               broadcastEvent('readyToSend', {
                 current: progressData.current,
                 total: progressData.total,
                 nombre: progressData.nombre,
                 telefono: progressData.telefono,
-                sessionId: progressData.sessionId || controlId
+                sessionId: progressData.sessionId || controlId,
+                sessionCurrent: progressData.sessionCurrent,
+                sessionTotal: progressData.sessionTotal,
+                phase: progressData.phase || 'sending'
+              });
+            } else if (progressData.sessionId && progressData.phase) {
+              broadcastEvent('sessionProgress', {
+                sessionId: progressData.sessionId,
+                phase: progressData.phase,
+                nombre: progressData.nombre,
+                telefono: progressData.telefono,
+                current: progressData.current,
+                total: progressData.total,
+                sessionCurrent: progressData.sessionCurrent,
+                sessionTotal: progressData.sessionTotal,
+                success: progressData.success
               });
             }
           };
 
+          const onWaitProgressBySession = (sId) => (remainingMs, totalWaitMs) => {
+            const st = getSessionState(sId);
+            st.liveStatus = {
+              ...(st.liveStatus || {}),
+              phase: st.sendingPaused ? 'paused' : st.timePaused ? 'time_paused' : 'waiting',
+              remainingMs,
+              totalWaitMs
+            };
+            broadcastEvent('waitProgress', {
+              sessionId: sId,
+              remainingMs,
+              totalWaitMs,
+              phase: st.liveStatus.phase
+            });
+          };
+
           try {
             if (N === 1) {
+              const singleCheck = makeSessionCheckControls(sessionIds[0], null);
+              const onWaitProgress = onWaitProgressBySession(sessionIds[0]);
               results = await services[0].sendBulkMessages(
                 contactsToSend,
                 2,
                 onProgress,
-                checkControls,
-                mongoRecordHook
+                singleCheck,
+                mongoRecordHook,
+                onWaitProgress
               );
             } else {
               results = await sendRoundRobinBulk(
@@ -588,12 +675,13 @@ app.post('/send-whatsapp', async (req, res) => {
                 sessionIds,
                 contactsToSend,
                 onProgress,
-                checkControls,
-                mongoRecordHook
+                checkControlsBySession,
+                mongoRecordHook,
+                onWaitProgressBySession
               );
             }
           } finally {
-            resetBulkControlState(controlId);
+            resetBulkControlState(controlId, sessionIds);
           }
 
         } else {
@@ -794,6 +882,22 @@ app.post('/pause-sending', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+
+  if (sessionId === ROUND_ROBIN_CONTROL_ID) {
+    let pausedAny = false;
+    for (const [, state] of sessionStates) {
+      if (state.sendingInProgress) {
+        state.sendingPaused = true;
+        pausedAny = true;
+      }
+    }
+    if (!pausedAny) {
+      return res.status(400).json({ error: 'No hay envíos en progreso' });
+    }
+    console.log('⏸️  Envíos pausados en todas las sesiones activas');
+    return res.json({ success: true, message: 'Envíos pausados en todas las sesiones' });
+  }
+
   const sessionState = getSessionState(sessionId);
 
   if (!sessionState.sendingInProgress) {
@@ -820,6 +924,22 @@ app.post('/resume-sending', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+
+  if (sessionId === ROUND_ROBIN_CONTROL_ID) {
+    let resumedAny = false;
+    for (const [, state] of sessionStates) {
+      if (state.sendingInProgress) {
+        state.sendingPaused = false;
+        resumedAny = true;
+      }
+    }
+    if (!resumedAny) {
+      return res.status(400).json({ error: 'No hay envíos en progreso' });
+    }
+    console.log('▶️  Envíos reanudados en todas las sesiones activas');
+    return res.json({ success: true, message: 'Envíos reanudados en todas las sesiones' });
+  }
+
   const sessionState = getSessionState(sessionId);
 
   if (!sessionState.sendingInProgress) {
@@ -846,6 +966,17 @@ app.post('/abort-sending', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+
+  if (sessionId === ROUND_ROBIN_CONTROL_ID) {
+    const hadActive = [...sessionStates.values()].some((s) => s.sendingInProgress);
+    if (!hadActive) {
+      return res.status(400).json({ error: 'No hay envíos en progreso' });
+    }
+    abortAllActiveSessions();
+    console.log('🛑 Envíos abortados en todas las sesiones activas');
+    return res.json({ success: true, message: 'Envíos abortados en todas las sesiones' });
+  }
+
   const sessionState = getSessionState(sessionId);
 
   if (!sessionState.sendingInProgress) {
@@ -873,6 +1004,21 @@ app.post('/pause-time', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+
+  if (sessionId === ROUND_ROBIN_CONTROL_ID) {
+    let pausedAny = false;
+    for (const [, state] of sessionStates) {
+      if (state.sendingInProgress) {
+        state.timePaused = true;
+        pausedAny = true;
+      }
+    }
+    if (!pausedAny) {
+      return res.status(400).json({ error: 'No hay envíos en progreso' });
+    }
+    return res.json({ success: true, message: 'Tiempo pausado en todas las sesiones' });
+  }
+
   const sessionState = getSessionState(sessionId);
 
   if (!sessionState.sendingInProgress) {
@@ -899,6 +1045,21 @@ app.post('/resume-time', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+
+  if (sessionId === ROUND_ROBIN_CONTROL_ID) {
+    let resumedAny = false;
+    for (const [, state] of sessionStates) {
+      if (state.sendingInProgress) {
+        state.timePaused = false;
+        resumedAny = true;
+      }
+    }
+    if (!resumedAny) {
+      return res.status(400).json({ error: 'No hay envíos en progreso' });
+    }
+    return res.json({ success: true, message: 'Tiempo reanudado en todas las sesiones' });
+  }
+
   const sessionState = getSessionState(sessionId);
 
   if (!sessionState.sendingInProgress) {
@@ -925,6 +1086,22 @@ app.post('/skip-wait', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+
+  if (sessionId === ROUND_ROBIN_CONTROL_ID) {
+    let skippedAny = false;
+    for (const [, state] of sessionStates) {
+      if (state.sendingInProgress) {
+        state.skipWait = true;
+        state.timePaused = false;
+        skippedAny = true;
+      }
+    }
+    if (!skippedAny) {
+      return res.status(400).json({ error: 'No hay envíos en progreso' });
+    }
+    return res.json({ success: true, message: 'Siguiente mensaje en todas las sesiones activas' });
+  }
+
   const sessionState = getSessionState(sessionId);
 
   if (!sessionState.sendingInProgress) {
@@ -934,7 +1111,7 @@ app.post('/skip-wait', (req, res) => {
   }
 
   sessionState.skipWait = true;
-  sessionState.timePaused = false; // Reanudar el tiempo si estaba pausado al saltar
+  sessionState.timePaused = false;
   console.log(`⏩ Saltando espera - enviando siguiente mensaje manualmente (Sesión: ${sessionId})`);
 
   res.json({
@@ -953,6 +1130,36 @@ app.get('/sending-status', (req, res) => {
     sendingInProgress: sessionState.sendingInProgress,
     sendingPaused: sessionState.sendingPaused,
     sendingAborted: sessionState.sendingAborted,
+    timePaused: sessionState.timePaused,
+    liveStatus: sessionState.liveStatus,
+    testMode: TEST_MODE
+  });
+});
+
+// Estado de envío de varias sesiones (panel principal)
+app.get('/sending-status-all', (req, res) => {
+  const idsParam = req.query.sessionIds;
+  const sessionIds =
+    typeof idsParam === 'string' && idsParam.trim()
+      ? idsParam.split(',').map((id) => id.trim()).filter(Boolean)
+      : getConfiguredSessionIds();
+
+  const sessions = sessionIds.map((id) => {
+    const st = getSessionState(id);
+    return {
+      sessionId: id,
+      sendingInProgress: st.sendingInProgress,
+      sendingPaused: st.sendingPaused,
+      sendingAborted: st.sendingAborted,
+      timePaused: st.timePaused,
+      liveStatus: st.liveStatus
+    };
+  });
+
+  res.json({
+    success: true,
+    sessions,
+    anyInProgress: sessions.some((s) => s.sendingInProgress),
     testMode: TEST_MODE
   });
 });

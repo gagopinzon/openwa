@@ -44,6 +44,17 @@
                     No hay sesiones configuradas. Agrega al menos una antes de enviar mensajes.
                 </p>
             </section>
+
+            <section class="session-sending-panel" id="sessionSendingPanel" style="display: none;">
+                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Envío en progreso</h2>
+                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+                    Cada sesión envía en paralelo con su propio tiempo de espera (1–5 min aleatorio entre mensajes).
+                </p>
+                <div id="sessionSendingCards" class="session-sending-cards"></div>
+                <div class="session-sending-global" style="margin-top: 16px; text-align: center;">
+                    <button type="button" id="abortAllSessionsBtn" class="btn btn-danger">🛑 Abortar todas las sesiones</button>
+                </div>
+            </section>
         </header>
 
         <!-- Sección 1: Carga de archivos -->
@@ -91,7 +102,7 @@
                 </div>
                 <p style="font-size: 12px; color: #64748b; margin-top: 8px;">
                     Marca las sesiones que participarán en el envío. Por defecto todas están activas.
-                    Con varias sesiones, los mensajes se reparten en orden (1→sesión1, 2→sesión2, 3→sesión3…).
+                    Con varias sesiones, el primer mensaje sale al mismo tiempo en cada celular; luego cada sesión espera su propio tiempo aleatorio.
                 </p>
             </div>
 

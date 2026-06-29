@@ -10,9 +10,10 @@ const ROUND_ROBIN_CONTROL_ID = '__roundrobin__';
 
 /**
  * Espera aleatoria entre mensajes (1–5 min), respetando controles de pausa/aborto.
+ * @param {Function|null} onWaitProgress - (remainingMs, totalMs) => void
  * @returns {'ok'|'aborted'}
  */
-async function waitBetweenMessages(checkControls) {
+async function waitBetweenMessages(checkControls, onWaitProgress = null) {
   const minSeconds = 60;
   const maxSeconds = 300;
   const randomDelaySeconds =
@@ -35,6 +36,18 @@ async function waitBetweenMessages(checkControls) {
   let remainingTime = delayMs;
   const checkInterval = 5000;
 
+  const reportWait = () => {
+    if (onWaitProgress) {
+      try {
+        onWaitProgress(remainingTime, delayMs);
+      } catch (err) {
+        console.warn('onWaitProgress:', err.message);
+      }
+    }
+  };
+
+  reportWait();
+
   while (remainingTime > 0) {
     if (checkControls) {
       const controls = checkControls();
@@ -51,6 +64,7 @@ async function waitBetweenMessages(checkControls) {
 
       while (controls.timePaused && !controls.aborted && !controls.skipWait) {
         console.log('Tiempo de espera pausado...');
+        reportWait();
         await new Promise((resolve) => setTimeout(resolve, 1000));
 
         if (checkControls) {
@@ -68,6 +82,7 @@ async function waitBetweenMessages(checkControls) {
 
       while (controls.paused && !controls.aborted && !controls.timePaused) {
         console.log('Envío pausado durante la espera...');
+        reportWait();
         await new Promise((resolve) => setTimeout(resolve, 5000));
 
         if (checkControls) {
@@ -87,6 +102,7 @@ async function waitBetweenMessages(checkControls) {
     if (checkControls) {
       const controls = checkControls();
       if (controls.timePaused) {
+        reportWait();
         await new Promise((resolve) => setTimeout(resolve, 1000));
         continue;
       }
@@ -95,6 +111,7 @@ async function waitBetweenMessages(checkControls) {
     const waitTime = Math.min(remainingTime, checkInterval);
     await new Promise((resolve) => setTimeout(resolve, waitTime));
     remainingTime -= waitTime;
+    reportWait();
   }
 
   return 'ok';
@@ -200,7 +217,8 @@ class OpenWAWhatsAppService {
     delayMinutes = 3,
     onProgress = null,
     checkControls = null,
-    onMessageResult = null
+    onMessageResult = null,
+    onWaitProgress = null
   ) {
     if (!this.isInitialized) {
       throw new Error('WhatsApp no está inicializado. Llama a initWhatsApp() primero.');
@@ -234,9 +252,13 @@ class OpenWAWhatsAppService {
           readyToSend: true,
           current: i + 1,
           total: contacts.length,
+          sessionCurrent: i + 1,
+          sessionTotal: contacts.length,
           nombre: contact.nombre,
           telefono: contact.telefono,
-          mensajeIA: contact.mensajeIA
+          mensajeIA: contact.mensajeIA,
+          sessionId: this.logicalSessionId,
+          phase: 'sending'
         });
       }
 
@@ -264,15 +286,30 @@ class OpenWAWhatsAppService {
           onProgress({
             current: i + 1,
             total: contacts.length,
+            sessionCurrent: i + 1,
+            sessionTotal: contacts.length,
             nombre: contact.nombre,
             telefono: contact.telefono,
             mensajeIA: contact.mensajeIA,
-            success
+            sessionId: this.logicalSessionId,
+            success,
+            phase: 'sent'
           });
         }
 
         if (i < contacts.length - 1) {
-          const waitResult = await waitBetweenMessages(checkControls);
+          if (onProgress) {
+            onProgress({
+              sessionId: this.logicalSessionId,
+              sessionCurrent: i + 1,
+              sessionTotal: contacts.length,
+              phase: 'waiting',
+              nombre: contacts[i + 1].nombre,
+              telefono: contacts[i + 1].telefono
+            });
+          }
+
+          const waitResult = await waitBetweenMessages(checkControls, onWaitProgress);
           if (waitResult === 'aborted') {
             return results;
           }
@@ -314,33 +351,22 @@ class OpenWAWhatsAppService {
 }
 
 /**
- * Envía mensajes en round-robin: contacto i → sessionOrder[i % N].
- * @param {Map<string, OpenWAWhatsAppService>} servicesBySessionId
- * @param {string[]} sessionOrder
+ * Procesa la cola de contactos de una sola sesión con su propio timer.
  */
-async function sendRoundRobinBulk(
-  servicesBySessionId,
-  sessionOrder,
-  contacts,
+async function sendSessionQueue(
+  logicalSessionId,
+  service,
+  queueItems,
+  totalContacts,
   onProgress = null,
   checkControls = null,
-  onMessageResult = null
+  onMessageResult = null,
+  onWaitProgress = null
 ) {
   const results = [];
-  const N = sessionOrder.length;
 
-  console.log(
-    `Round-robin: ${contacts.length} mensaje(s) entre ${N} sesión(es): ${sessionOrder.join(', ')}`
-  );
-
-  for (let i = 0; i < contacts.length; i++) {
-    const contact = contacts[i];
-    const logicalSessionId = sessionOrder[i % N];
-    const service = servicesBySessionId.get(logicalSessionId);
-
-    if (!service) {
-      throw new Error(`Servicio no encontrado para sesión "${logicalSessionId}"`);
-    }
+  for (let i = 0; i < queueItems.length; i++) {
+    const { contact, globalIndex } = queueItems[i];
 
     if ((await applySendingControls(checkControls)) === 'aborted') {
       break;
@@ -352,19 +378,22 @@ async function sendRoundRobinBulk(
         : contact.mensajeIA;
 
     console.log(
-      `Round-robin ${i + 1}/${contacts.length} → sesión ${logicalSessionId}: ${contact.nombre} (${contact.telefono})`
+      `Sesión ${logicalSessionId} ${i + 1}/${queueItems.length} (global ${globalIndex + 1}/${totalContacts}): ${contact.nombre} (${contact.telefono})`
     );
     console.log(`Mensaje: ${mensajePreview}`);
 
     if (onProgress) {
       onProgress({
         readyToSend: true,
-        current: i + 1,
-        total: contacts.length,
+        current: globalIndex + 1,
+        total: totalContacts,
+        sessionCurrent: i + 1,
+        sessionTotal: queueItems.length,
         nombre: contact.nombre,
         telefono: contact.telefono,
         mensajeIA: contact.mensajeIA,
-        sessionId: logicalSessionId
+        sessionId: logicalSessionId,
+        phase: 'sending'
       });
     }
 
@@ -372,7 +401,7 @@ async function sendRoundRobinBulk(
       const success = await service.sendMessage(contact.telefono, contact.mensajeIA);
 
       const row = {
-        index: i,
+        index: globalIndex,
         nombre: contact.nombre,
         telefono: contact.telefono,
         mensajeIA: contact.mensajeIA,
@@ -392,26 +421,40 @@ async function sendRoundRobinBulk(
 
       if (onProgress) {
         onProgress({
-          current: i + 1,
-          total: contacts.length,
+          current: globalIndex + 1,
+          total: totalContacts,
+          sessionCurrent: i + 1,
+          sessionTotal: queueItems.length,
           nombre: contact.nombre,
           telefono: contact.telefono,
           mensajeIA: contact.mensajeIA,
           sessionId: logicalSessionId,
-          success
+          success,
+          phase: 'sent'
         });
       }
 
-      if (i < contacts.length - 1) {
-        const waitResult = await waitBetweenMessages(checkControls);
+      if (i < queueItems.length - 1) {
+        if (onProgress) {
+          onProgress({
+            sessionId: logicalSessionId,
+            sessionCurrent: i + 1,
+            sessionTotal: queueItems.length,
+            phase: 'waiting',
+            nombre: queueItems[i + 1].contact.nombre,
+            telefono: queueItems[i + 1].contact.telefono
+          });
+        }
+
+        const waitResult = await waitBetweenMessages(checkControls, onWaitProgress);
         if (waitResult === 'aborted') {
           break;
         }
       }
     } catch (error) {
-      console.error(`Error round-robin contacto ${i + 1}:`, error.message);
+      console.error(`Error sesión ${logicalSessionId} contacto ${i + 1}:`, error.message);
       const rowFail = {
-        index: i,
+        index: globalIndex,
         nombre: contact.nombre,
         telefono: contact.telefono,
         mensajeIA: contact.mensajeIA,
@@ -431,7 +474,80 @@ async function sendRoundRobinBulk(
     }
   }
 
-  console.log('Envío round-robin completado');
+  if (onProgress) {
+    onProgress({
+      sessionId: logicalSessionId,
+      phase: 'done',
+      sessionTotal: queueItems.length
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Envía mensajes en paralelo por sesión: cada sesión tiene su cola y su timer independiente.
+ * El primer mensaje de cada sesión se dispara al mismo tiempo.
+ * @param {Map<string, OpenWAWhatsAppService>} servicesBySessionId
+ * @param {string[]} sessionOrder
+ */
+async function sendRoundRobinBulk(
+  servicesBySessionId,
+  sessionOrder,
+  contacts,
+  onProgress = null,
+  checkControlsBySession = null,
+  onMessageResult = null,
+  onWaitProgressBySession = null
+) {
+  const N = sessionOrder.length;
+  const queues = new Map(sessionOrder.map((sId) => [sId, []]));
+
+  contacts.forEach((contact, idx) => {
+    const logicalSessionId = sessionOrder[idx % N];
+    queues.get(logicalSessionId).push({ contact, globalIndex: idx });
+  });
+
+  const distribution = sessionOrder.map(
+    (sId) => `${sId}: ${queues.get(sId).length}`
+  );
+  console.log(
+    `Envío paralelo: ${contacts.length} mensaje(s) entre ${N} sesión(es) con timers independientes`
+  );
+  console.log(`📊 Distribución → ${distribution.join(', ')}`);
+
+  const sessionPromises = sessionOrder.map((logicalSessionId) => {
+    const service = servicesBySessionId.get(logicalSessionId);
+    if (!service) {
+      return Promise.reject(
+        new Error(`Servicio no encontrado para sesión "${logicalSessionId}"`)
+      );
+    }
+
+    const queueItems = queues.get(logicalSessionId);
+    const checkControls = checkControlsBySession
+      ? checkControlsBySession(logicalSessionId)
+      : null;
+    const onWaitProgress = onWaitProgressBySession
+      ? onWaitProgressBySession(logicalSessionId)
+      : null;
+
+    return sendSessionQueue(
+      logicalSessionId,
+      service,
+      queueItems,
+      contacts.length,
+      onProgress,
+      checkControls,
+      onMessageResult,
+      onWaitProgress
+    );
+  });
+
+  const allResults = await Promise.all(sessionPromises);
+  const results = allResults.flat().sort((a, b) => a.index - b.index);
+
+  console.log('Envío paralelo por sesiones completado');
   return results;
 }
 

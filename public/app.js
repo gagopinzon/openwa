@@ -41,6 +41,10 @@ class CVAnalyzer {
         this.logContainer = document.getElementById('logContainer');
         this.loadingOverlay = document.getElementById('loadingOverlay');
         this.loadingText = document.getElementById('loadingText');
+        this.sessionSendingPanel = document.getElementById('sessionSendingPanel');
+        this.sessionSendingCards = document.getElementById('sessionSendingCards');
+        this.abortAllSessionsBtn = document.getElementById('abortAllSessionsBtn');
+        this.sessionLiveState = {};
 
         // Cargar el sonido de notificación
         this.notificationSound = new Audio('/notification-ping-372479.mp3');
@@ -71,6 +75,9 @@ class CVAnalyzer {
         }
         if (this.refreshOpenwaListBtn) {
             this.refreshOpenwaListBtn.addEventListener('click', this.loadOpenWASessionPicker.bind(this));
+        }
+        if (this.abortAllSessionsBtn) {
+            this.abortAllSessionsBtn.addEventListener('click', () => this.abortSending('__roundrobin__'));
         }
     }
 
@@ -767,9 +774,9 @@ class CVAnalyzer {
             confirmMessage += '🧪 MODO PRUEBA: Los mensajes se simularán (no se abrirá WhatsApp Web).';
         } else {
             if (selectedSessions.length > 1) {
-                confirmMessage += `🔄 Round-robin entre ${selectedSessions.length} sesiones: ${sessionLabels}\n`;
-                confirmMessage += 'Mensaje 1 → sesión 1, mensaje 2 → sesión 2, y así sucesivamente.\n';
-                confirmMessage += 'Delay aleatorio de 1-5 minutos entre cada mensaje.\n';
+                confirmMessage += `📱 Envío paralelo entre ${selectedSessions.length} sesiones: ${sessionLabels}\n`;
+                confirmMessage += 'Cada celular envía su primer mensaje al mismo tiempo.\n';
+                confirmMessage += 'Luego cada sesión espera su propio tiempo aleatorio (1-5 min).\n';
             } else {
                 confirmMessage += `Se usará la sesión: ${sessionLabels}.\n`;
                 confirmMessage += 'Se enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
@@ -792,6 +799,9 @@ class CVAnalyzer {
         this.activeSendingSessionIds = [...selectedSessions];
         this.activeControlSessionId =
             selectedSessions.length > 1 ? '__roundrobin__' : selectedSessions[0];
+
+        this.initSessionSendingPanel(selectedSessions);
+        this.showProgress(cvsToSend.length);
 
         try {
             const response = await fetch('/send-whatsapp', {
@@ -817,15 +827,17 @@ class CVAnalyzer {
                 // Reproducir sonido inicial para el primer mensaje
                 this.playNotificationSound();
 
-                this.showProgress(cvsToSend.length);
-
-                // Simular progreso (en una implementación real, esto vendría del servidor)
-                this.simulateProgress(result.results || []);
+                if (result.results && result.results.length > 0) {
+                    this.finalizeSendingProgress(result.results);
+                } else {
+                    this.finalizeSendingProgress([]);
+                }
             } else {
                 this.showStatus(`Error: ${result.message}`, 'error');
                 this.sendWhatsAppBtn.disabled = false;
                 this.generateMessagesBtn.disabled = false;
                 this.hideSendingControls();
+                this.hideSessionSendingPanel();
             }
 
         } catch (error) {
@@ -834,7 +846,160 @@ class CVAnalyzer {
             this.sendWhatsAppBtn.disabled = false;
             this.generateMessagesBtn.disabled = false;
             this.hideSendingControls();
+            this.hideSessionSendingPanel();
         }
+    }
+
+    initSessionSendingPanel(sessionIds) {
+        if (!this.sessionSendingPanel || !this.sessionSendingCards) return;
+
+        this.sessionLiveState = {};
+        sessionIds.forEach((id) => {
+            this.sessionLiveState[id] = {
+                phase: 'starting',
+                sessionCurrent: 0,
+                sessionTotal: 0
+            };
+        });
+
+        this.sessionSendingCards.innerHTML = sessionIds
+            .map((id) => {
+                const label = this.getSessionLabel(id);
+                return `
+                <div class="session-sending-card" data-session-id="${id}">
+                    <h3>${label}</h3>
+                    <div class="session-sending-status" id="sessionStatus-${id}">Iniciando...</div>
+                    <div class="session-sending-progress" id="sessionProgress-${id}">—</div>
+                    <div class="session-sending-actions">
+                        <button type="button" class="btn btn-warning btn-session-pause" data-session-id="${id}">⏸️ Pausar</button>
+                        <button type="button" class="btn btn-secondary btn-session-resume" data-session-id="${id}" style="display:none;">▶️ Reanudar</button>
+                        <button type="button" class="btn btn-info btn-session-skip" data-session-id="${id}">⏩ Siguiente</button>
+                        <button type="button" class="btn btn-danger btn-session-abort" data-session-id="${id}">🛑 Parar</button>
+                    </div>
+                </div>`;
+            })
+            .join('');
+
+        this.sessionSendingPanel.style.display = 'block';
+
+        this.sessionSendingCards.querySelectorAll('.btn-session-pause').forEach((btn) => {
+            btn.addEventListener('click', () => this.pauseSending(btn.dataset.sessionId));
+        });
+        this.sessionSendingCards.querySelectorAll('.btn-session-resume').forEach((btn) => {
+            btn.addEventListener('click', () => this.resumeSending(btn.dataset.sessionId));
+        });
+        this.sessionSendingCards.querySelectorAll('.btn-session-skip').forEach((btn) => {
+            btn.addEventListener('click', () => this.skipWaitSending(btn.dataset.sessionId));
+        });
+        this.sessionSendingCards.querySelectorAll('.btn-session-abort').forEach((btn) => {
+            btn.addEventListener('click', () => this.abortSending(btn.dataset.sessionId));
+        });
+    }
+
+    hideSessionSendingPanel() {
+        if (this.sessionSendingPanel) {
+            this.sessionSendingPanel.style.display = 'none';
+        }
+        if (this.sessionSendingCards) {
+            this.sessionSendingCards.innerHTML = '';
+        }
+        this.sessionLiveState = {};
+    }
+
+    formatWaitTime(remainingMs) {
+        const totalSec = Math.max(0, Math.ceil(remainingMs / 1000));
+        const min = Math.floor(totalSec / 60);
+        const sec = totalSec % 60;
+        if (min > 0 && sec > 0) return `${min}m ${sec}s`;
+        if (min > 0) return `${min}m`;
+        return `${sec}s`;
+    }
+
+    updateSessionCard(sessionId, data = {}) {
+        const state = { ...(this.sessionLiveState[sessionId] || {}), ...data };
+        this.sessionLiveState[sessionId] = state;
+
+        const statusEl = document.getElementById(`sessionStatus-${sessionId}`);
+        const progressEl = document.getElementById(`sessionProgress-${sessionId}`);
+        const card = this.sessionSendingCards?.querySelector(`[data-session-id="${sessionId}"]`);
+        if (!statusEl || !progressEl) return;
+
+        let statusText = 'En espera...';
+        if (state.phase === 'starting') statusText = 'Iniciando envío...';
+        else if (state.phase === 'sending') {
+            statusText = state.nombre
+                ? `Enviando a <strong>${state.nombre}</strong> (${state.telefono || ''})`
+                : 'Enviando mensaje...';
+        } else if (state.phase === 'waiting') {
+            const wait = state.remainingMs != null ? this.formatWaitTime(state.remainingMs) : '...';
+            statusText = state.nombre
+                ? `Esperando <strong>${wait}</strong> → próximo: ${state.nombre}`
+                : `Esperando <strong>${wait}</strong> para el siguiente mensaje`;
+        } else if (state.phase === 'paused') {
+            statusText = '⏸️ Envío pausado';
+        } else if (state.phase === 'time_paused') {
+            statusText = '⏸️ Tiempo de espera pausado';
+        } else if (state.phase === 'sent') {
+            statusText = state.nombre
+                ? `✓ Enviado a ${state.nombre}`
+                : '✓ Mensaje enviado';
+        } else if (state.phase === 'done') {
+            statusText = '✅ Cola completada';
+        } else if (state.phase === 'aborted') {
+            statusText = '🛑 Detenido';
+        }
+
+        statusEl.innerHTML = statusText;
+
+        if (state.sessionTotal > 0) {
+            progressEl.textContent = `Progreso: ${state.sessionCurrent || 0} / ${state.sessionTotal}`;
+        } else {
+            progressEl.textContent = '—';
+        }
+
+        if (card) {
+            const pauseBtn = card.querySelector('.btn-session-pause');
+            const resumeBtn = card.querySelector('.btn-session-resume');
+            const isPaused = state.phase === 'paused' || state.sendingPaused;
+            if (pauseBtn && resumeBtn) {
+                pauseBtn.style.display = isPaused ? 'none' : 'inline-block';
+                resumeBtn.style.display = isPaused ? 'inline-block' : 'none';
+            }
+        }
+    }
+
+    finalizeSendingProgress(results) {
+        this.addLogEntry('Envío completado', 'success');
+        this.hideSendingControls();
+        this.hideSessionSendingPanel();
+        this.disconnectFromEvents();
+        this.sendWhatsAppBtn.disabled = false;
+        this.generateMessagesBtn.disabled = false;
+
+        if (!results.length) return;
+
+        const total = results.length;
+        let sentCount = 0;
+        results.forEach((result, index) => {
+            sentCount++;
+            const progress = (sentCount / total) * 100;
+            this.progressFill.style.width = `${progress}%`;
+            this.progressText.textContent = `${sentCount} / ${total}`;
+            const sessionLabel = result.sessionId ? this.getSessionLabel(result.sessionId) : '';
+            const viaSession = sessionLabel ? ` · ${sessionLabel}` : '';
+            this.currentMessage.innerHTML = `
+                <strong>Enviado a:</strong> ${result.nombre}${viaSession}<br>
+                <strong>Teléfono:</strong> ${result.telefono}<br>
+                <strong>Estado:</strong> ${result.success ? 'Enviado' : 'Error'}
+            `;
+            if (result.mensajeIA) {
+                this.showMessagePreview(result.mensajeIA);
+            }
+            this.addLogEntry(
+                `${result.nombre} (${result.telefono})${sessionLabel ? ` [${sessionLabel}]` : ''} - ${result.success ? 'Enviado' : 'Error'}`,
+                result.success ? 'success' : 'error'
+            );
+        });
     }
 
     showProgress(total) {
@@ -1092,23 +1257,27 @@ class CVAnalyzer {
     }
 
     // Pausar envío
-    async pauseSending() {
+    async pauseSending(sessionId = null) {
         try {
-            const sessionId = this.getControlSessionId();
+            const targetSession = sessionId || this.getControlSessionId();
             const response = await fetch('/pause-sending', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ sessionId })
+                body: JSON.stringify({ sessionId: targetSession })
             });
 
             const result = await response.json();
 
             if (result.success) {
-                this.pauseBtn.style.display = 'none';
-                this.resumeBtn.style.display = 'inline-block';
-                this.addLogEntry('⏸️ Envío pausado', 'warning');
+                if (sessionId) {
+                    this.updateSessionCard(sessionId, { phase: 'paused', sendingPaused: true });
+                } else {
+                    this.pauseBtn.style.display = 'none';
+                    this.resumeBtn.style.display = 'inline-block';
+                }
+                this.addLogEntry(`⏸️ Envío pausado${sessionId ? ` (${this.getSessionLabel(sessionId)})` : ''}`, 'warning');
             } else {
                 this.showStatus(result.error, 'error');
             }
@@ -1119,23 +1288,27 @@ class CVAnalyzer {
     }
 
     // Reanudar envío
-    async resumeSending() {
+    async resumeSending(sessionId = null) {
         try {
-            const sessionId = this.getControlSessionId();
+            const targetSession = sessionId || this.getControlSessionId();
             const response = await fetch('/resume-sending', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ sessionId })
+                body: JSON.stringify({ sessionId: targetSession })
             });
 
             const result = await response.json();
 
             if (result.success) {
-                this.pauseBtn.style.display = 'inline-block';
-                this.resumeBtn.style.display = 'none';
-                this.addLogEntry('▶️ Envío reanudado', 'success');
+                if (sessionId) {
+                    this.updateSessionCard(sessionId, { phase: 'waiting', sendingPaused: false });
+                } else {
+                    this.pauseBtn.style.display = 'inline-block';
+                    this.resumeBtn.style.display = 'none';
+                }
+                this.addLogEntry(`▶️ Envío reanudado${sessionId ? ` (${this.getSessionLabel(sessionId)})` : ''}`, 'success');
             } else {
                 this.showStatus(result.error, 'error');
             }
@@ -1202,24 +1375,24 @@ class CVAnalyzer {
     }
 
     // Enviar siguiente mensaje manualmente (saltar espera)
-    async skipWaitSending() {
+    async skipWaitSending(sessionId = null) {
         try {
-            const sessionId = this.getControlSessionId();
+            const targetSession = sessionId || this.getControlSessionId();
             const response = await fetch('/skip-wait', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ sessionId })
+                body: JSON.stringify({ sessionId: targetSession })
             });
 
             const result = await response.json();
 
             if (result.success) {
-                // Reanudar el tiempo si estaba pausado
                 this.pauseTimeBtn.style.display = 'inline-block';
                 this.resumeTimeBtn.style.display = 'none';
-                this.addLogEntry('⏩ Saltando espera - el siguiente mensaje se enviará inmediatamente', 'info');
+                const label = sessionId ? this.getSessionLabel(sessionId) : 'todas las sesiones';
+                this.addLogEntry(`⏩ Saltando espera en ${label}`, 'info');
                 this.showStatus('El siguiente mensaje se enviará inmediatamente', 'success');
             } else {
                 this.showStatus(result.error, 'error');
@@ -1231,41 +1404,47 @@ class CVAnalyzer {
     }
 
     // Abortar envío
-    async abortSending() {
-        if (confirm('¿Estás seguro de abortar el envío? Esto no se puede deshacer.')) {
-            try {
-                const sessionId = this.getControlSessionId();
-                const response = await fetch('/abort-sending', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ sessionId })
-                });
+    async abortSending(sessionId = null) {
+        const targetSession = sessionId || this.getControlSessionId();
+        const isGlobal = targetSession === '__roundrobin__';
+        const confirmMsg = isGlobal
+            ? '¿Abortar el envío en TODAS las sesiones?'
+            : `¿Parar el envío en ${this.getSessionLabel(targetSession)}?`;
 
-                const result = await response.json();
+        if (!confirm(confirmMsg)) return;
 
-                if (result.success) {
-                    this.addLogEntry('🛑 Envío abortado por el usuario', 'error');
-                    // Resetear estados de los botones
-                    if (this.pauseTimeBtn) {
-                        this.pauseTimeBtn.style.display = 'inline-block';
-                    }
-                    if (this.resumeTimeBtn) {
-                        this.resumeTimeBtn.style.display = 'none';
-                    }
-                    // Re-habilitar botones principales
+        try {
+            const response = await fetch('/abort-sending', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ sessionId: targetSession })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                if (isGlobal) {
+                    Object.keys(this.sessionLiveState).forEach((id) => {
+                        this.updateSessionCard(id, { phase: 'aborted' });
+                    });
+                    this.addLogEntry('🛑 Envío abortado en todas las sesiones', 'error');
                     this.sendWhatsAppBtn.disabled = false;
                     this.generateMessagesBtn.disabled = false;
                     this.hideSendingControls();
-                    this.disconnectFromEvents(); // Desconectar eventos al abortar
+                    this.hideSessionSendingPanel();
+                    this.disconnectFromEvents();
                 } else {
-                    this.showStatus(result.error, 'error');
+                    this.updateSessionCard(targetSession, { phase: 'aborted' });
+                    this.addLogEntry(`🛑 Envío detenido en ${this.getSessionLabel(targetSession)}`, 'error');
                 }
-            } catch (error) {
-                console.error('Error aborting sending:', error);
-                this.showStatus('Error abortando envío', 'error');
+            } else {
+                this.showStatus(result.error, 'error');
             }
+        } catch (error) {
+            console.error('Error aborting sending:', error);
+            this.showStatus('Error abortando envío', 'error');
         }
     }
 
@@ -1323,21 +1502,33 @@ class CVAnalyzer {
 
             console.log('🔔 Listo para enviar mensaje:', data);
 
+            if (data.sessionId && activeIds.includes(data.sessionId)) {
+                this.updateSessionCard(data.sessionId, {
+                    phase: 'sending',
+                    nombre: data.nombre,
+                    telefono: data.telefono,
+                    sessionCurrent: data.sessionCurrent,
+                    sessionTotal: data.sessionTotal
+                });
+            }
+
             // Reproducir sonido de notificación
             this.playNotificationSound();
 
             // Actualizar la interfaz si es necesario
             if (data.nombre) {
-                this.addLogEntry(`🔔 Listo para enviar a ${data.nombre}`, 'info');
-                // Actualizar el mensaje actual
+                const sessionLabel = data.sessionId ? this.getSessionLabel(data.sessionId) : '';
+                this.addLogEntry(
+                    `🔔 ${sessionLabel ? `[${sessionLabel}] ` : ''}Enviando a ${data.nombre}`,
+                    'info'
+                );
                 if (this.currentMessage) {
                     this.currentMessage.innerHTML = `
-                        <strong>Próximo envío a:</strong> ${data.nombre}<br>
+                        <strong>Enviando a:</strong> ${data.nombre}${sessionLabel ? ` (${sessionLabel})` : ''}<br>
                         <strong>Teléfono:</strong> ${data.telefono}<br>
-                        <strong>Estado:</strong> Listo para enviar
+                        <strong>Estado:</strong> Enviando...
                     `;
                 }
-                // Actualizar progreso si está disponible
                 if (this.progressText && data.total) {
                     this.progressText.textContent = `${data.current} / ${data.total}`;
                     const progress = (data.current / data.total) * 100;
@@ -1345,6 +1536,52 @@ class CVAnalyzer {
                         this.progressFill.style.width = `${progress}%`;
                     }
                 }
+            }
+        });
+
+        this.eventSource.addEventListener('waitProgress', (event) => {
+            const data = JSON.parse(event.data);
+            if (!data.sessionId) return;
+            this.updateSessionCard(data.sessionId, {
+                phase: data.phase || 'waiting',
+                remainingMs: data.remainingMs,
+                totalWaitMs: data.totalWaitMs
+            });
+        });
+
+        this.eventSource.addEventListener('sessionProgress', (event) => {
+            const data = JSON.parse(event.data);
+            if (!data.sessionId) return;
+
+            if (data.phase === 'waiting') {
+                this.updateSessionCard(data.sessionId, {
+                    phase: 'waiting',
+                    nombre: data.nombre,
+                    telefono: data.telefono,
+                    sessionCurrent: data.sessionCurrent,
+                    sessionTotal: data.sessionTotal
+                });
+            } else if (data.phase === 'sent') {
+                this.updateSessionCard(data.sessionId, {
+                    phase: 'sent',
+                    nombre: data.nombre,
+                    telefono: data.telefono,
+                    sessionCurrent: data.sessionCurrent,
+                    sessionTotal: data.sessionTotal
+                });
+                if (this.progressText && data.total) {
+                    this.progressText.textContent = `${data.current} / ${data.total}`;
+                    const progress = (data.current / data.total) * 100;
+                    if (this.progressFill) {
+                        this.progressFill.style.width = `${progress}%`;
+                    }
+                }
+            } else if (data.phase === 'done') {
+                this.updateSessionCard(data.sessionId, {
+                    phase: 'done',
+                    sessionCurrent: data.sessionTotal,
+                    sessionTotal: data.sessionTotal
+                });
             }
         });
 
