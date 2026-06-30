@@ -44,6 +44,16 @@ const upload = multer({
 let cvsData = [];
 const whatsappServices = new Map(); // Map<sessionId, WhatsAppService>
 
+/** @type {{ inProgress: boolean, current: number, total: number, nombre: string|null, error: string|null, completedAt: number|null }} */
+let generationState = {
+  inProgress: false,
+  current: 0,
+  total: 0,
+  nombre: null,
+  error: null,
+  completedAt: null
+};
+
 function getConfiguredSessionIds() {
   return sessionsStore.getLogicalSessionIds();
 }
@@ -289,18 +299,22 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
   }
 });
 
-// Ruta para generar mensajes con IA
+// Ruta para generar mensajes con IA (responde al instante; el trabajo sigue en segundo plano)
 app.post('/generate-messages', async (req, res) => {
   try {
+    if (generationState.inProgress) {
+      return res.status(409).json({
+        error: 'Ya hay una generación de mensajes en curso',
+        generation: generationState
+      });
+    }
+
     if (cvsData.length === 0) {
       return res.status(400).json({
         error: 'No hay CVs procesados. Sube archivos PDF primero.'
       });
     }
 
-    console.log(`Generando mensajes de IA para ${cvsData.length} CVs...`);
-
-    // Filtrar solo CVs procesados exitosamente
     const validCVs = cvsData.filter(cv => cv.procesado && cv.nombre !== 'Error al procesar');
 
     if (validCVs.length === 0) {
@@ -309,32 +323,72 @@ app.post('/generate-messages', async (req, res) => {
       });
     }
 
-    // Generar mensajes con IA
-    const cvsWithMessages = await generateBulkMessages(validCVs);
+    console.log(`Iniciando generación de IA para ${validCVs.length} CVs (en segundo plano)...`);
 
-    // Actualizar los datos en memoria
-    cvsWithMessages.forEach(cvWithMessage => {
-      const index = cvsData.findIndex(cv => cv.archivoOriginal === cvWithMessage.archivoOriginal);
-      if (index !== -1) {
-        cvsData[index].mensajeIA = cvWithMessage.mensajeIA;
-      }
-    });
+    generationState = {
+      inProgress: true,
+      current: 0,
+      total: validCVs.length,
+      nombre: null,
+      error: null,
+      completedAt: null
+    };
 
-    console.log(`Mensajes generados exitosamente para ${cvsWithMessages.length} CVs`);
-
-    res.json({
+    res.status(202).json({
       success: true,
-      message: `Se generaron mensajes de IA para ${cvsWithMessages.length} CVs`,
-      cvs: cvsData
+      started: true,
+      total: validCVs.length,
+      message: `Generación iniciada para ${validCVs.length} CVs`
     });
 
+    (async () => {
+      try {
+        const cvsWithMessages = await generateBulkMessages(validCVs, (progress) => {
+          generationState.current = progress.current;
+          generationState.nombre = progress.nombre;
+          broadcastEvent('generationProgress', progress);
+        });
+
+        cvsWithMessages.forEach(cvWithMessage => {
+          const index = cvsData.findIndex(cv => cv.archivoOriginal === cvWithMessage.archivoOriginal);
+          if (index !== -1) {
+            cvsData[index].mensajeIA = cvWithMessage.mensajeIA;
+          }
+        });
+
+        console.log(`Mensajes generados exitosamente para ${cvsWithMessages.length} CVs`);
+
+        generationState.inProgress = false;
+        generationState.completedAt = Date.now();
+        generationState.current = validCVs.length;
+
+        broadcastEvent('generationComplete', {
+          total: cvsWithMessages.length,
+          message: `Se generaron mensajes de IA para ${cvsWithMessages.length} CVs`
+        });
+      } catch (error) {
+        console.error('Error generando mensajes:', error);
+        generationState.inProgress = false;
+        generationState.error = error.message;
+        broadcastEvent('generationError', { error: error.message });
+      }
+    })();
   } catch (error) {
-    console.error('Error generando mensajes:', error);
+    console.error('Error iniciando generación de mensajes:', error);
+    generationState.inProgress = false;
     res.status(500).json({
       error: 'Error generando mensajes con IA',
       message: error.message
     });
   }
+});
+
+// Estado de la generación de mensajes (para polling desde el cliente)
+app.get('/generation-status', (req, res) => {
+  res.json({
+    success: true,
+    ...generationState
+  });
 });
 
 // Ruta para obtener el estado actual de los CVs

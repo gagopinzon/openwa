@@ -226,34 +226,61 @@ Mónica González`;
  * @param {Array} cvs - Array de objetos CV con nombre y experiencia
  * @returns {Promise<Array>} - Array de mensajes generados
  */
-async function generateBulkMessages(cvs) {
+async function generateBulkMessages(cvs, onProgress = null) {
   const messages = [];
-  
+
   for (let i = 0; i < cvs.length; i++) {
     const cv = cvs[i];
     console.log(`Generando mensaje ${i + 1}/${cvs.length} para ${cv.nombre}`);
-    
+
+    if (onProgress) {
+      onProgress({
+        current: i,
+        total: cvs.length,
+        nombre: cv.nombre,
+        phase: 'generating'
+      });
+    }
+
     try {
       const message = await generatePersonalizedMessage(cv.nombre, cv.experiencia);
       messages.push({
         ...cv,
         mensajeIA: message
       });
-      
+
+      if (onProgress) {
+        onProgress({
+          current: i + 1,
+          total: cvs.length,
+          nombre: cv.nombre,
+          phase: 'done'
+        });
+      }
+
       // Delay entre llamadas para evitar rate limiting
       if (i < cvs.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
-      
+
     } catch (error) {
       console.error(`Error generando mensaje para ${cv.nombre}:`, error.message);
       messages.push({
         ...cv,
         mensajeIA: `Error generando mensaje para ${cv.nombre}`
       });
+
+      if (onProgress) {
+        onProgress({
+          current: i + 1,
+          total: cvs.length,
+          nombre: cv.nombre,
+          phase: 'error'
+        });
+      }
     }
   }
-  
+
   return messages;
 }
 

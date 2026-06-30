@@ -718,8 +718,11 @@ class CVAnalyzer {
             return;
         }
 
-        this.showLoading('Generando mensajes personalizados con IA...');
+        this.showLoading('Iniciando generación de mensajes con IA...');
         this.generateMessagesBtn.disabled = true;
+        this.progressSection.style.display = 'block';
+        this.progressFill.style.width = '0%';
+        this.progressText.textContent = '0 / 0';
 
         try {
             const response = await fetch('/generate-messages', {
@@ -731,21 +734,79 @@ class CVAnalyzer {
 
             const result = await response.json();
 
-            if (result.success) {
-                this.cvsData = result.cvs;
-                this.displayResults();
-                this.showStatus(result.message, 'success');
-                this.sendWhatsAppBtn.disabled = false;
-            } else {
-                this.showStatus(`Error: ${result.message}`, 'error');
+            if (response.status === 409) {
+                this.showStatus('Ya hay una generación en curso. Espera a que termine.', 'info');
+                await this.waitForGenerationComplete(result.generation?.total || this.cvsData.length);
+                return;
             }
 
+            if (!response.ok || !result.started) {
+                const errMsg = result.error || result.message || 'No se pudo iniciar la generación';
+                this.showStatus(`Error: ${errMsg}`, 'error');
+                return;
+            }
+
+            this.progressText.textContent = `0 / ${result.total}`;
+            await this.waitForGenerationComplete(result.total);
         } catch (error) {
             console.error('Error generating messages:', error);
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
         } finally {
             this.hideLoading();
             this.generateMessagesBtn.disabled = false;
+        }
+    }
+
+    async waitForGenerationComplete(total) {
+        const pollIntervalMs = 2000;
+
+        while (true) {
+            await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+
+            let status;
+            try {
+                const statusRes = await fetch('/generation-status');
+                status = await statusRes.json();
+            } catch (error) {
+                console.warn('Error consultando estado de generación:', error);
+                continue;
+            }
+
+            if (status.inProgress) {
+                const current = status.current || 0;
+                const progressTotal = status.total || total;
+                const label = status.nombre ? `: ${status.nombre}` : '';
+                this.loadingText.textContent = `Generando mensaje ${current}/${progressTotal}${label}...`;
+                const progress = progressTotal > 0 ? (current / progressTotal) * 100 : 0;
+                this.progressFill.style.width = `${progress}%`;
+                this.progressText.textContent = `${current} / ${progressTotal}`;
+                continue;
+            }
+
+            if (status.error) {
+                this.showStatus(`Error generando mensajes: ${status.error}`, 'error');
+                this.progressSection.style.display = 'none';
+                return;
+            }
+
+            try {
+                const cvsRes = await fetch('/cvs-status');
+                const cvsResult = await cvsRes.json();
+                if (cvsResult.success && Array.isArray(cvsResult.cvs)) {
+                    this.cvsData = cvsResult.cvs;
+                    this.displayResults();
+                }
+            } catch (error) {
+                console.warn('Error cargando CVs generados:', error);
+            }
+
+            const doneTotal = status.total || total;
+            this.progressFill.style.width = '100%';
+            this.progressText.textContent = `${doneTotal} / ${doneTotal}`;
+            this.showStatus(`Se generaron mensajes de IA para ${doneTotal} CVs`, 'success');
+            this.sendWhatsAppBtn.disabled = false;
+            this.progressSection.style.display = 'none';
+            return;
         }
     }
 
