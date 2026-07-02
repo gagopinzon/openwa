@@ -6,6 +6,7 @@ class CVAnalyzer {
         this.whatsappProvider = 'openwa';
         this.configuredSessions = [];
         this.eventSource = null;
+        this.sendJobCompleted = null;
         this.initializeElements();
         this.attachEventListeners();
         this.setupSendingControls();
@@ -878,21 +879,53 @@ class CVAnalyzer {
 
             const result = await response.json();
 
+            if (response.status === 409) {
+                this.showStatus('Ya hay un envío en curso. Mostrando progreso...', 'info');
+                await this.waitForSendComplete(result.sendJob?.total || cvsToSend.length);
+                return;
+            }
+
+            if (result.allSkippedOrEmpty) {
+                this.showStatus(result.message, 'success');
+                this.sendWhatsAppBtn.disabled = false;
+                this.generateMessagesBtn.disabled = false;
+                this.hideSendingControls();
+                this.hideSessionSendingPanel();
+                this.progressSection.style.display = 'none';
+                return;
+            }
+
+            if (!response.ok || (!result.started && !result.success)) {
+                const errMsg = result.error || result.message || 'No se pudo iniciar el envío';
+                this.showStatus(`Error: ${errMsg}`, 'error');
+                this.sendWhatsAppBtn.disabled = false;
+                this.generateMessagesBtn.disabled = false;
+                this.hideSendingControls();
+                this.hideSessionSendingPanel();
+                return;
+            }
+
+            if (result.started) {
+                this.playNotificationSound();
+                if (result.skippedAlreadyContacted?.length > 0) {
+                    this.addLogEntry(
+                        `${result.skippedAlreadyContacted.length} contacto(s) omitidos (ya contactados)`,
+                        'info'
+                    );
+                }
+                await this.waitForSendComplete(result.total);
+                return;
+            }
+
+            // Respuesta síncrona legacy (por compatibilidad)
             if (result.success) {
                 let message = result.message;
                 if (result.testMode) {
                     message += ' (Modo de Prueba)';
                 }
                 this.showStatus(message, 'success');
-
-                // Reproducir sonido inicial para el primer mensaje
                 this.playNotificationSound();
-
-                if (result.results && result.results.length > 0) {
-                    this.finalizeSendingProgress(result.results);
-                } else {
-                    this.finalizeSendingProgress([]);
-                }
+                this.finalizeSendingProgress(result.results || []);
             } else {
                 this.showStatus(`Error: ${result.message}`, 'error');
                 this.sendWhatsAppBtn.disabled = false;
@@ -909,6 +942,58 @@ class CVAnalyzer {
             this.hideSendingControls();
             this.hideSessionSendingPanel();
         }
+    }
+
+    async waitForSendComplete(total) {
+        const pollIntervalMs = 3000;
+        let seenInProgress = false;
+
+        while (true) {
+            if (this.sendJobCompleted) {
+                const status = this.sendJobCompleted;
+                this.sendJobCompleted = null;
+                this.applySendJobResult(status);
+                return;
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+
+            try {
+                const res = await fetch('/send-job-status');
+                const status = await res.json();
+
+                if (status.inProgress || status.anyInProgress) {
+                    seenInProgress = true;
+                    continue;
+                }
+
+                if (status.error) {
+                    this.showStatus(`Error: ${status.error}`, 'error');
+                    this.sendWhatsAppBtn.disabled = false;
+                    this.generateMessagesBtn.disabled = false;
+                    this.hideSendingControls();
+                    this.hideSessionSendingPanel();
+                    this.disconnectFromEvents();
+                    return;
+                }
+
+                if (status.completedAt || (seenInProgress && status.results)) {
+                    this.applySendJobResult(status);
+                    return;
+                }
+            } catch (error) {
+                console.warn('Error consultando estado de envío:', error);
+            }
+        }
+    }
+
+    applySendJobResult(status) {
+        let message = status.message || 'Envío completado';
+        if (status.testMode) {
+            message += ' (Modo de Prueba)';
+        }
+        this.showStatus(message, 'success');
+        this.finalizeSendingProgress(status.results || []);
     }
 
     initSessionSendingPanel(sessionIds) {
@@ -1644,6 +1729,26 @@ class CVAnalyzer {
                     sessionTotal: data.sessionTotal
                 });
             }
+        });
+
+        this.eventSource.addEventListener('sendComplete', async (event) => {
+            try {
+                const res = await fetch('/send-job-status');
+                const status = await res.json();
+                this.sendJobCompleted = status;
+            } catch (error) {
+                console.warn('Error cargando resultado de envío:', error);
+            }
+        });
+
+        this.eventSource.addEventListener('sendError', (event) => {
+            const data = JSON.parse(event.data);
+            this.showStatus(`Error en envío: ${data.error}`, 'error');
+            this.sendWhatsAppBtn.disabled = false;
+            this.generateMessagesBtn.disabled = false;
+            this.hideSendingControls();
+            this.hideSessionSendingPanel();
+            this.disconnectFromEvents();
         });
 
         // Manejar errores de conexión

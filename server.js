@@ -54,6 +54,216 @@ let generationState = {
   completedAt: null
 };
 
+/** @type {{ inProgress: boolean, total: number, sessionIds: string[], startedAt: number|null, completedAt: number|null, error: string|null, message: string|null, results: Array|null, skippedAlreadyContacted: Array, testMode: boolean }} */
+let lastSendJob = {
+  inProgress: false,
+  total: 0,
+  sessionIds: [],
+  startedAt: null,
+  completedAt: null,
+  error: null,
+  message: null,
+  results: null,
+  skippedAlreadyContacted: [],
+  testMode: false
+};
+
+function isAnySendingInProgress() {
+  return lastSendJob.inProgress || [...sessionStates.values()].some((s) => s.sendingInProgress);
+}
+
+function buildSendProgressHandlers(controlId) {
+  const onProgress = (progressData) => {
+    if (progressData.sessionId) {
+      const st = getSessionState(progressData.sessionId);
+      st.liveStatus = {
+        phase: progressData.phase || (progressData.readyToSend ? 'sending' : 'sent'),
+        nombre: progressData.nombre,
+        telefono: progressData.telefono,
+        sessionCurrent: progressData.sessionCurrent,
+        sessionTotal: progressData.sessionTotal
+      };
+    }
+
+    if (progressData.readyToSend) {
+      broadcastEvent('readyToSend', {
+        current: progressData.current,
+        total: progressData.total,
+        nombre: progressData.nombre,
+        telefono: progressData.telefono,
+        sessionId: progressData.sessionId || controlId,
+        sessionCurrent: progressData.sessionCurrent,
+        sessionTotal: progressData.sessionTotal,
+        phase: progressData.phase || 'sending'
+      });
+    } else if (progressData.sessionId && progressData.phase) {
+      broadcastEvent('sessionProgress', {
+        sessionId: progressData.sessionId,
+        phase: progressData.phase,
+        nombre: progressData.nombre,
+        telefono: progressData.telefono,
+        current: progressData.current,
+        total: progressData.total,
+        sessionCurrent: progressData.sessionCurrent,
+        sessionTotal: progressData.sessionTotal,
+        success: progressData.success
+      });
+    }
+  };
+
+  const onWaitProgressBySession = (sId) => (remainingMs, totalWaitMs) => {
+    const st = getSessionState(sId);
+    st.liveStatus = {
+      ...(st.liveStatus || {}),
+      phase: st.sendingPaused ? 'paused' : st.timePaused ? 'time_paused' : 'waiting',
+      remainingMs,
+      totalWaitMs
+    };
+    broadcastEvent('waitProgress', {
+      sessionId: sId,
+      remainingMs,
+      totalWaitMs,
+      phase: st.liveStatus.phase
+    });
+  };
+
+  return { onProgress, onWaitProgressBySession };
+}
+
+async function runWhatsAppSendJob({
+  finalCvsToSend,
+  sessionIds,
+  skippedAlreadyContacted,
+  mongoRecordHook,
+  testMode
+}) {
+  const controlId = getBulkControlId(sessionIds);
+  const N = sessionIds.length;
+
+  lastSendJob.inProgress = true;
+  lastSendJob.total = finalCvsToSend.length;
+  lastSendJob.sessionIds = sessionIds;
+  lastSendJob.startedAt = Date.now();
+  lastSendJob.completedAt = null;
+  lastSendJob.error = null;
+  lastSendJob.message = null;
+  lastSendJob.results = null;
+  lastSendJob.skippedAlreadyContacted = skippedAlreadyContacted;
+  lastSendJob.testMode = testMode;
+
+  try {
+    if (testMode) {
+      initSessionSendingState(controlId);
+      for (const sId of sessionIds) {
+        initSessionSendingState(sId);
+      }
+
+      const { onProgress } = buildSendProgressHandlers(controlId);
+      const results = await simulateWhatsAppSending(finalCvsToSend, (progress) => {
+        onProgress({
+          readyToSend: true,
+          current: progress.current,
+          total: progress.total,
+          nombre: progress.nombre,
+          telefono: progress.telefono,
+          sessionId: sessionIds[0],
+          sessionCurrent: progress.current,
+          sessionTotal: progress.total,
+          phase: 'sending'
+        });
+      });
+
+      resetBulkControlState(controlId, sessionIds);
+      lastSendJob.results = results;
+      lastSendJob.message = `Envío completado: ${results.filter((r) => r.success).length}/${results.length} mensajes enviados (modo prueba)`;
+    } else {
+      console.log(`📱 Envío paralelo con ${N} sesión(es): ${sessionIds.join(', ')}`);
+
+      const services = sessionIds.map((sId) => {
+        let svc = whatsappServices.get(sId);
+        if (!svc) {
+          svc = new WhatsAppService(sId);
+          whatsappServices.set(sId, svc);
+        }
+        return svc;
+      });
+
+      for (const svc of services) {
+        if (!svc.isReady()) await svc.initWhatsApp();
+      }
+
+      const servicesBySessionId = new Map(sessionIds.map((sId, i) => [sId, services[i]]));
+      const contactsToSend = finalCvsToSend.map((cv) => ({
+        nombre: cv.nombre,
+        telefono: cv.telefono,
+        mensajeIA: cv.mensajeIA
+      }));
+
+      const distribution = sessionIds.map((sId, i) => {
+        const count = contactsToSend.filter((_, idx) => idx % N === i).length;
+        return `${sId}: ${count}`;
+      });
+      console.log(`📊 Distribución round-robin → ${distribution.join(', ')}`);
+
+      initSessionSendingState(controlId);
+      for (const sId of sessionIds) {
+        initSessionSendingState(sId);
+      }
+
+      const { onProgress, onWaitProgressBySession } = buildSendProgressHandlers(controlId);
+      const checkControlsBySession = (sId) => makeSessionCheckControls(sId, controlId);
+
+      let results;
+      try {
+        if (N === 1) {
+          const singleCheck = makeSessionCheckControls(sessionIds[0], null);
+          const onWaitProgress = onWaitProgressBySession(sessionIds[0]);
+          results = await services[0].sendBulkMessages(
+            contactsToSend,
+            2,
+            onProgress,
+            singleCheck,
+            mongoRecordHook,
+            onWaitProgress
+          );
+        } else {
+          results = await sendRoundRobinBulk(
+            servicesBySessionId,
+            sessionIds,
+            contactsToSend,
+            onProgress,
+            checkControlsBySession,
+            mongoRecordHook,
+            onWaitProgressBySession
+          );
+        }
+      } finally {
+        resetBulkControlState(controlId, sessionIds);
+      }
+
+      lastSendJob.results = results;
+      lastSendJob.message = `Envío completado: ${results.filter((r) => r.success).length}/${results.length} mensajes enviados`;
+    }
+
+    lastSendJob.completedAt = Date.now();
+    console.log(`Envío completado. ${lastSendJob.message}`);
+
+    broadcastEvent('sendComplete', {
+      message: lastSendJob.message,
+      total: finalCvsToSend.length,
+      successCount: lastSendJob.results.filter((r) => r.success).length,
+      testMode
+    });
+  } catch (error) {
+    console.error('Error en envío en segundo plano:', error);
+    lastSendJob.error = error.message;
+    resetBulkControlState(controlId, sessionIds);
+    broadcastEvent('sendError', { error: error.message });
+  } finally {
+    lastSendJob.inProgress = false;
+  }
+}
+
 function getConfiguredSessionIds() {
   return sessionsStore.getLogicalSessionIds();
 }
@@ -591,176 +801,55 @@ app.post('/send-whatsapp', async (req, res) => {
       });
     }
 
-    console.log(`Iniciando envío de ${finalCvsToSend.length} mensajes por WhatsApp (${duplicates.length} duplicados eliminados)...`);
-    console.log(`Modo de prueba: ${TEST_MODE ? 'ACTIVADO (simulando envíos)' : 'DESACTIVADO (enviando real)'}`);
-
-    if (TEST_MODE) {
-      const results = await simulateWhatsAppSending(finalCvsToSend);
-      return res.status(200).json({
-        success: true,
-        message: `Envío completado: ${results.filter((r) => r.success).length}/${results.length} mensajes enviados (modo prueba)`,
-        results,
-        skippedAlreadyContacted,
-        testMode: true
+    if (isAnySendingInProgress()) {
+      return res.status(409).json({
+        error: 'Ya hay un envío de mensajes en curso',
+        sendJob: {
+          total: lastSendJob.total,
+          sessionIds: lastSendJob.sessionIds
+        }
       });
     }
 
-    let results;
+    const configuredIds = getConfiguredSessionIds();
+    const selectedSessions =
+      Array.isArray(req.body.selectedSessions) && req.body.selectedSessions.length > 0
+        ? req.body.selectedSessions.map((id) => String(id)).filter(Boolean)
+        : configuredIds.length > 0
+          ? configuredIds
+          : null;
 
-    try {
-        const configuredIds = getConfiguredSessionIds();
-        const selectedSessions =
-          Array.isArray(req.body.selectedSessions) && req.body.selectedSessions.length > 0
-            ? req.body.selectedSessions.map((id) => String(id)).filter(Boolean)
-            : configuredIds.length > 0
-              ? configuredIds
-              : null;
-
-        if (selectedSessions && selectedSessions.length >= 1) {
-          const sessionIds = selectedSessions;
-          const N = sessionIds.length;
-          const controlId = getBulkControlId(sessionIds);
-          console.log(`📱 Envío paralelo con ${N} sesión(es): ${sessionIds.join(', ')}`);
-
-          const services = sessionIds.map((sId) => {
-            let svc = whatsappServices.get(sId);
-            if (!svc) {
-              svc = new WhatsAppService(sId);
-              whatsappServices.set(sId, svc);
-            }
-            return svc;
-          });
-
-          for (const svc of services) {
-            if (!svc.isReady()) await svc.initWhatsApp();
-          }
-
-          const servicesBySessionId = new Map(sessionIds.map((sId, i) => [sId, services[i]]));
-
-          const contactsToSend = finalCvsToSend.map((cv) => ({
-            nombre: cv.nombre,
-            telefono: cv.telefono,
-            mensajeIA: cv.mensajeIA
-          }));
-
-          const distribution = sessionIds.map((sId, i) => {
-            const count = contactsToSend.filter((_, idx) => idx % N === i).length;
-            return `${sId}: ${count}`;
-          });
-          console.log(`📊 Distribución round-robin → ${distribution.join(', ')}`);
-
-          initSessionSendingState(controlId);
-          for (const sId of sessionIds) {
-            initSessionSendingState(sId);
-          }
-
-          const checkControlsBySession = (sId) =>
-            makeSessionCheckControls(sId, controlId);
-
-          const onProgress = (progressData) => {
-            if (progressData.sessionId) {
-              const st = getSessionState(progressData.sessionId);
-              st.liveStatus = {
-                phase: progressData.phase || (progressData.readyToSend ? 'sending' : 'sent'),
-                nombre: progressData.nombre,
-                telefono: progressData.telefono,
-                sessionCurrent: progressData.sessionCurrent,
-                sessionTotal: progressData.sessionTotal
-              };
-            }
-
-            if (progressData.readyToSend) {
-              broadcastEvent('readyToSend', {
-                current: progressData.current,
-                total: progressData.total,
-                nombre: progressData.nombre,
-                telefono: progressData.telefono,
-                sessionId: progressData.sessionId || controlId,
-                sessionCurrent: progressData.sessionCurrent,
-                sessionTotal: progressData.sessionTotal,
-                phase: progressData.phase || 'sending'
-              });
-            } else if (progressData.sessionId && progressData.phase) {
-              broadcastEvent('sessionProgress', {
-                sessionId: progressData.sessionId,
-                phase: progressData.phase,
-                nombre: progressData.nombre,
-                telefono: progressData.telefono,
-                current: progressData.current,
-                total: progressData.total,
-                sessionCurrent: progressData.sessionCurrent,
-                sessionTotal: progressData.sessionTotal,
-                success: progressData.success
-              });
-            }
-          };
-
-          const onWaitProgressBySession = (sId) => (remainingMs, totalWaitMs) => {
-            const st = getSessionState(sId);
-            st.liveStatus = {
-              ...(st.liveStatus || {}),
-              phase: st.sendingPaused ? 'paused' : st.timePaused ? 'time_paused' : 'waiting',
-              remainingMs,
-              totalWaitMs
-            };
-            broadcastEvent('waitProgress', {
-              sessionId: sId,
-              remainingMs,
-              totalWaitMs,
-              phase: st.liveStatus.phase
-            });
-          };
-
-          try {
-            if (N === 1) {
-              const singleCheck = makeSessionCheckControls(sessionIds[0], null);
-              const onWaitProgress = onWaitProgressBySession(sessionIds[0]);
-              results = await services[0].sendBulkMessages(
-                contactsToSend,
-                2,
-                onProgress,
-                singleCheck,
-                mongoRecordHook,
-                onWaitProgress
-              );
-            } else {
-              results = await sendRoundRobinBulk(
-                servicesBySessionId,
-                sessionIds,
-                contactsToSend,
-                onProgress,
-                checkControlsBySession,
-                mongoRecordHook,
-                onWaitProgressBySession
-              );
-            }
-          } finally {
-            resetBulkControlState(controlId, sessionIds);
-          }
-
-        } else {
-          return res.status(400).json({
-            success: false,
-            error: 'No hay sesiones configuradas. Agrega sesiones en la interfaz web.'
-          });
-        }
-      } catch (error) {
-        console.error('Error enviando mensajes por WhatsApp:', error);
-        return res.status(500).json({
-          error: 'Error enviando mensajes por WhatsApp',
-          message: error.message
-        });
-      }
-
-      console.log(`Envío completado. ${results.filter(r => r.success).length}/${results.length} mensajes enviados exitosamente`);
-
-      return res.status(200).json({
-        success: true,
-        message: `Envío completado: ${results.filter(r => r.success).length}/${results.length} mensajes enviados`,
-        results,
-        skippedAlreadyContacted,
-        testMode: false
+    if (!TEST_MODE && (!selectedSessions || selectedSessions.length < 1)) {
+      return res.status(400).json({
+        success: false,
+        error: 'No hay sesiones configuradas. Agrega sesiones en la interfaz web.'
       });
+    }
+
+    const sessionIds = TEST_MODE
+      ? (selectedSessions && selectedSessions.length > 0 ? selectedSessions : ['default'])
+      : selectedSessions;
+
+    console.log(`Iniciando envío de ${finalCvsToSend.length} mensajes por WhatsApp (${duplicates.length} duplicados eliminados)...`);
+    console.log(`Modo de prueba: ${TEST_MODE ? 'ACTIVADO (simulando envíos)' : 'DESACTIVADO (enviando real)'}`);
+
+    res.status(202).json({
+      success: true,
+      started: true,
+      total: finalCvsToSend.length,
+      sessionIds,
+      skippedAlreadyContacted,
+      testMode: TEST_MODE,
+      message: `Envío iniciado para ${finalCvsToSend.length} mensajes`
+    });
+
+    runWhatsAppSendJob({
+      finalCvsToSend,
+      sessionIds,
+      skippedAlreadyContacted,
+      mongoRecordHook,
+      testMode: TEST_MODE
+    });
   } catch (error) {
     console.error('Error enviando mensajes por WhatsApp:', error);
     res.status(500).json({
@@ -768,6 +857,26 @@ app.post('/send-whatsapp', async (req, res) => {
       message: error.message
     });
   }
+});
+
+// Estado del envío masivo (para polling desde el cliente)
+app.get('/send-job-status', (req, res) => {
+  const anyInProgress = [...sessionStates.values()].some((s) => s.sendingInProgress);
+
+  res.json({
+    success: true,
+    inProgress: lastSendJob.inProgress || anyInProgress,
+    anyInProgress,
+    total: lastSendJob.total,
+    sessionIds: lastSendJob.sessionIds,
+    startedAt: lastSendJob.startedAt,
+    completedAt: lastSendJob.completedAt,
+    error: lastSendJob.error,
+    message: lastSendJob.message,
+    results: lastSendJob.results,
+    skippedAlreadyContacted: lastSendJob.skippedAlreadyContacted,
+    testMode: lastSendJob.testMode
+  });
 });
 
 // Ruta para verificar sesiones OpenWA (equivalente a "abrir WhatsApp" en Puppeteer)
