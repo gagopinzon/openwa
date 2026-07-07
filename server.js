@@ -12,7 +12,8 @@ const sessionsStore = require('./sessionsStore');
 const {
   getSessionStatus,
   listOpenWASessions,
-  isConnectedStatus
+  isConnectedStatus,
+  extractProfileName
 } = require('./openwaClient');
 const contactHistory = require('./contactHistoryStore');
 
@@ -632,11 +633,29 @@ app.get('/api/sessions', (req, res) => {
   }
 });
 
-app.post('/api/sessions', (req, res) => {
+app.post('/api/sessions', async (req, res) => {
   try {
+    const openwaSessionId = String(req.body.openwaSessionId || '').trim();
+    if (!openwaSessionId) {
+      return res.status(400).json({ success: false, error: 'openwaSessionId es obligatorio' });
+    }
+
+    let senderName =
+      req.body.senderName != null ? String(req.body.senderName).trim() : '';
+
+    if (!senderName) {
+      try {
+        const status = await getSessionStatus(openwaSessionId);
+        senderName = status.profileName || extractProfileName(status.raw);
+      } catch (err) {
+        console.warn(`No se pudo obtener nombre de perfil para ${openwaSessionId}:`, err.message);
+      }
+    }
+
     const session = sessionsStore.addSession({
-      openwaSessionId: req.body.openwaSessionId,
-      label: req.body.label
+      openwaSessionId,
+      label: req.body.label,
+      ...(senderName ? { senderName } : {})
     });
     res.status(201).json({ success: true, session });
   } catch (error) {
@@ -648,9 +667,34 @@ app.put('/api/sessions/:id', (req, res) => {
   try {
     const session = sessionsStore.updateSession(req.params.id, {
       label: req.body.label,
-      openwaSessionId: req.body.openwaSessionId
+      openwaSessionId: req.body.openwaSessionId,
+      senderName: req.body.senderName
     });
     res.json({ success: true, session });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/sessions/:id/sync-sender-name', async (req, res) => {
+  try {
+    const logicalId = req.params.id;
+    const session = sessionsStore.getSession(logicalId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: `Sesión "${logicalId}" no encontrada` });
+    }
+
+    const status = await getSessionStatus(session.openwaSessionId);
+    const profileName = status.profileName || extractProfileName(status.raw);
+    if (!profileName) {
+      return res.status(400).json({
+        success: false,
+        error: 'OpenWA no devolvió un nombre de perfil para esta sesión'
+      });
+    }
+
+    const updated = sessionsStore.updateSession(logicalId, { senderName: profileName });
+    res.json({ success: true, session: updated });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }

@@ -4,7 +4,7 @@ const path = require('path');
 const DATA_DIR = path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'sessions.json');
 
-/** @typedef {{ id: string, label: string, openwaSessionId: string, createdAt?: string }} StoredSession */
+/** @typedef {{ id: string, label: string, openwaSessionId: string, senderName?: string, createdAt?: string }} StoredSession */
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -101,6 +101,15 @@ function getSession(logicalId) {
   return getAllSessions().find((s) => s.id === logicalId) || null;
 }
 
+/**
+ * @param {string} logicalId
+ * @returns {string}
+ */
+function getSessionSenderName(logicalId) {
+  const { resolveSessionSenderName } = require('./messageSignature');
+  return resolveSessionSenderName(getSession(logicalId), logicalId);
+}
+
 function resolveOpenWASessionId(logicalId = 'default') {
   const id = String(logicalId || 'default');
   const session = getSession(id);
@@ -148,10 +157,14 @@ function addSession(input) {
     throw new Error(`El id lógico "${logicalId}" ya existe`);
   }
 
+  const senderName =
+    input.senderName != null ? String(input.senderName).trim() : '';
+
   const session = {
     id: logicalId,
     label: String(input.label || `Sesión ${store.sessions.length + 1}`).trim(),
     openwaSessionId,
+    ...(senderName ? { senderName } : {}),
     createdAt: new Date().toISOString()
   };
 
@@ -162,7 +175,7 @@ function addSession(input) {
 
 /**
  * @param {string} logicalId
- * @param {{ label?: string, openwaSessionId?: string }} patch
+ * @param {{ label?: string, openwaSessionId?: string, senderName?: string }} patch
  */
 function updateSession(logicalId, patch) {
   const store = readStore();
@@ -188,6 +201,12 @@ function updateSession(logicalId, patch) {
     const label = String(patch.label).trim();
     if (!label) throw new Error('label no puede estar vacío');
     store.sessions[idx].label = label;
+  }
+
+  if (patch.senderName != null) {
+    const senderName = String(patch.senderName).trim();
+    if (!senderName) throw new Error('senderName no puede estar vacío');
+    store.sessions[idx].senderName = senderName;
   }
 
   writeStore(store);
@@ -220,11 +239,15 @@ function importOpenWASessions(openwaSessions) {
     const openwaSessionId = String(row.id || '').trim();
     if (!openwaSessionId || existing.has(openwaSessionId.toLowerCase())) continue;
 
+    const senderName = String(row.senderName || row.name || row.profileName || '').trim();
     const label =
-      String(row.label || row.name || row.profileName || openwaSessionId).trim() ||
-      openwaSessionId;
+      String(row.label || senderName || openwaSessionId).trim() || openwaSessionId;
 
-    const session = addSession({ openwaSessionId, label });
+    const session = addSession({
+      openwaSessionId,
+      label,
+      ...(senderName ? { senderName } : {})
+    });
     existing.add(openwaSessionId.toLowerCase());
     added.push(session);
   }
@@ -236,6 +259,7 @@ module.exports = {
   getAllSessions,
   getLogicalSessionIds,
   getSession,
+  getSessionSenderName,
   resolveOpenWASessionId,
   addSession,
   updateSession,

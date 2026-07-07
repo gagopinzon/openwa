@@ -2,8 +2,11 @@ const { resolveOpenWASessionId } = require('./sessionsStore');
 const {
   formatPhoneToChatId,
   getSessionStatus,
-  sendTextMessage
+  sendTextMessage,
+  extractProfileName
 } = require('./openwaClient');
+const { getSessionSenderName } = require('./sessionsStore');
+const { applySenderName } = require('./messageSignature');
 
 /** Id lógico para pausar/abortar envíos round-robin multi-sesión */
 const ROUND_ROBIN_CONTROL_ID = '__roundrobin__';
@@ -180,7 +183,9 @@ class OpenWAWhatsAppService {
     }
 
     try {
-      console.log(`Enviando mensaje a ${phone} vía OpenWA...`);
+      const senderName = getSessionSenderName(this.logicalSessionId);
+      const finalMessage = applySenderName(message, senderName);
+      console.log(`Enviando mensaje a ${phone} vía OpenWA (remitente: ${senderName})...`);
 
       const chatId = formatPhoneToChatId(phone);
 
@@ -190,7 +195,7 @@ class OpenWAWhatsAppService {
       );
       await new Promise((resolve) => setTimeout(resolve, humanDelayMs));
 
-      const result = await sendTextMessage(this.openwaSessionId, chatId, message);
+      const result = await sendTextMessage(this.openwaSessionId, chatId, finalMessage);
       console.log(`Mensaje enviado a ${phone} (id: ${result.messageId || 'n/a'})`);
       return true;
     } catch (error) {

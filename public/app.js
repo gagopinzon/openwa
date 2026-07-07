@@ -87,6 +87,34 @@ class CVAnalyzer {
         return found ? found.label : sessionId;
     }
 
+    getSessionSenderName(sessionId) {
+        const found = this.configuredSessions.find((s) => s.id === sessionId);
+        if (!found) return sessionId || 'Remitente';
+        return (found.senderName || found.label || found.id || sessionId).trim();
+    }
+
+    getPreviewSenderName() {
+        const selected = this.getSelectedSessionIds();
+        if (selected.length > 0) {
+            return this.getSessionSenderName(selected[0]);
+        }
+        if (this.configuredSessions && this.configuredSessions.length > 0) {
+            return this.getSessionSenderName(this.configuredSessions[0].id);
+        }
+        return 'Remitente';
+    }
+
+    resolveMessageForDisplay(message, sessionId = null) {
+        if (!message) return message;
+        const senderName = sessionId
+            ? this.getSessionSenderName(sessionId)
+            : this.getPreviewSenderName();
+        return message
+            .split('{{SENDER_NAME}}')
+            .join(senderName)
+            .replace(/(\nAtte:\s*\n)\s*Mónica González\s*$/i, `$1${senderName}`);
+    }
+
     /** Devuelve array de sessionId de los checkboxes marcados */
     getSelectedSessionIds() {
         if (!this.sessionCheckboxes) return [];
@@ -166,14 +194,26 @@ class CVAnalyzer {
                         (s) => `
                     <div class="session-row" data-session-id="${s.id}" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
                         <strong style="min-width:120px;">${this.escapeHtml(s.label)}</strong>
+                        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1;min-width:200px;">
+                            <span style="font-size:12px;color:#64748b;">Remitente:</span>
+                            <input type="text" class="session-sender-input form-select" data-id="${s.id}" value="${this.escapeHtml(s.senderName || s.label || '')}" placeholder="Nombre en WhatsApp" style="padding:4px 8px;min-width:180px;max-width:260px;font-size:13px;">
+                            <button type="button" class="btn btn-secondary btn-sm save-sender-btn" data-id="${s.id}" style="padding:4px 10px;font-size:12px;">Guardar</button>
+                            <button type="button" class="btn btn-secondary btn-sm sync-sender-btn" data-id="${s.id}" title="Obtener nombre desde WhatsApp" style="padding:4px 10px;font-size:12px;">↻ WhatsApp</button>
+                        </div>
                         <code style="font-size:12px;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${this.escapeHtml(s.openwaSessionId)}</code>
-                        <button type="button" class="btn btn-danger btn-sm remove-session-btn" data-id="${s.id}" style="margin-left:auto;padding:4px 10px;font-size:12px;">Quitar</button>
+                        <button type="button" class="btn btn-danger btn-sm remove-session-btn" data-id="${s.id}" style="padding:4px 10px;font-size:12px;">Quitar</button>
                     </div>`
                     )
                     .join('');
 
                 this.sessionsList.querySelectorAll('.remove-session-btn').forEach((btn) => {
                     btn.addEventListener('click', () => this.removeSession(btn.dataset.id));
+                });
+                this.sessionsList.querySelectorAll('.save-sender-btn').forEach((btn) => {
+                    btn.addEventListener('click', () => this.saveSessionSenderName(btn.dataset.id));
+                });
+                this.sessionsList.querySelectorAll('.sync-sender-btn').forEach((btn) => {
+                    btn.addEventListener('click', () => this.syncSessionSenderName(btn.dataset.id));
                 });
             }
         }
@@ -252,16 +292,17 @@ class CVAnalyzer {
         }
 
         const selectedOpt = this.openwaSessionPicker.selectedOptions[0];
+        const senderName = selectedOpt && selectedOpt.dataset.name ? selectedOpt.dataset.name.trim() : '';
         const label =
             (this.sessionLabelInput && this.sessionLabelInput.value.trim()) ||
-            (selectedOpt && selectedOpt.dataset.name) ||
+            senderName ||
             openwaSessionId;
 
         try {
             const response = await fetch('/api/sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ openwaSessionId, label })
+                body: JSON.stringify({ openwaSessionId, label, senderName })
             });
             const data = await response.json();
             if (!data.success) {
@@ -285,6 +326,60 @@ class CVAnalyzer {
             }
             await this.loadSessions();
             this.showStatus(data.message || 'Importación completada', 'success');
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async saveSessionSenderName(sessionId) {
+        const input = this.sessionsList
+            ? this.sessionsList.querySelector(`.session-sender-input[data-id="${sessionId}"]`)
+            : null;
+        const senderName = input ? input.value.trim() : '';
+        if (!senderName) {
+            this.showStatus('Escribe un nombre de remitente', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ senderName })
+            });
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || 'No se pudo guardar');
+            }
+            await this.loadSessions();
+            this.showStatus(`Remitente actualizado: ${senderName}`, 'success');
+            if (this.cvsData && this.cvsData.length > 0) {
+                this.displayResults();
+            }
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async syncSessionSenderName(sessionId) {
+        try {
+            const response = await fetch(
+                `/api/sessions/${encodeURIComponent(sessionId)}/sync-sender-name`,
+                { method: 'POST' }
+            );
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || 'No se pudo sincronizar');
+            }
+            await this.loadSessions();
+            const name = data.session && data.session.senderName ? data.session.senderName : '';
+            this.showStatus(
+                name ? `Nombre sincronizado desde WhatsApp: ${name}` : 'Nombre sincronizado',
+                'success'
+            );
+            if (this.cvsData && this.cvsData.length > 0) {
+                this.displayResults();
+            }
         } catch (error) {
             this.showStatus(`Error: ${error.message}`, 'error');
         }
@@ -485,9 +580,10 @@ class CVAnalyzer {
 
             const mensajeId = `mensaje-${index}`;
             const mensajeTexto = cv.mensajeIA || 'Pendiente de generar...';
+            const mensajeParaMostrar = this.resolveMessageForDisplay(mensajeTexto);
 
             // Escapar HTML para seguridad pero preservar saltos de línea
-            const mensajeEscapado = mensajeTexto
+            const mensajeEscapado = mensajeParaMostrar
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
@@ -1139,7 +1235,7 @@ class CVAnalyzer {
                 <strong>Estado:</strong> ${result.success ? 'Enviado' : 'Error'}
             `;
             if (result.mensajeIA) {
-                this.showMessagePreview(result.mensajeIA);
+                this.showMessagePreview(result.mensajeIA, result.sessionId);
             }
             this.addLogEntry(
                 `${result.nombre} (${result.telefono})${sessionLabel ? ` [${sessionLabel}]` : ''} - ${result.success ? 'Enviado' : 'Error'}`,
@@ -1200,7 +1296,7 @@ class CVAnalyzer {
 
             // Mostrar mensaje que se está enviando
             if (result.mensajeIA) {
-                this.showMessagePreview(result.mensajeIA);
+                this.showMessagePreview(result.mensajeIA, result.sessionId);
             }
 
             this.addLogEntry(
@@ -1595,9 +1691,9 @@ class CVAnalyzer {
     }
 
     // Mostrar mensaje que se está enviando
-    showMessagePreview(mensaje) {
+    showMessagePreview(mensaje, sessionId = null) {
         if (this.messagePreview && this.messageContent) {
-            this.messageContent.textContent = mensaje;
+            this.messageContent.textContent = this.resolveMessageForDisplay(mensaje, sessionId);
             this.messagePreview.style.display = 'block';
         }
     }
@@ -1674,6 +1770,9 @@ class CVAnalyzer {
                         <strong>Teléfono:</strong> ${data.telefono}<br>
                         <strong>Estado:</strong> Enviando...
                     `;
+                }
+                if (data.mensajeIA) {
+                    this.showMessagePreview(data.mensajeIA, data.sessionId);
                 }
                 if (this.progressText && data.total) {
                     this.progressText.textContent = `${data.current} / ${data.total}`;

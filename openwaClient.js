@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { extractProfileNameFromOpenWA } = require('./messageSignature');
 
 function getBaseConfig() {
   const baseUrl = (process.env.OPENWA_BASE_URL || 'https://openwa.protalentconnections.com/api').replace(
@@ -108,8 +109,14 @@ async function getSessionStatus(openwaSessionId) {
   return {
     connected: isConnectedStatus(status),
     status: String(status),
+    profileName: extractProfileName(data),
     raw: data
   };
+}
+
+/** @param {object|null|undefined} raw */
+function extractProfileName(raw) {
+  return extractProfileNameFromOpenWA(raw);
 }
 
 async function sendTextMessage(openwaSessionId, chatId, text) {
@@ -131,5 +138,6 @@ module.exports = {
   sendTextMessage,
   isConnectedStatus,
   listOpenWASessions,
-  normalizeOpenWASessionRow
+  normalizeOpenWASessionRow,
+  extractProfileName
 };

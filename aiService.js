@@ -1,5 +1,6 @@
 const axios = require('axios');
 require('dotenv').config();
+const { SENDER_PLACEHOLDER } = require('./messageSignature');
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const API_KEY = process.env.DEEPSEEK_API_KEY;
@@ -64,7 +65,7 @@ En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conec
 
 ¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
 Atte:
-Mónica González`;
+${SENDER_PLACEHOLDER}`;
 }
 
 /**
@@ -103,7 +104,7 @@ En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conec
 ¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
 
 Atte:
-Mónica González
+${SENDER_PLACEHOLDER}
 
 IMPORTANTE - PUESTO CLAVE:
 - Debes identificar el puesto clave basándote en su experiencia
@@ -217,7 +218,7 @@ En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conec
 
 ¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
 Atte:
-Mónica González`;
+${SENDER_PLACEHOLDER}`;
   }
 }
 
