@@ -611,6 +611,91 @@ section h2 {
     font-size: 0.85rem;
     padding: 6px 10px;
 }
+
+.session-checkboxes {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px 16px;
+}
+
+.session-send-row {
+    background: #f0f9ff;
+    border: 1px solid #bae6fd;
+    border-radius: 12px;
+    padding: 8px 12px;
+}
+
+.session-send-row-disabled {
+    opacity: 0.55;
+}
+
+.session-send-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.session-send-checkbox {
+    width: 18px;
+    height: 18px;
+}
+
+.session-send-name {
+    font-weight: 500;
+    color: #0369a1;
+}
+
+.session-weight-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.session-weight-input {
+    width: 56px;
+    padding: 4px 6px;
+    text-align: center;
+    font-size: 13px;
+}
+
+.session-weight-suffix {
+    font-size: 12px;
+    color: #64748b;
+}
+
+.session-weight-toolbar {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+}
+
+#distributeWeightsEquallyBtn {
+    display: none;
+    padding: 6px 12px;
+    font-size: 12px;
+}
+
+.session-weight-sum {
+    font-size: 13px;
+    color: #0369a1;
+    font-weight: 600;
+}
+
+.session-weight-sum-warn {
+    color: #b45309;
+}
+
+.session-weight-preview {
+    font-size: 13px;
+    color: #0f766e;
+    margin: 8px 0 0;
+    min-height: 1.2em;
+}
+
     max-height: 200px;
     overflow-y: auto;
 }
@@ -755,4 +840,159 @@ footer p {
 
 ::-webkit-scrollbar-thumb:hover {
     background: #9ca3af;
+}
+
+/* Auto-respuesta IA */
+.auto-reply-panel {
+    margin-top: 24px;
+    text-align: left;
+}
+
+.auto-reply-status {
+    padding: 12px 16px;
+    border-radius: 8px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    font-size: 13px;
+    margin-bottom: 12px;
+    line-height: 1.5;
+}
+
+.auto-reply-status.warning {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    color: #92400e;
+}
+
+.auto-reply-status.ok {
+    background: #ecfdf5;
+    border-color: #6ee7b7;
+    color: #065f46;
+}
+
+.auto-reply-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.auto-reply-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.auto-reply-textarea,
+.auto-reply-rule-input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 14px;
+    resize: vertical;
+}
+
+.accordion {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-top: 16px;
+}
+
+.accordion-item + .accordion-item {
+    border-top: 1px solid #e2e8f0;
+}
+
+.accordion-header {
+    width: 100%;
+    text-align: left;
+    padding: 14px 16px;
+    background: #f8fafc;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    color: #1e293b;
+}
+
+.accordion-header:hover {
+    background: #f1f5f9;
+}
+
+.accordion-body {
+    padding: 16px;
+    background: white;
+}
+
+.accordion-body-collapsed {
+    display: none;
+}
+
+.auto-reply-rule-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: #fafafa;
+}
+
+.auto-reply-rule-card label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 4px;
+    margin-top: 8px;
+}
+
+.auto-reply-rule-card label:first-child {
+    margin-top: 0;
+}
+
+.auto-reply-rule-actions {
+    margin-top: 8px;
+    text-align: right;
+}
+
+.auto-reply-conversations {
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.auto-reply-conversation-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+    font-size: 13px;
+}
+
+.auto-reply-conversation-item .meta {
+    color: #64748b;
+    font-size: 12px;
+    margin-bottom: 8px;
+}
+
+.auto-reply-conversation-item .incoming {
+    background: #f1f5f9;
+    padding: 8px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+}
+
+.auto-reply-conversation-item .reply {
+    background: #ecfdf5;
+    padding: 8px;
+    border-radius: 6px;
+}
+
+.auto-reply-empty {
+    color: #94a3b8;
+    font-size: 13px;
+    font-style: italic;
 }

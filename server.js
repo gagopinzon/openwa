@@ -8,20 +8,42 @@ const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
 const { sendRoundRobinBulk, ROUND_ROBIN_CONTROL_ID } = WhatsAppService;
+const { previewDistribution } = require('./sessionDistribution');
 const sessionsStore = require('./sessionsStore');
 const {
   getSessionStatus,
   listOpenWASessions,
   isConnectedStatus,
-  extractProfileName
+  extractProfileName,
+  formatPhoneToChatId
 } = require('./openwaClient');
 const contactHistory = require('./contactHistoryStore');
+const autoReplyService = require('./autoReplyService');
+const autoReplyStore = require('./autoReplyStore');
+const {
+  isAuthEnabled,
+  authMiddleware,
+  validateCredentials,
+  createSessionToken,
+  isAuthenticated,
+  setAuthCookie,
+  clearAuthCookie
+} = require('./auth');
 
 const app = express();
 const PORT = process.env.PORT || 3445;
 
 // Middleware
-app.use(express.json({ limit: '1mb' }));
+app.use(
+  express.json({
+    limit: '1mb',
+    verify: (req, _res, buf) => {
+      if (req.path === '/api/webhooks/openwa') {
+        req.rawBody = buf;
+      }
+    }
+  })
+);
 // Nota: express.static se mueve al final para que las rutas API tengan prioridad
 
 // Configuración de multer para subida de archivos
@@ -134,6 +156,7 @@ function buildSendProgressHandlers(controlId) {
 async function runWhatsAppSendJob({
   finalCvsToSend,
   sessionIds,
+  sessionWeights,
   skippedAlreadyContacted,
   mongoRecordHook,
   testMode
@@ -200,11 +223,16 @@ async function runWhatsAppSendJob({
         mensajeIA: cv.mensajeIA
       }));
 
-      const distribution = sessionIds.map((sId, i) => {
-        const count = contactsToSend.filter((_, idx) => idx % N === i).length;
-        return `${sId}: ${count}`;
+      const distribution = previewDistribution(
+        sessionIds,
+        sessionWeights,
+        contactsToSend.length
+      );
+      const distributionLog = sessionIds.map((sId, i) => {
+        const pct = Math.round(distribution.proportions[i] * 1000) / 10;
+        return `${sId}: ${distribution.counts[i]} (${pct}%)`;
       });
-      console.log(`📊 Distribución round-robin → ${distribution.join(', ')}`);
+      console.log(`📊 Distribución ponderada → ${distributionLog.join(', ')}`);
 
       initSessionSendingState(controlId);
       for (const sId of sessionIds) {
@@ -235,7 +263,8 @@ async function runWhatsAppSendJob({
             onProgress,
             checkControlsBySession,
             mongoRecordHook,
-            onWaitProgressBySession
+            onWaitProgressBySession,
+            sessionWeights
           );
         }
       } finally {
@@ -438,6 +467,49 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
   return results;
 }
 
+// --- Autenticación (credenciales en .env) ---
+
+app.get('/login', (req, res) => {
+  if (isAuthEnabled() && isAuthenticated(req)) {
+    return res.redirect('/');
+  }
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.post('/api/auth/login', (req, res) => {
+  if (!isAuthEnabled()) {
+    return res.status(503).json({
+      success: false,
+      error: 'Autenticación no configurada. Define AUTH_USERNAME y AUTH_PASSWORD en .env'
+    });
+  }
+
+  const username = String(req.body.username || '').trim();
+  const password = String(req.body.password || '');
+
+  if (!validateCredentials(username, password)) {
+    return res.status(401).json({ success: false, error: 'Usuario o contraseña incorrectos' });
+  }
+
+  setAuthCookie(res, createSessionToken());
+  res.json({ success: true });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  clearAuthCookie(res);
+  res.json({ success: true });
+});
+
+app.get('/api/auth/status', (req, res) => {
+  res.json({
+    success: true,
+    authEnabled: isAuthEnabled(),
+    authenticated: isAuthenticated(req)
+  });
+});
+
+app.use(authMiddleware);
+
 // Ruta principal - servir la interfaz web
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -617,6 +689,7 @@ app.get('/config', (req, res) => {
     testMode: TEST_MODE,
     whatsappProvider: 'openwa',
     sessions: sessionsStore.getAllSessions(),
+    autoReply: autoReplyService.getStatus(),
     message: TEST_MODE
       ? 'Sistema en modo de prueba - los mensajes se simularán'
       : 'Sistema en modo producción - se enviarán mensajes reales vía OpenWA'
@@ -822,10 +895,21 @@ app.post('/send-whatsapp', async (req, res) => {
       !TEST_MODE && contactHistory.mongoUriConfigured()
         ? (row) => {
             if (!row.success) return;
+            const logicalSessionId = row.sessionId || null;
+            let openwaSessionId = null;
+            if (logicalSessionId) {
+              try {
+                openwaSessionId = sessionsStore.resolveOpenWASessionId(logicalSessionId);
+              } catch {
+                openwaSessionId = null;
+              }
+            }
             contactHistory
               .recordSuccessfulContact({
                 normalizedPhone: contactHistory.normalizePhone(row.telefono),
-                name: row.nombre
+                name: row.nombre,
+                logicalSessionId,
+                openwaSessionId
               })
               .catch((err) => console.error('contactHistory:', err.message));
           }
@@ -877,6 +961,11 @@ app.post('/send-whatsapp', async (req, res) => {
     console.log(`Iniciando envío de ${finalCvsToSend.length} mensajes por WhatsApp (${duplicates.length} duplicados eliminados)...`);
     console.log(`Modo de prueba: ${TEST_MODE ? 'ACTIVADO (simulando envíos)' : 'DESACTIVADO (enviando real)'}`);
 
+    const sessionWeights =
+      req.body.sessionWeights && typeof req.body.sessionWeights === 'object'
+        ? req.body.sessionWeights
+        : null;
+
     res.status(202).json({
       success: true,
       started: true,
@@ -890,6 +979,7 @@ app.post('/send-whatsapp', async (req, res) => {
     runWhatsAppSendJob({
       finalCvsToSend,
       sessionIds,
+      sessionWeights,
       skippedAlreadyContacted,
       mongoRecordHook,
       testMode: TEST_MODE
@@ -1371,6 +1461,155 @@ app.get('/sending-status-all', (req, res) => {
   });
 });
 
+// --- Auto-respuesta IA (webhooks OpenWA) ---
+
+function getCvContextForPhone(phone) {
+  const norm = contactHistory.normalizePhone(phone);
+  const cv = cvsData.find((c) => contactHistory.normalizePhone(c.telefono) === norm);
+  if (!cv) return null;
+  const exp = String(cv.experiencia || '').slice(0, 500);
+  return `Nombre: ${cv.nombre}\nExperiencia: ${exp}`;
+}
+
+app.post('/api/webhooks/openwa', async (req, res) => {
+  res.status(200).json({ received: true });
+
+  try {
+    const secret = String(process.env.WEBHOOK_SECRET || '').trim();
+    const signature = req.headers['x-openwa-signature'];
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+
+    if (secret && !autoReplyService.verifySignature(rawBody, signature, secret)) {
+      console.warn('Webhook OpenWA: firma HMAC inválida');
+      return;
+    }
+
+    const payload = req.body && Object.keys(req.body).length ? req.body : JSON.parse(rawBody.toString('utf8'));
+
+    await autoReplyService.handleIncomingWebhook({
+      payload,
+      idempotencyKey: req.headers['x-openwa-idempotency-key'],
+      broadcastEvent,
+      getCvContext: getCvContextForPhone,
+      testMode: TEST_MODE
+    });
+  } catch (err) {
+    console.error('Webhook OpenWA error:', err.message);
+  }
+});
+
+app.get('/api/auto-reply/status', (req, res) => {
+  try {
+    res.json({ success: true, ...autoReplyService.getStatus() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/auto-reply/config', (req, res) => {
+  try {
+    res.json({ success: true, config: autoReplyStore.getPublicConfig() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/auto-reply/config', (req, res) => {
+  try {
+    const config = autoReplyStore.updateConfig({
+      enabled: req.body.enabled,
+      basePrompt: req.body.basePrompt,
+      rules: req.body.rules
+    });
+    res.json({ success: true, config });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/auto-reply/activate', async (req, res) => {
+  try {
+    const status = autoReplyService.getStatus();
+    if (!status.canActivate) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'No se puede activar: configura WEBHOOK_PUBLIC_URL, MongoDB y al menos una sesión.'
+      });
+    }
+    const result = await autoReplyService.activateWebhooks();
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/auto-reply/deactivate', async (req, res) => {
+  try {
+    const results = await autoReplyService.deactivateWebhooks();
+    res.json({ success: true, results });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/auto-reply/test', async (req, res) => {
+  try {
+    const openwaSessionId =
+      req.body.openwaSessionId ||
+      (sessionsStore.getAllSessions()[0] && sessionsStore.getAllSessions()[0].openwaSessionId);
+    if (!openwaSessionId) {
+      return res.status(400).json({ success: false, error: 'No hay sesión OpenWA configurada' });
+    }
+
+    const telefono = String(req.body.telefono || req.body.phone || '').trim();
+    const normalizedPhone = contactHistory.normalizePhone(telefono);
+    if (!normalizedPhone) {
+      return res.status(400).json({ success: false, error: 'telefono es obligatorio para la prueba' });
+    }
+
+    const known = await contactHistory.isKnownContact(normalizedPhone);
+    if (!known) {
+      return res.status(400).json({
+        success: false,
+        error: 'El teléfono no está en el historial de contactos. Envía un mensaje masivo primero.'
+      });
+    }
+
+    const chatId = req.body.chatId || formatPhoneToChatId(normalizedPhone);
+    const incomingBody = String(req.body.message || req.body.body || 'Hola, me interesa').trim();
+
+    const prevEnabled = autoReplyStore.getConfig().enabled;
+    autoReplyStore.updateConfig({ enabled: true });
+
+    const result = await autoReplyService.handleIncomingWebhook({
+      payload: {
+        event: 'message.received',
+        sessionId: openwaSessionId,
+        data: {
+          id: `test_${Date.now()}`,
+          from: chatId,
+          body: incomingBody,
+          fromMe: false,
+          isGroup: false
+        }
+      },
+      idempotencyKey: `test_${Date.now()}`,
+      broadcastEvent,
+      getCvContext: getCvContextForPhone,
+      testMode: true
+    });
+
+    if (!prevEnabled) {
+      autoReplyStore.updateConfig({ enabled: false });
+    }
+
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // Ruta para Server-Sent Events (notificaciones en tiempo real)
 app.get('/events', (req, res) => {
   // Configurar headers para SSE
@@ -1446,6 +1685,11 @@ app.listen(PORT, () => {
   console.log(`📁 Interfaz web disponible en http://localhost:${PORT}`);
   console.log(`📋 Sesiones WhatsApp: data/sessions.json (${sessionsStore.getAllSessions().length} configurada(s))`);
   console.log(`📋 Asegúrate de configurar DEEPSEEK_API_KEY y OPENWA_API_KEY en el archivo .env`);
+  if (isAuthEnabled()) {
+    console.log('🔐 Autenticación activa (AUTH_USERNAME / AUTH_PASSWORD en .env)');
+  } else {
+    console.log('⚠️  Autenticación desactivada: define AUTH_USERNAME y AUTH_PASSWORD en .env para proteger la interfaz');
+  }
 });
 
 module.exports = app;

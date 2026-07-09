@@ -7,6 +7,7 @@ const {
 } = require('./openwaClient');
 const { getSessionSenderName } = require('./sessionsStore');
 const { applySenderName } = require('./messageSignature');
+const { buildWeightedQueues, parseSessionWeights } = require('./sessionDistribution');
 
 /** Id lógico para pausar/abortar envíos round-robin multi-sesión */
 const ROUND_ROBIN_CONTROL_ID = '__roundrobin__';
@@ -503,23 +504,21 @@ async function sendRoundRobinBulk(
   onProgress = null,
   checkControlsBySession = null,
   onMessageResult = null,
-  onWaitProgressBySession = null
+  onWaitProgressBySession = null,
+  sessionWeights = null
 ) {
   const N = sessionOrder.length;
-  const queues = new Map(sessionOrder.map((sId) => [sId, []]));
+  const proportions = parseSessionWeights(sessionOrder, sessionWeights);
+  const queues = buildWeightedQueues(sessionOrder, contacts, proportions);
 
-  contacts.forEach((contact, idx) => {
-    const logicalSessionId = sessionOrder[idx % N];
-    queues.get(logicalSessionId).push({ contact, globalIndex: idx });
+  const distribution = sessionOrder.map((sId, i) => {
+    const pct = Math.round(proportions[i] * 1000) / 10;
+    return `${sId}: ${queues.get(sId).length} (${pct}%)`;
   });
-
-  const distribution = sessionOrder.map(
-    (sId) => `${sId}: ${queues.get(sId).length}`
-  );
   console.log(
     `Envío paralelo: ${contacts.length} mensaje(s) entre ${N} sesión(es) con timers independientes`
   );
-  console.log(`📊 Distribución → ${distribution.join(', ')}`);
+  console.log(`📊 Distribución ponderada → ${distribution.join(', ')}`);
 
   const sessionPromises = sessionOrder.map((logicalSessionId) => {
     const service = servicesBySessionId.get(logicalSessionId);

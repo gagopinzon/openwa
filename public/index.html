@@ -11,6 +11,11 @@
 <body>
     <div class="container">
         <header>
+            <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+                <button type="button" id="logoutBtn" class="btn btn-secondary" style="display: none; padding: 8px 16px; font-size: 0.9rem;">
+                    Cerrar sesión
+                </button>
+            </div>
             <h1>Análisis de CVs con IA</h1>
             <p class="subtitle">Carga tus CVs de OCC, genera mensajes personalizados y envíalos por WhatsApp</p>
             <div style="text-align: center; margin-top: 20px;">
@@ -43,6 +48,58 @@
                 <p id="sessionsEmptyHint" style="font-size: 12px; color: #b45309; margin-top: 10px; display: none;">
                     No hay sesiones configuradas. Agrega al menos una antes de enviar mensajes.
                 </p>
+            </section>
+
+            <section class="auto-reply-panel" id="autoReplyPanel">
+                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Auto-respuesta IA</h2>
+                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+                    Responde automáticamente a contactos que ya recibieron tu mensaje masivo. Cada número responde desde la misma sesión que recibió el mensaje.
+                </p>
+                <div id="autoReplyStatus" class="auto-reply-status"></div>
+                <div class="auto-reply-controls">
+                    <label class="auto-reply-toggle">
+                        <input type="checkbox" id="autoReplyEnabledToggle">
+                        <span>Auto-respuesta activa</span>
+                    </label>
+                    <button type="button" id="activateAutoReplyBtn" class="btn btn-success">Activar webhooks</button>
+                    <button type="button" id="deactivateAutoReplyBtn" class="btn btn-secondary">Desactivar webhooks</button>
+                    <button type="button" id="testAutoReplyBtn" class="btn btn-info">Probar respuesta</button>
+                </div>
+                <div class="auto-reply-test-form" style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                    <input type="text" id="autoReplyTestPhone" placeholder="Teléfono en historial" class="form-select" style="padding: 8px; min-width: 180px;">
+                    <input type="text" id="autoReplyTestMessage" placeholder="Mensaje simulado" value="Hola, me interesa" class="form-select" style="padding: 8px; min-width: 220px;">
+                </div>
+
+                <div class="accordion" id="autoReplyAccordion">
+                    <div class="accordion-item accordion-item-open">
+                        <button type="button" class="accordion-header" data-accordion="basePrompt">
+                            Prompt base
+                        </button>
+                        <div class="accordion-body" id="accordionBasePrompt">
+                            <textarea id="autoReplyBasePrompt" rows="4" class="auto-reply-textarea" placeholder="Instrucciones generales para la IA..."></textarea>
+                        </div>
+                    </div>
+                    <div class="accordion-item">
+                        <button type="button" class="accordion-header" data-accordion="rules">
+                            Reglas por palabras clave
+                        </button>
+                        <div class="accordion-body accordion-body-collapsed" id="accordionRules">
+                            <div id="autoReplyRulesList"></div>
+                            <button type="button" id="addAutoReplyRuleBtn" class="btn btn-secondary" style="margin-top: 8px;">+ Agregar regla</button>
+                        </div>
+                    </div>
+                    <div class="accordion-item">
+                        <button type="button" class="accordion-header" data-accordion="conversations">
+                            Conversaciones en vivo
+                        </button>
+                        <div class="accordion-body accordion-body-collapsed" id="accordionConversations">
+                            <div id="autoReplyConversations" class="auto-reply-conversations">
+                                <p class="auto-reply-empty">Sin respuestas automáticas aún.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <button type="button" id="saveAutoReplyConfigBtn" class="btn btn-primary" style="margin-top: 16px;">Guardar configuración</button>
             </section>
 
             <section class="session-sending-panel" id="sessionSendingPanel" style="display: none;">
@@ -98,11 +155,17 @@
             <!-- Enviar mensajes con sesiones seleccionadas -->
             <div class="sending-options" style="margin-bottom: 15px; text-align: center;">
                 <p style="font-weight: 600; color: #0369a1; margin-bottom: 10px;">Enviar mensajes con sesiones:</p>
-                <div id="sessionCheckboxes" style="display: flex; flex-wrap: wrap; justify-content: center; gap: 12px 20px;">
+                <div id="sessionCheckboxes" class="session-checkboxes"></div>
+                <div class="session-weight-toolbar">
+                    <button type="button" id="distributeWeightsEquallyBtn" class="btn btn-secondary btn-sm">
+                        Repartir igual
+                    </button>
+                    <span id="sessionWeightSum" class="session-weight-sum"></span>
                 </div>
+                <p id="sessionWeightPreview" class="session-weight-preview"></p>
                 <p style="font-size: 12px; color: #64748b; margin-top: 8px;">
-                    Marca las sesiones que participarán en el envío. Por defecto todas están activas.
-                    Con varias sesiones, el primer mensaje sale al mismo tiempo en cada celular; luego cada sesión espera su propio tiempo aleatorio.
+                    Marca las sesiones que participarán. Con varias líneas, indica el % de cada una (deben sumar 100%).
+                    Cada celular envía su primer mensaje al mismo tiempo; luego cada sesión espera su propio tiempo aleatorio.
                 </p>
             </div>
 
@@ -183,6 +246,24 @@
     </div>
 
     <script src="app.js"></script>
+    <script>
+        (async function initAuthUi() {
+            try {
+                const response = await fetch('/api/auth/status');
+                const data = await response.json();
+                if (data.authEnabled) {
+                    const logoutBtn = document.getElementById('logoutBtn');
+                    logoutBtn.style.display = 'inline-block';
+                    logoutBtn.addEventListener('click', async () => {
+                        await fetch('/api/auth/logout', { method: 'POST' });
+                        window.location.href = '/login';
+                    });
+                }
+            } catch {
+                // Sin auth o error de red: no mostrar botón
+            }
+        })();
+    </script>
 </body>
 
 </html>

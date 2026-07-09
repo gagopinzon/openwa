@@ -131,6 +131,51 @@ async function sendTextMessage(openwaSessionId, chatId, text) {
   };
 }
 
+const INCOMING_WEBHOOK_FILTERS = {
+  conditions: [
+    { field: 'fromMe', operator: 'equals', value: false },
+    { field: 'isGroup', operator: 'equals', value: false }
+  ]
+};
+
+/**
+ * @param {string} openwaSessionId
+ * @param {{ url: string, events?: string[], secret?: string, filters?: object }} body
+ */
+async function createWebhook(openwaSessionId, body) {
+  const payload = {
+    url: body.url,
+    events: body.events || ['message.received'],
+    filters: body.filters !== undefined ? body.filters : INCOMING_WEBHOOK_FILTERS
+  };
+  if (body.secret) payload.secret = body.secret;
+  return openwaRequest('POST', `/sessions/${openwaSessionId}/webhooks`, payload);
+}
+
+/**
+ * @param {string} openwaSessionId
+ */
+async function listWebhooks(openwaSessionId) {
+  const data = await openwaRequest('GET', `/sessions/${openwaSessionId}/webhooks`);
+  return Array.isArray(data) ? data : data.data || data.webhooks || [];
+}
+
+/**
+ * @param {string} openwaSessionId
+ * @param {string} webhookId
+ */
+async function deleteWebhook(openwaSessionId, webhookId) {
+  return openwaRequest('DELETE', `/sessions/${openwaSessionId}/webhooks/${webhookId}`);
+}
+
+/**
+ * @param {string} openwaSessionId
+ * @param {string} webhookId
+ */
+async function testWebhook(openwaSessionId, webhookId) {
+  return openwaRequest('POST', `/sessions/${openwaSessionId}/webhooks/${webhookId}/test`);
+}
+
 module.exports = {
   assertOpenWAConfigured,
   formatPhoneToChatId,
@@ -139,5 +184,10 @@ module.exports = {
   isConnectedStatus,
   listOpenWASessions,
   normalizeOpenWASessionRow,
-  extractProfileName
+  extractProfileName,
+  createWebhook,
+  listWebhooks,
+  deleteWebhook,
+  testWebhook,
+  INCOMING_WEBHOOK_FILTERS
 };

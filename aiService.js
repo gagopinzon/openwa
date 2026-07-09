@@ -285,7 +285,116 @@ async function generateBulkMessages(cvs, onProgress = null) {
   return messages;
 }
 
+function generateBasicReply({ contactName, incomingBody, matchedRule, senderName }) {
+  const name = contactName || 'contacto';
+  if (matchedRule) {
+    if (matchedRule.id === 'interes') {
+      return `¡Excelente, ${name}! Me da gusto saberlo. ¿Qué día y horario te acomoda para una sesión gratuita de diagnóstico?\n\nAtte:\n${senderName}`;
+    }
+    if (matchedRule.id === 'precio') {
+      return `Hola ${name}, la sesión de diagnóstico es completamente gratuita y sin compromiso. ¿Te gustaría agendarla?\n\nAtte:\n${senderName}`;
+    }
+    if (matchedRule.id === 'no') {
+      return `Entendido, ${name}. Gracias por tu tiempo. ¡Mucho éxito!\n\nAtte:\n${senderName}`;
+    }
+  }
+  return `Hola ${name}, gracias por tu mensaje. ¿En qué puedo ayudarte con respecto a tu desarrollo profesional?\n\nAtte:\n${senderName}`;
+}
+
+/**
+ * Genera respuesta conversacional a mensaje entrante.
+ * @param {object} params
+ */
+async function generateReplyMessage({
+  contactName,
+  incomingBody,
+  basePrompt,
+  matchedRule,
+  senderName,
+  conversationContext
+}) {
+  const sender = senderName || 'Pro Talent';
+  const ruleHint = matchedRule
+    ? `\nRegla aplicada (${matchedRule.label}): ${matchedRule.instruction}`
+    : '';
+
+  const contextBlock = conversationContext
+    ? `\nContexto del candidato (CV):\n${conversationContext}`
+    : '';
+
+  if (!API_KEY || API_KEY.includes('test') || API_KEY.includes('tu_api_key')) {
+    return generateBasicReply({
+      contactName,
+      incomingBody,
+      matchedRule,
+      senderName: sender
+    });
+  }
+
+  const prompt = `${basePrompt || 'Eres un asistente de Pro Talent.'}
+
+Nombre del contacto: ${contactName || 'contacto'}
+Mensaje que te escribió:
+"${incomingBody}"
+${ruleHint}${contextBlock}
+
+INSTRUCCIONES:
+- Responde en español, tono conversacional y profesional.
+- Máximo 400 caracteres (sin contar la firma).
+- Responde directamente a su mensaje; no repitas el pitch inicial completo.
+- Usa solo el primer nombre si aplica.
+- Termina con:
+Atte:
+${sender}
+
+Genera SOLO el texto del mensaje de respuesta, sin explicaciones ni alternativas.`;
+
+  try {
+    const response = await axios.post(
+      DEEPSEEK_API_URL,
+      {
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.6,
+        max_tokens: 300
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
+
+    if (response.data?.choices?.length > 0) {
+      let message = response.data.choices[0].message.content.trim();
+      const separators = ['---', '***', '===', '\n\n\n'];
+      for (const separator of separators) {
+        if (message.includes(separator)) {
+          message = message.split(separator)[0].trim();
+          break;
+        }
+      }
+      if (!message.includes('Atte:')) {
+        message += `\n\nAtte:\n${sender}`;
+      }
+      return message;
+    }
+    throw new Error('Respuesta inválida de DeepSeek');
+  } catch (error) {
+    console.error('Error generando auto-respuesta:', error.message);
+    return generateBasicReply({
+      contactName,
+      incomingBody,
+      matchedRule,
+      senderName: sender
+    });
+  }
+}
+
 module.exports = {
   generatePersonalizedMessage,
-  generateBulkMessages
+  generateBulkMessages,
+  generateReplyMessage
 };

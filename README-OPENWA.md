@@ -30,6 +30,13 @@ OPENWA_API_KEY=tu_api_key_openwa
 
 # Historial separado del proyecto Puppeteer (opcional)
 # MONGODB_URI=mongodb://whatsapp_app:PASSWORD@localhost:27017/whatsapp_bulk_openwa?authSource=whatsapp_bulk_openwa
+
+# Auto-respuesta IA (requiere MongoDB + URL pública)
+WEBHOOK_PUBLIC_URL=https://tu-dominio.com
+WEBHOOK_SECRET=un-secreto-largo-aleatorio
+AUTO_REPLY_ENABLED=false
+AUTO_REPLY_MIN_DELAY_MS=3000
+AUTO_REPLY_MAX_DELAY_MS=8000
 ```
 
 ### Configurar sesiones (sin editar .env cada vez)
@@ -61,6 +68,64 @@ Interfaz: http://localhost:3445
 2. En la web, configura las sesiones en **Sesiones WhatsApp** (agregar o importar conectadas).
 3. Pulsa **Verificar sesiones OpenWA**.
 4. Sube PDFs, genera mensajes con IA y envía (o usa `TEST_MODE=true` para simular).
+
+## Auto-respuesta IA
+
+La sección **Auto-respuesta IA** en la interfaz permite que DeepSeek conteste automáticamente cuando un contacto **ya contactado** responde por WhatsApp.
+
+### Requisitos
+
+- `MONGODB_URI` configurado (el historial guarda teléfono + sesión usada al enviar).
+- `WEBHOOK_PUBLIC_URL` apuntando a esta app con HTTPS (OpenWA debe poder hacer POST).
+- Sesiones conectadas en OpenWA.
+
+### Activación
+
+1. Configura reglas en el acordeón (prompt base + palabras clave).
+2. Pulsa **Guardar configuración**.
+3. Pulsa **Activar webhooks** (registra un webhook por sesión en OpenWA).
+4. Activa el switch **Auto-respuesta activa**.
+
+Cada número responde **solo desde la sesión que recibió el mensaje** (no hay cruce entre los 6 números).
+
+### URL pública (nginx)
+
+Ejemplo de proxy inverso hacia el puerto de la app (`3445`):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name msg.tudominio.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3445;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+En `.env`:
+
+```bash
+WEBHOOK_PUBLIC_URL=https://msg.tudominio.com
+WEBHOOK_SECRET=genera-un-secreto-y-usalo-al-activar-webhooks
+```
+
+OpenWA enviará eventos a `https://msg.tudominio.com/api/webhooks/openwa`.
+
+### Probar sin WhatsApp real
+
+Con `TEST_MODE=true`, usa **Probar respuesta** en la UI (teléfono que ya esté en MongoDB tras un envío real previo) o:
+
+```bash
+curl -X POST http://localhost:3445/api/auto-reply/test \
+  -H "Content-Type: application/json" \
+  -d '{"telefono":"5512345678","message":"Hola, me interesa"}'
+```
 
 ## Verificar sesión con curl
 
@@ -145,7 +210,9 @@ La app carga variables desde `.env` (no se sube a git). Logs en `logs/out.log` y
 | `sessionsStore.js` | Sesiones guardadas en `data/sessions.json` |
 | `openwaClient.js` | Cliente HTTP OpenWA |
 | `openwaWhatsAppService.js` | Envío masivo y delays |
-| `pdfProcessor.js` / `aiService.js` | Igual que el proyecto original |
+| `autoReplyStore.js` / `autoReplyService.js` | Config y lógica de auto-respuesta |
+| `contactHistoryStore.js` | Historial MongoDB (teléfono + sesión) |
+| `pdfProcessor.js` / `aiService.js` | CVs, mensajes salientes y respuestas IA |
 
 ## Diferencias con whatsapp-bulk (Puppeteer)
 

@@ -116,7 +116,15 @@ async function filterOutAlreadyContacted(cvsArray) {
   return { toSend, skippedAlreadyContacted };
 }
 
-async function recordSuccessfulContact({ normalizedPhone, name }) {
+/**
+ * @param {{ normalizedPhone: string, name?: string, logicalSessionId?: string, openwaSessionId?: string }} params
+ */
+async function recordSuccessfulContact({
+  normalizedPhone,
+  name,
+  logicalSessionId,
+  openwaSessionId
+}) {
   if (!normalizedPhone || !mongoUriConfigured()) return;
 
   let coll;
@@ -128,32 +136,115 @@ async function recordSuccessfulContact({ normalizedPhone, name }) {
   }
   if (!coll) return;
 
+  const displayName =
+    name != null && String(name).trim() !== '' ? name : '(sin nombre)';
+  const now = new Date();
+  const sessionFields = {};
+  if (logicalSessionId) sessionFields.logicalSessionId = String(logicalSessionId);
+  if (openwaSessionId) sessionFields.openwaSessionId = String(openwaSessionId);
+  if (logicalSessionId || openwaSessionId) sessionFields.lastOutboundAt = now;
+
   try {
     await coll.updateOne(
       { normalizedPhone },
       {
-        $set: { name: name != null && String(name).trim() !== '' ? name : '(sin nombre)' },
+        $set: { name: displayName, ...sessionFields },
         $setOnInsert: {
           normalizedPhone,
-          contactedAt: new Date()
+          contactedAt: now
         }
       },
       { upsert: true }
     );
   } catch (err) {
     if (err && err.code === 11000) {
-      const displayName =
-        name != null && String(name).trim() !== '' ? name : '(sin nombre)';
-      await coll.updateOne({ normalizedPhone }, { $set: { name: displayName } });
+      await coll.updateOne(
+        { normalizedPhone },
+        { $set: { name: displayName, ...sessionFields } }
+      );
       return;
     }
     console.error('contactHistory record:', err.message);
   }
 }
 
+/**
+ * @param {string} normalizedPhone
+ * @returns {Promise<object|null>}
+ */
+async function getContactByPhone(normalizedPhone) {
+  if (!normalizedPhone || !mongoUriConfigured()) return null;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch (err) {
+    console.warn('contactHistory getContactByPhone:', err.message);
+    return null;
+  }
+  if (!coll) return null;
+
+  return coll.findOne({ normalizedPhone });
+}
+
+/**
+ * @param {string} normalizedPhone
+ * @returns {Promise<boolean>}
+ */
+async function isKnownContact(normalizedPhone) {
+  const doc = await getContactByPhone(normalizedPhone);
+  return Boolean(doc);
+}
+
+/**
+ * @param {string} normalizedPhone
+ * @returns {Promise<{ logicalSessionId?: string, openwaSessionId?: string, name?: string }|null>}
+ */
+async function getContactSession(normalizedPhone) {
+  const doc = await getContactByPhone(normalizedPhone);
+  if (!doc) return null;
+  return {
+    logicalSessionId: doc.logicalSessionId || null,
+    openwaSessionId: doc.openwaSessionId || null,
+    name: doc.name || null
+  };
+}
+
+/**
+ * Asigna sesión a contacto legacy (sin sessionId) en primer reply.
+ * @param {string} normalizedPhone
+ * @param {{ logicalSessionId: string, openwaSessionId: string }} session
+ */
+async function assignContactSession(normalizedPhone, { logicalSessionId, openwaSessionId }) {
+  if (!normalizedPhone || !mongoUriConfigured()) return;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch (err) {
+    console.error('contactHistory assignContactSession:', err.message);
+    return;
+  }
+  if (!coll) return;
+
+  await coll.updateOne(
+    { normalizedPhone },
+    {
+      $set: {
+        logicalSessionId: String(logicalSessionId),
+        openwaSessionId: String(openwaSessionId)
+      }
+    }
+  );
+}
+
 module.exports = {
   normalizePhone,
   mongoUriConfigured,
   filterOutAlreadyContacted,
-  recordSuccessfulContact
+  recordSuccessfulContact,
+  getContactByPhone,
+  isKnownContact,
+  getContactSession,
+  assignContactSession
 };

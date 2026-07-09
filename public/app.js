@@ -10,7 +10,13 @@ class CVAnalyzer {
         this.initializeElements();
         this.attachEventListeners();
         this.setupSendingControls();
-        this.loadConfig().then(() => this.loadSessions());
+        this.initAutoReplyElements();
+        this.loadConfig().then(() => {
+            this.loadSessions();
+            this.loadAutoReplyConfig();
+            this.loadAutoReplyStatus();
+            this.connectToEvents();
+        });
     }
 
     initializeElements() {
@@ -25,6 +31,9 @@ class CVAnalyzer {
         this.openWhatsAppBtn = document.getElementById('openWhatsAppBtn');
         this.sessionSelect = document.getElementById('sessionSelect');
         this.sessionCheckboxes = document.getElementById('sessionCheckboxes');
+        this.sessionWeightPreview = document.getElementById('sessionWeightPreview');
+        this.sessionWeightSum = document.getElementById('sessionWeightSum');
+        this.distributeWeightsEquallyBtn = document.getElementById('distributeWeightsEquallyBtn');
         this.sessionsList = document.getElementById('sessionsList');
         this.sessionsEmptyHint = document.getElementById('sessionsEmptyHint');
         this.openwaSessionPicker = document.getElementById('openwaSessionPicker');
@@ -46,6 +55,7 @@ class CVAnalyzer {
         this.sessionSendingCards = document.getElementById('sessionSendingCards');
         this.abortAllSessionsBtn = document.getElementById('abortAllSessionsBtn');
         this.sessionLiveState = {};
+        this.autoReplyRules = [];
 
         // Cargar el sonido de notificación
         this.notificationSound = new Audio('/notification-ping-372479.mp3');
@@ -77,9 +87,282 @@ class CVAnalyzer {
         if (this.refreshOpenwaListBtn) {
             this.refreshOpenwaListBtn.addEventListener('click', this.loadOpenWASessionPicker.bind(this));
         }
+        if (this.distributeWeightsEquallyBtn) {
+            this.distributeWeightsEquallyBtn.addEventListener('click', () => this.distributeSessionWeightsEqually());
+        }
         if (this.abortAllSessionsBtn) {
             this.abortAllSessionsBtn.addEventListener('click', () => this.abortSending('__roundrobin__'));
         }
+        this.attachAutoReplyListeners();
+    }
+
+    initAutoReplyElements() {
+        this.autoReplyPanel = document.getElementById('autoReplyPanel');
+        this.autoReplyStatus = document.getElementById('autoReplyStatus');
+        this.autoReplyEnabledToggle = document.getElementById('autoReplyEnabledToggle');
+        this.activateAutoReplyBtn = document.getElementById('activateAutoReplyBtn');
+        this.deactivateAutoReplyBtn = document.getElementById('deactivateAutoReplyBtn');
+        this.testAutoReplyBtn = document.getElementById('testAutoReplyBtn');
+        this.autoReplyTestPhone = document.getElementById('autoReplyTestPhone');
+        this.autoReplyTestMessage = document.getElementById('autoReplyTestMessage');
+        this.autoReplyBasePrompt = document.getElementById('autoReplyBasePrompt');
+        this.autoReplyRulesList = document.getElementById('autoReplyRulesList');
+        this.addAutoReplyRuleBtn = document.getElementById('addAutoReplyRuleBtn');
+        this.saveAutoReplyConfigBtn = document.getElementById('saveAutoReplyConfigBtn');
+        this.autoReplyConversations = document.getElementById('autoReplyConversations');
+    }
+
+    attachAutoReplyListeners() {
+        if (this.saveAutoReplyConfigBtn) {
+            this.saveAutoReplyConfigBtn.addEventListener('click', () => this.saveAutoReplyConfig());
+        }
+        if (this.addAutoReplyRuleBtn) {
+            this.addAutoReplyRuleBtn.addEventListener('click', () => this.addAutoReplyRule());
+        }
+        if (this.activateAutoReplyBtn) {
+            this.activateAutoReplyBtn.addEventListener('click', () => this.activateAutoReply());
+        }
+        if (this.deactivateAutoReplyBtn) {
+            this.deactivateAutoReplyBtn.addEventListener('click', () => this.deactivateAutoReply());
+        }
+        if (this.testAutoReplyBtn) {
+            this.testAutoReplyBtn.addEventListener('click', () => this.testAutoReply());
+        }
+        if (this.autoReplyEnabledToggle) {
+            this.autoReplyEnabledToggle.addEventListener('change', () => {
+                this.saveAutoReplyConfig({ silent: true, enabledOnly: true });
+            });
+        }
+        document.querySelectorAll('.accordion-header').forEach((btn) => {
+            btn.addEventListener('click', () => this.toggleAccordion(btn));
+        });
+    }
+
+    toggleAccordion(button) {
+        const item = button.closest('.accordion-item');
+        if (!item) return;
+        const body = item.querySelector('.accordion-body');
+        if (!body) return;
+        const isOpen = !body.classList.contains('accordion-body-collapsed');
+        body.classList.toggle('accordion-body-collapsed', isOpen);
+        item.classList.toggle('accordion-item-open', !isOpen);
+    }
+
+    async loadAutoReplyStatus() {
+        if (!this.autoReplyStatus) return;
+        try {
+            const response = await fetch('/api/auto-reply/status');
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'Error de estado');
+
+            let html = '';
+            if (!data.mongodbConfigured) {
+                html += '<strong>MongoDB requerido</strong> para filtrar contactos ya enviados.<br>';
+            }
+            if (!data.webhookConfigured) {
+                html += '<strong>WEBHOOK_PUBLIC_URL</strong> no configurado en el servidor.<br>';
+            } else {
+                html += `Webhook: <code>${this.escapeHtml(data.webhookUrl)}</code><br>`;
+            }
+            html += `Sesiones: ${data.sessionsConfigured} · Webhooks activos: ${data.webhooksActive}`;
+            if (data.enabled) {
+                html += ' · <strong>Auto-respuesta ON</strong>';
+            }
+
+            this.autoReplyStatus.innerHTML = html;
+            this.autoReplyStatus.className = `auto-reply-status ${data.canActivate ? 'ok' : 'warning'}`;
+
+            if (this.activateAutoReplyBtn) {
+                this.activateAutoReplyBtn.disabled = !data.canActivate;
+            }
+        } catch (error) {
+            this.autoReplyStatus.innerHTML = `Error cargando estado: ${this.escapeHtml(error.message)}`;
+            this.autoReplyStatus.className = 'auto-reply-status warning';
+        }
+    }
+
+    async loadAutoReplyConfig() {
+        try {
+            const response = await fetch('/api/auto-reply/config');
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'Error cargando config');
+            const config = data.config || {};
+            this.autoReplyRules = Array.isArray(config.rules) ? config.rules : [];
+            if (this.autoReplyBasePrompt) {
+                this.autoReplyBasePrompt.value = config.basePrompt || '';
+            }
+            if (this.autoReplyEnabledToggle) {
+                this.autoReplyEnabledToggle.checked = Boolean(config.enabled);
+            }
+            this.renderAutoReplyRules();
+        } catch (error) {
+            console.error('Error cargando auto-reply config:', error);
+        }
+    }
+
+    renderAutoReplyRules() {
+        if (!this.autoReplyRulesList) return;
+        if (!this.autoReplyRules.length) {
+            this.autoReplyRulesList.innerHTML = '<p class="auto-reply-empty">No hay reglas. Agrega una para respuestas por palabra clave.</p>';
+            return;
+        }
+        this.autoReplyRulesList.innerHTML = this.autoReplyRules
+            .map(
+                (rule, index) => `
+            <div class="auto-reply-rule-card" data-rule-index="${index}">
+                <label>Etiqueta</label>
+                <input type="text" class="auto-reply-rule-input rule-label" value="${this.escapeHtml(rule.label || '')}">
+                <label>Palabras clave (separadas por coma)</label>
+                <input type="text" class="auto-reply-rule-input rule-keywords" value="${this.escapeHtml((rule.keywords || []).join(', '))}">
+                <label>Instrucción para la IA</label>
+                <textarea class="auto-reply-rule-input rule-instruction" rows="2">${this.escapeHtml(rule.instruction || '')}</textarea>
+                <div class="auto-reply-rule-actions">
+                    <button type="button" class="btn btn-danger btn-sm remove-rule-btn" data-index="${index}">Eliminar</button>
+                </div>
+            </div>`
+            )
+            .join('');
+
+        this.autoReplyRulesList.querySelectorAll('.remove-rule-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const idx = parseInt(btn.dataset.index, 10);
+                this.autoReplyRules.splice(idx, 1);
+                this.renderAutoReplyRules();
+            });
+        });
+    }
+
+    addAutoReplyRule() {
+        this.autoReplyRules.push({
+            id: `rule_${Date.now()}`,
+            label: 'Nueva regla',
+            keywords: [],
+            instruction: ''
+        });
+        this.renderAutoReplyRules();
+    }
+
+    collectAutoReplyRulesFromDom() {
+        if (!this.autoReplyRulesList) return [];
+        const cards = this.autoReplyRulesList.querySelectorAll('.auto-reply-rule-card');
+        return Array.from(cards).map((card, index) => {
+            const label = card.querySelector('.rule-label')?.value || `Regla ${index + 1}`;
+            const keywordsRaw = card.querySelector('.rule-keywords')?.value || '';
+            const instruction = card.querySelector('.rule-instruction')?.value || '';
+            const existing = this.autoReplyRules[index] || {};
+            return {
+                id: existing.id || `rule_${Date.now()}_${index}`,
+                label: label.trim(),
+                keywords: keywordsRaw
+                    .split(',')
+                    .map((k) => k.trim())
+                    .filter(Boolean),
+                instruction: instruction.trim()
+            };
+        });
+    }
+
+    async saveAutoReplyConfig(options = {}) {
+        try {
+            const payload = {
+                enabled: this.autoReplyEnabledToggle ? this.autoReplyEnabledToggle.checked : false,
+                basePrompt: this.autoReplyBasePrompt ? this.autoReplyBasePrompt.value : '',
+                rules: options.enabledOnly ? undefined : this.collectAutoReplyRulesFromDom()
+            };
+            if (options.enabledOnly) {
+                payload.rules = this.autoReplyRules;
+            }
+            const response = await fetch('/api/auto-reply/config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo guardar');
+            this.autoReplyRules = data.config.rules || [];
+            if (!options.enabledOnly) this.renderAutoReplyRules();
+            if (!options.silent) {
+                this.showStatus('Configuración de auto-respuesta guardada', 'success');
+            }
+            await this.loadAutoReplyStatus();
+        } catch (error) {
+            this.showStatus(error.message, 'error');
+        }
+    }
+
+    async activateAutoReply() {
+        try {
+            await this.saveAutoReplyConfig({ silent: true });
+            const response = await fetch('/api/auto-reply/activate', { method: 'POST' });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo activar');
+            const ok = (data.results || []).filter((r) => r.success).length;
+            const fail = (data.results || []).filter((r) => !r.success).length;
+            this.showStatus(`Webhooks activados: ${ok} OK${fail ? `, ${fail} fallo(s)` : ''}`, ok ? 'success' : 'warning');
+            if (this.autoReplyEnabledToggle) this.autoReplyEnabledToggle.checked = true;
+            await this.loadAutoReplyStatus();
+            await this.loadAutoReplyConfig();
+        } catch (error) {
+            this.showStatus(error.message, 'error');
+        }
+    }
+
+    async deactivateAutoReply() {
+        try {
+            const response = await fetch('/api/auto-reply/deactivate', { method: 'POST' });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo desactivar');
+            this.showStatus('Webhooks desactivados', 'success');
+            if (this.autoReplyEnabledToggle) this.autoReplyEnabledToggle.checked = false;
+            await this.loadAutoReplyStatus();
+            await this.loadAutoReplyConfig();
+        } catch (error) {
+            this.showStatus(error.message, 'error');
+        }
+    }
+
+    async testAutoReply() {
+        const telefono = this.autoReplyTestPhone ? this.autoReplyTestPhone.value.trim() : '';
+        const message = this.autoReplyTestMessage ? this.autoReplyTestMessage.value.trim() : 'Hola, me interesa';
+        if (!telefono) {
+            this.showStatus('Indica un teléfono que ya esté en el historial de contactos', 'error');
+            return;
+        }
+        try {
+            await this.saveAutoReplyConfig({ silent: true });
+            const response = await fetch('/api/auto-reply/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ telefono, message })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'Prueba fallida');
+            if (data.result && data.result.replyMessage) {
+                this.appendAutoReplyConversation(data.result);
+            }
+            this.showStatus('Prueba de auto-respuesta completada (sin enviar por WhatsApp)', 'success');
+        } catch (error) {
+            this.showStatus(error.message, 'error');
+        }
+    }
+
+    appendAutoReplyConversation(item) {
+        if (!this.autoReplyConversations) return;
+        const empty = this.autoReplyConversations.querySelector('.auto-reply-empty');
+        if (empty) empty.remove();
+
+        const sessionLabel = item.sessionId ? this.getSessionLabel(item.sessionId) : item.openwaSessionId || '';
+        const ruleLabel = item.matchedRuleLabel ? ` · Regla: ${item.matchedRuleLabel}` : '';
+        const testBadge = item.testMode ? ' · PRUEBA' : '';
+
+        const el = document.createElement('div');
+        el.className = 'auto-reply-conversation-item fade-in';
+        el.innerHTML = `
+            <div class="meta">${this.escapeHtml(sessionLabel)}${this.escapeHtml(ruleLabel)}${testBadge} · ${new Date(item.timestamp || Date.now()).toLocaleString()}</div>
+            <div class="incoming"><strong>Entrante:</strong> ${this.escapeHtml(item.incomingMessage || '')}</div>
+            <div class="reply"><strong>Respuesta IA:</strong> ${this.escapeHtml(item.replyMessage || '')}</div>
+        `;
+        this.autoReplyConversations.prepend(el);
     }
 
     getSessionLabel(sessionId) {
@@ -125,6 +408,166 @@ class CVAnalyzer {
         return ids;
     }
 
+    getSessionWeightInputs() {
+        if (!this.sessionCheckboxes) return [];
+        return [...this.sessionCheckboxes.querySelectorAll('.session-weight-input')];
+    }
+
+    getStoredSessionWeight(sessionId) {
+        const stored = this._sessionWeightValues && this._sessionWeightValues[sessionId];
+        return Number.isFinite(stored) && stored > 0 ? stored : null;
+    }
+
+    /** Ponderaciones % solo de sesiones seleccionadas */
+    getSelectedSessionWeights() {
+        const weights = {};
+        if (!this.sessionCheckboxes) return weights;
+
+        this.sessionCheckboxes.querySelectorAll('.session-send-row').forEach((row) => {
+            const cb = row.querySelector('.session-send-checkbox');
+            const input = row.querySelector('.session-weight-input');
+            if (!cb || !input || !cb.checked) return;
+            const value = parseFloat(String(input.value).replace(',', '.'));
+            weights[cb.value] = Number.isFinite(value) && value > 0 ? value : 0;
+        });
+
+        return weights;
+    }
+
+    distributeSessionWeightsEqually() {
+        const selected = this.getSelectedSessionIds();
+        if (selected.length === 0) return;
+
+        const base = Math.floor(100 / selected.length);
+        let remainder = 100 - base * selected.length;
+
+        selected.forEach((id, index) => {
+            const value = base + (index < remainder ? 1 : 0);
+            if (!this._sessionWeightValues) this._sessionWeightValues = {};
+            this._sessionWeightValues[id] = value;
+        });
+
+        this.getSessionWeightInputs().forEach((input) => {
+            const stored = this.getStoredSessionWeight(input.dataset.sessionId);
+            if (stored != null) input.value = String(stored);
+        });
+
+        this.updateSessionWeightUI();
+    }
+
+    computeWeightDistributionPreview(totalMessages, weightsBySession) {
+        const sessionIds = Object.keys(weightsBySession);
+        if (sessionIds.length === 0 || totalMessages <= 0) {
+            return sessionIds.map((id) => ({ id, count: 0, pct: 0 }));
+        }
+
+        const values = sessionIds.map((id) => weightsBySession[id] || 0);
+        const sum = values.reduce((a, b) => a + b, 0);
+        const proportions =
+            sum > 0 ? values.map((v) => v / sum) : values.map(() => 1 / sessionIds.length);
+
+        const raw = proportions.map((p) => p * totalMessages);
+        const counts = raw.map((q) => Math.floor(q));
+        let leftover = totalMessages - counts.reduce((a, b) => a + b, 0);
+        const remainders = raw
+            .map((q, i) => ({ i, r: q - counts[i] }))
+            .sort((a, b) => b.r - a.r || a.i - b.i);
+
+        for (let k = 0; k < leftover; k++) {
+            counts[remainders[k % remainders.length].i]++;
+        }
+
+        return sessionIds.map((id, i) => ({
+            id,
+            count: counts[i],
+            pct: Math.round(proportions[i] * 1000) / 10
+        }));
+    }
+
+    updateSessionWeightUI() {
+        const selected = this.getSelectedSessionIds();
+        const multi = selected.length > 1;
+
+        this.getSessionWeightInputs().forEach((input) => {
+            const row = input.closest('.session-send-row');
+            const cb = row ? row.querySelector('.session-send-checkbox') : null;
+            const enabled = Boolean(cb && cb.checked && multi);
+            input.disabled = !enabled;
+            row?.classList.toggle('session-send-row-disabled', Boolean(cb && !cb.checked));
+        });
+
+        if (this.distributeWeightsEquallyBtn) {
+            this.distributeWeightsEquallyBtn.style.display = multi ? 'inline-block' : 'none';
+        }
+
+        const weights = this.getSelectedSessionWeights();
+        const sum = Object.values(weights).reduce((a, b) => a + b, 0);
+
+        if (this.sessionWeightSum) {
+            if (!multi) {
+                this.sessionWeightSum.textContent = '';
+                this.sessionWeightSum.className = 'session-weight-sum';
+            } else {
+                const rounded = Math.round(sum * 10) / 10;
+                this.sessionWeightSum.textContent = `Total: ${rounded}%`;
+                this.sessionWeightSum.className =
+                    'session-weight-sum' +
+                    (Math.abs(rounded - 100) > 0.5 ? ' session-weight-sum-warn' : '');
+            }
+        }
+
+        if (this.sessionWeightPreview) {
+            if (!multi) {
+                this.sessionWeightPreview.textContent = '';
+                return;
+            }
+
+            const cvsCount = this.cvsData.filter(
+                (cv) =>
+                    cv.procesado &&
+                    cv.mensajeIA &&
+                    cv.mensajeIA.trim() !== '' &&
+                    cv.telefono !== 'No encontrado'
+            ).length;
+
+            if (cvsCount === 0) {
+                this.sessionWeightPreview.textContent =
+                    'Indica el % de cada línea. Deben sumar 100%.';
+                return;
+            }
+
+            const preview = this.computeWeightDistributionPreview(cvsCount, weights);
+            const parts = preview.map(
+                (row) => `${this.getSessionLabel(row.id)}: ${row.count} (${row.pct}%)`
+            );
+            this.sessionWeightPreview.textContent = `Con ${cvsCount} mensajes → ${parts.join(' · ')}`;
+        }
+    }
+
+    validateSessionWeights() {
+        const selected = this.getSelectedSessionIds();
+        if (selected.length <= 1) return { ok: true, weights: {} };
+
+        const weights = this.getSelectedSessionWeights();
+        const sum = Object.values(weights).reduce((a, b) => a + b, 0);
+
+        if (Object.values(weights).some((w) => w <= 0)) {
+            return {
+                ok: false,
+                message: 'Cada sesión seleccionada debe tener un porcentaje mayor a 0.'
+            };
+        }
+
+        if (Math.abs(sum - 100) > 0.5) {
+            return {
+                ok: false,
+                message: `Los porcentajes deben sumar 100% (actualmente suman ${Math.round(sum * 10) / 10}%). Usa "Repartir igual" o ajusta los valores.`
+            };
+        }
+
+        return { ok: true, weights };
+    }
+
     getControlSessionId() {
         return this.activeControlSessionId || '__roundrobin__';
     }
@@ -164,24 +607,69 @@ class CVAnalyzer {
             const defaultAllChecked = !this._sessionsCheckboxesInitialized;
 
             this.sessionCheckboxes.innerHTML = '';
-            sessions.forEach((s) => {
+            if (!this._sessionWeightValues) this._sessionWeightValues = {};
+
+            sessions.forEach((s, index) => {
+                const row = document.createElement('div');
+                row.className = 'session-send-row';
+                row.dataset.sessionId = s.id;
+
                 const label = document.createElement('label');
-                label.style.cssText =
-                    'display: inline-flex; align-items: center; cursor: pointer; background: #f0f9ff; padding: 8px 15px; border-radius: 20px; border: 1px solid #bae6fd;';
+                label.className = 'session-send-label';
+
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
                 cb.className = 'session-send-checkbox';
                 cb.value = s.id;
                 cb.checked = defaultAllChecked || previouslyChecked.has(s.id);
-                cb.style.cssText = 'margin-right: 8px; width: 18px; height: 18px;';
+
                 const span = document.createElement('span');
-                span.style.cssText = 'font-weight: 500; color: #0369a1;';
+                span.className = 'session-send-name';
                 span.textContent = s.label;
+
+                const weightWrap = document.createElement('span');
+                weightWrap.className = 'session-weight-wrap';
+
+                const weightInput = document.createElement('input');
+                weightInput.type = 'number';
+                weightInput.min = '1';
+                weightInput.max = '100';
+                weightInput.step = '1';
+                weightInput.className = 'session-weight-input form-select';
+                weightInput.dataset.sessionId = s.id;
+                weightInput.title = 'Porcentaje de mensajes para esta línea';
+
+                if (this._sessionWeightValues[s.id] == null) {
+                    const equalShare = sessions.length > 0 ? Math.floor(100 / sessions.length) : 100;
+                    const extra = index < 100 % Math.max(sessions.length, 1) ? 1 : 0;
+                    this._sessionWeightValues[s.id] = equalShare + extra;
+                }
+                weightInput.value = String(this._sessionWeightValues[s.id]);
+
+                const pctLabel = document.createElement('span');
+                pctLabel.className = 'session-weight-suffix';
+                pctLabel.textContent = '%';
+
+                weightWrap.appendChild(weightInput);
+                weightWrap.appendChild(pctLabel);
+
                 label.appendChild(cb);
                 label.appendChild(span);
-                this.sessionCheckboxes.appendChild(label);
+                label.appendChild(weightWrap);
+                row.appendChild(label);
+                this.sessionCheckboxes.appendChild(row);
+
+                cb.addEventListener('change', () => this.updateSessionWeightUI());
+                weightInput.addEventListener('input', () => {
+                    const value = parseFloat(String(weightInput.value).replace(',', '.'));
+                    if (Number.isFinite(value) && value > 0) {
+                        this._sessionWeightValues[s.id] = value;
+                    }
+                    this.updateSessionWeightUI();
+                });
             });
             this._sessionsCheckboxesInitialized = true;
+            this.updateSessionWeightUI();
         }
 
         if (this.sessionsList) {
@@ -902,6 +1390,7 @@ class CVAnalyzer {
             this.progressText.textContent = `${doneTotal} / ${doneTotal}`;
             this.showStatus(`Se generaron mensajes de IA para ${doneTotal} CVs`, 'success');
             this.sendWhatsAppBtn.disabled = false;
+            this.updateSessionWeightUI();
             this.progressSection.style.display = 'none';
             return;
         }
@@ -926,6 +1415,12 @@ class CVAnalyzer {
             return;
         }
 
+        const weightValidation = this.validateSessionWeights();
+        if (!weightValidation.ok) {
+            this.showStatus(weightValidation.message, 'error');
+            return;
+        }
+
         const sessionLabels = selectedSessions.map((s) => this.getSessionLabel(s)).join(', ');
         let confirmMessage = `¿Estás seguro de enviar ${cvsToSend.length} mensajes por WhatsApp?\n\n`;
         if (this.testMode) {
@@ -933,6 +1428,11 @@ class CVAnalyzer {
         } else {
             if (selectedSessions.length > 1) {
                 confirmMessage += `📱 Envío paralelo entre ${selectedSessions.length} sesiones: ${sessionLabels}\n`;
+                const preview = this.computeWeightDistributionPreview(
+                    cvsToSend.length,
+                    weightValidation.weights
+                );
+                confirmMessage += `Reparto: ${preview.map((row) => `${this.getSessionLabel(row.id)} ${row.count} (${row.pct}%)`).join(', ')}\n`;
                 confirmMessage += 'Cada celular envía su primer mensaje al mismo tiempo.\n';
                 confirmMessage += 'Luego cada sesión espera su propio tiempo aleatorio (1-5 min).\n';
             } else {
@@ -969,7 +1469,9 @@ class CVAnalyzer {
                 },
                 body: JSON.stringify({
                     cvs: this.cvsData,
-                    selectedSessions
+                    selectedSessions,
+                    sessionWeights:
+                        selectedSessions.length > 1 ? weightValidation.weights : undefined
                 })
             });
 
@@ -1070,6 +1572,7 @@ class CVAnalyzer {
                     this.hideSendingControls();
                     this.hideSessionSendingPanel();
                     this.disconnectFromEvents();
+                this.connectToEvents();
                     return;
                 }
 
@@ -1215,6 +1718,7 @@ class CVAnalyzer {
         this.hideSendingControls();
         this.hideSessionSendingPanel();
         this.disconnectFromEvents();
+        this.connectToEvents();
         this.sendWhatsAppBtn.disabled = false;
         this.generateMessagesBtn.disabled = false;
 
@@ -1270,7 +1774,8 @@ class CVAnalyzer {
                 clearInterval(interval);
                 this.addLogEntry('Envío completado', 'success');
                 this.hideSendingControls(); // Ocultar controles al finalizar
-                this.disconnectFromEvents(); // Desconectar eventos cuando termine el envío
+                this.disconnectFromEvents();
+                this.connectToEvents(); // Desconectar eventos cuando termine el envío
                 this.sendWhatsAppBtn.disabled = false; // Re-habilitar botones
                 this.generateMessagesBtn.disabled = false;
                 return;
@@ -1379,7 +1884,8 @@ class CVAnalyzer {
                     this.fileInput.value = '';
                     this.hideSendingControls();
                     this.hideMessagePreview();
-                    this.disconnectFromEvents(); // Desconectar eventos al limpiar
+                    this.disconnectFromEvents();
+                this.connectToEvents(); // Desconectar eventos al limpiar
                     this.showStatus('Datos limpiados correctamente', 'success');
                 }
             } catch (error) {
@@ -1677,6 +2183,7 @@ class CVAnalyzer {
                     this.hideSendingControls();
                     this.hideSessionSendingPanel();
                     this.disconnectFromEvents();
+                this.connectToEvents();
                 } else {
                     this.updateSessionCard(targetSession, { phase: 'aborted' });
                     this.addLogEntry(`🛑 Envío detenido en ${this.getSessionLabel(targetSession)}`, 'error');
@@ -1848,6 +2355,17 @@ class CVAnalyzer {
             this.hideSendingControls();
             this.hideSessionSendingPanel();
             this.disconnectFromEvents();
+            this.connectToEvents();
+        });
+
+        this.eventSource.addEventListener('incomingReply', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                this.appendAutoReplyConversation(data);
+                this.playNotificationSound();
+            } catch (error) {
+                console.warn('incomingReply SSE:', error);
+            }
         });
 
         // Manejar errores de conexión
