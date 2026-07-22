@@ -9,16 +9,97 @@ if (!API_KEY) {
   console.error('Error: DEEPSEEK_API_KEY no está configurada en el archivo .env');
 }
 
+const GREETING_TEMPLATES = [
+  (name) => `Hola ${name}`,
+  (name) => `Qué tal ${name}`,
+  (name) => `Buen día ${name}`
+];
+
+/**
+ * Extrae solo el primer nombre (sin apellidos).
+ * @param {string} fullName
+ * @returns {string}
+ */
+function extractFirstName(fullName) {
+  const cleaned = String(fullName || '')
+    .trim()
+    .replace(/^No encontrado$/i, '');
+  if (!cleaned) return 'amigo';
+  return cleaned.split(/\s+/)[0];
+}
+
+/**
+ * Saludo corto aleatorio con el primer nombre.
+ * @param {string} nombre
+ * @returns {string}
+ */
+function buildGreeting(nombre) {
+  const firstName = extractFirstName(nombre);
+  const template = GREETING_TEMPLATES[Math.floor(Math.random() * GREETING_TEMPLATES.length)];
+  return template(firstName);
+}
+
+/**
+ * Parsea la respuesta de DeepSeek en saludo + cuerpo.
+ * @param {string} raw
+ * @param {string} nombre
+ * @returns {{ saludo: string, mensajeIA: string }}
+ */
+function parseSaludoAndMessage(raw, nombre) {
+  const fallbackSaludo = buildGreeting(nombre);
+  let text = String(raw || '').trim();
+
+  const saludoMatch = text.match(/^\s*SALUDO:\s*(.+?)\s*(?:\n|$)/i);
+  let saludo = saludoMatch ? saludoMatch[1].trim() : null;
+
+  let body = text;
+  if (/MENSAJE:\s*/i.test(text)) {
+    body = text.split(/MENSAJE:\s*/i).slice(1).join('MENSAJE:').trim();
+  } else if (saludoMatch) {
+    body = text.replace(saludoMatch[0], '').trim();
+  }
+
+  // Si el modelo metió el saludo dentro del cuerpo, separarlo
+  if (!saludo) {
+    const inlineGreeting = body.match(
+      /^(Hola|Qué tal|Que tal|Buen[oa]s?\s+d[ií]as?)\s+[\wÁÉÍÓÚáéíóúÑñüÜ.'-]+[,!]?\s*\n+/i
+    );
+    if (inlineGreeting) {
+      saludo = inlineGreeting[0].replace(/[,!]?\s*$/, '').trim().replace(/,$/, '');
+      body = body.slice(inlineGreeting[0].length).trim();
+    }
+  }
+
+  // Quitar saludo residual al inicio del cuerpo (evitar repetir el nombre)
+  body = body
+    .replace(
+      /^(Hola|Qué tal|Que tal|Buen[oa]s?\s+d[ií]as?)\s+[\wÁÉÍÓÚáéíóúÑñüÜ.'-]+[,!]?\s*\n*/i,
+      ''
+    )
+    .trim();
+
+  if (!saludo) saludo = fallbackSaludo;
+  if (!body) {
+    body = `Vi tu perfil y me pareció muy sólido tu expertise profesional.
+
+En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
+
+¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
+
+Atte:
+${SENDER_PLACEHOLDER}`;
+  }
+
+  return { saludo, mensajeIA: body };
+}
+
 /**
  * Genera un mensaje básico sin IA cuando no hay API key
  * @param {string} nombre - Nombre de la persona
  * @param {string} experiencia - Experiencia profesional
- * @returns {string} - Mensaje básico personalizado
+ * @returns {{ saludo: string, mensajeIA: string }}
  */
 function generateBasicMessage(nombre, experiencia) {
-  // Extraer información básica de la experiencia
-  const lines = experiencia.split('\n').filter(line => line.trim().length > 0);
-  
   let expertise = 'profesional';
   let puestoClave = 'dirección comercial'; // Default
   
@@ -57,22 +138,24 @@ function generateBasicMessage(nombre, experiencia) {
     puestoClave = 'Recursos Humanos';
   }
 
-  return `Hola ${nombre},
-
-Vi tu perfil y me pareció muy sólido tu expertise ${expertise}.
+  return {
+    saludo: buildGreeting(nombre),
+    mensajeIA: `Vi tu perfil y me pareció muy sólido tu expertise ${expertise}.
 
 En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en ${puestoClave} y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
 
 ¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
+
 Atte:
-${SENDER_PLACEHOLDER}`;
+${SENDER_PLACEHOLDER}`
+  };
 }
 
 /**
  * Genera un mensaje personalizado usando la API de DeepSeek
  * @param {string} nombre - Nombre de la persona
  * @param {string} experiencia - Experiencia profesional de la persona
- * @returns {Promise<string>} - Mensaje personalizado generado por IA
+ * @returns {Promise<{ saludo: string, mensajeIA: string }>}
  */
 async function generatePersonalizedMessage(nombre, experiencia) {
   // Si no hay API key o es de prueba, generar mensaje básico
@@ -81,9 +164,11 @@ async function generatePersonalizedMessage(nombre, experiencia) {
     return generateBasicMessage(nombre, experiencia);
   }
 
-  const prompt = `Eres un experto en reclutamiento. Genera un mensaje personalizado y profesional para ${nombre}.
+  const firstName = extractFirstName(nombre);
 
-Experiencia profesional de ${nombre}:
+  const prompt = `Eres un experto en reclutamiento. Genera un saludo corto y un mensaje profesional para ${firstName}.
+
+Experiencia profesional de ${firstName}:
 ${experiencia}
 
 INSTRUCCIONES:
@@ -92,11 +177,11 @@ INSTRUCCIONES:
 3. Identifica también un logro destacado, rol específico o industria para personalizar el expertise
 4. Genera un mensaje natural y conversacional
 5. Varía un poco el mensaje para que no sea repetitivo y se sienta natural
-6. Usa solo el primer nombre de la persona, evita usar apellidos
+6. Usa solo el primer nombre ("${firstName}"), evita usar apellidos
 
-FORMATO EXACTO (debes seguir este formato estrictamente):
-Hola [primer nombre],
-
+FORMATO EXACTO (debes seguir este formato estrictamente, sin texto extra):
+SALUDO: [elige UNA variante natural: "Hola ${firstName}" o "Qué tal ${firstName}" o "Buen día ${firstName}"]
+MENSAJE:
 Vi tu perfil y me pareció muy sólido tu expertise [personaliza aquí con algo específico de su experiencia - máximo 60 caracteres].
 
 En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en [PUESTO CLAVE IDENTIFICADO] y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
@@ -105,6 +190,11 @@ En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conec
 
 Atte:
 ${SENDER_PLACEHOLDER}
+
+IMPORTANTE - SALUDO Y NOMBRE:
+- El SALUDO es un mensaje corto aparte (solo la línea de saludo, sin coma final obligatoria)
+- El MENSAJE NO debe empezar con "Hola", "Qué tal" ni mencionar el nombre de la persona
+- El nombre "${firstName}" solo puede aparecer en la línea SALUDO
 
 IMPORTANTE - PUESTO CLAVE:
 - Debes identificar el puesto clave basándote en su experiencia
@@ -131,7 +221,7 @@ REGLAS IMPORTANTES:
 - El puesto clave debe ser específico y relevante
 - Usa lenguaje natural y conversacional
 - Mantén el resto del mensaje exactamente igual al formato
-- GENERA SOLO UN MENSAJE, NO múltiples variaciones
+- GENERA SOLO UNA respuesta con SALUDO + MENSAJE, NO múltiples variaciones
 - NO uses separadores como "---" o "***"
 - NO generes múltiples versiones del mensaje`;
 
@@ -158,7 +248,7 @@ REGLAS IMPORTANTES:
       let message = response.data.choices[0].message.content.trim();
       
       // Limpiar la respuesta: si contiene múltiples mensajes separados por "---" o "***", tomar solo el primero
-      const separators = ['---', '***', '===', '\n\n\n'];
+      const separators = ['---', '***', '==='];
       for (const separator of separators) {
         if (message.includes(separator)) {
           console.log(`⚠️ Se detectaron múltiples mensajes separados por "${separator}". Tomando solo el primero.`);
@@ -166,20 +256,8 @@ REGLAS IMPORTANTES:
           break;
         }
       }
-      
-      // También verificar si hay múltiples mensajes completos (patrón: "Hola [nombre]" aparece múltiples veces)
-      const mensajePattern = /Hola\s+[\w\s]+,\s+Vi tu perfil/g;
-      const matches = message.match(mensajePattern);
-      if (matches && matches.length > 1) {
-        console.log(`⚠️ Se detectaron ${matches.length} mensajes completos. Tomando solo el primero.`);
-        // Encontrar el final del primer mensaje (antes del segundo "Hola")
-        const firstMensajeEnd = message.indexOf(matches[1]);
-        if (firstMensajeEnd > 0) {
-          message = message.substring(0, firstMensajeEnd).trim();
-        }
-      }
-      
-      return message;
+
+      return parseSaludoAndMessage(message, nombre);
     } else {
       throw new Error('Respuesta inválida de la API de DeepSeek');
     }
@@ -210,15 +288,17 @@ REGLAS IMPORTANTES:
       puestoClave = 'Operaciones';
     }
     
-    return `Hola ${nombre},
-
-Vi tu perfil y me pareció muy sólido tu expertise profesional.
+    return {
+      saludo: buildGreeting(nombre),
+      mensajeIA: `Vi tu perfil y me pareció muy sólido tu expertise profesional.
 
 En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en ${puestoClave} y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
 
 ¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
+
 Atte:
-${SENDER_PLACEHOLDER}`;
+${SENDER_PLACEHOLDER}`
+    };
   }
 }
 
@@ -244,10 +324,11 @@ async function generateBulkMessages(cvs, onProgress = null) {
     }
 
     try {
-      const message = await generatePersonalizedMessage(cv.nombre, cv.experiencia);
+      const generated = await generatePersonalizedMessage(cv.nombre, cv.experiencia);
       messages.push({
         ...cv,
-        mensajeIA: message
+        saludo: generated.saludo,
+        mensajeIA: generated.mensajeIA
       });
 
       if (onProgress) {
@@ -268,6 +349,7 @@ async function generateBulkMessages(cvs, onProgress = null) {
       console.error(`Error generando mensaje para ${cv.nombre}:`, error.message);
       messages.push({
         ...cv,
+        saludo: buildGreeting(cv.nombre),
         mensajeIA: `Error generando mensaje para ${cv.nombre}`
       });
 
@@ -396,5 +478,8 @@ Genera SOLO el texto del mensaje de respuesta, sin explicaciones ni alternativas
 module.exports = {
   generatePersonalizedMessage,
   generateBulkMessages,
-  generateReplyMessage
+  generateReplyMessage,
+  buildGreeting,
+  extractFirstName,
+  parseSaludoAndMessage
 };

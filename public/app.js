@@ -1067,8 +1067,12 @@ class CVAnalyzer {
             const estadoText = cv.procesado ? 'Procesado' : 'Error';
 
             const mensajeId = `mensaje-${index}`;
+            const saludoTexto = cv.saludo || '';
             const mensajeTexto = cv.mensajeIA || 'Pendiente de generar...';
-            const mensajeParaMostrar = this.resolveMessageForDisplay(mensajeTexto);
+            const mensajeCompleto = saludoTexto
+                ? `${saludoTexto}\n\n${mensajeTexto}`
+                : mensajeTexto;
+            const mensajeParaMostrar = this.resolveMessageForDisplay(mensajeCompleto);
 
             // Escapar HTML para seguridad pero preservar saltos de línea
             const mensajeEscapado = mensajeParaMostrar
@@ -1082,6 +1086,7 @@ class CVAnalyzer {
             const nombreEscapado = (cv.nombre || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
             const telefonoEscapado = (cv.telefono || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
             const experienciaEscapada = (cv.experiencia || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+            const saludoEscapadoAttr = saludoTexto.replace(/"/g, '&quot;');
 
             row.innerHTML = `
                 <td>${cv.archivoOriginal}</td>
@@ -1099,7 +1104,12 @@ class CVAnalyzer {
                 </td>
                 <td class="mensaje-ia-cell">
                     <div class="mensaje-display" id="display-${mensajeId}">${mensajeEscapado}</div>
-                    <textarea class="mensaje-edit" id="edit-${mensajeId}" style="display: none;" rows="6">${mensajeTexto}</textarea>
+                    <div class="mensaje-edit-wrap" id="edit-wrap-${mensajeId}" style="display: none;">
+                        <label class="saludo-edit-label">Saludo (1er mensaje)</label>
+                        <input type="text" class="saludo-edit" id="saludo-edit-${mensajeId}" value="${saludoEscapadoAttr}" placeholder="Hola Nombre / Qué tal Nombre">
+                        <label class="saludo-edit-label">Mensaje principal (2º mensaje)</label>
+                        <textarea class="mensaje-edit" id="edit-${mensajeId}" rows="6">${mensajeTexto}</textarea>
+                    </div>
                 </td>
                 <td class="acciones-cell">
                     <button class="btn-edit-mensaje" data-index="${index}" data-mensaje-id="${mensajeId}" title="Editar mensaje">
@@ -1128,24 +1138,29 @@ class CVAnalyzer {
             const saveBtn = row.querySelector('.btn-save-mensaje');
             const cancelBtn = row.querySelector('.btn-cancel-edit');
             const displayDiv = row.querySelector(`#display-${mensajeId}`);
+            const editWrap = row.querySelector(`#edit-wrap-${mensajeId}`);
+            const saludoInput = row.querySelector(`#saludo-edit-${mensajeId}`);
             const editTextarea = row.querySelector(`#edit-${mensajeId}`);
 
             editBtn.addEventListener('click', () => {
                 displayDiv.style.display = 'none';
-                editTextarea.style.display = 'block';
+                editWrap.style.display = 'block';
                 editBtn.style.display = 'none';
                 saveBtn.style.display = 'inline-block';
                 cancelBtn.style.display = 'inline-block';
-                editTextarea.focus();
+                saludoInput.focus();
             });
 
             saveBtn.addEventListener('click', () => {
+                const nuevoSaludo = saludoInput.value.trim();
                 const nuevoMensaje = editTextarea.value.trim();
                 if (nuevoMensaje) {
-                    // Actualizar en cvsData
+                    this.cvsData[index].saludo = nuevoSaludo;
                     this.cvsData[index].mensajeIA = nuevoMensaje;
-                    // Actualizar display (escapar HTML pero preservar saltos de línea)
-                    const mensajeEscapado = nuevoMensaje
+                    const completo = nuevoSaludo
+                        ? `${nuevoSaludo}\n\n${nuevoMensaje}`
+                        : nuevoMensaje;
+                    const mensajeEscapado = this.resolveMessageForDisplay(completo)
                         .replace(/&/g, '&amp;')
                         .replace(/</g, '&lt;')
                         .replace(/>/g, '&gt;')
@@ -1153,7 +1168,7 @@ class CVAnalyzer {
                         .replace(/'/g, '&#039;');
                     displayDiv.innerHTML = mensajeEscapado;
                     displayDiv.style.display = 'block';
-                    editTextarea.style.display = 'none';
+                    editWrap.style.display = 'none';
                     editBtn.style.display = 'inline-block';
                     saveBtn.style.display = 'none';
                     cancelBtn.style.display = 'none';
@@ -1164,10 +1179,10 @@ class CVAnalyzer {
             });
 
             cancelBtn.addEventListener('click', () => {
-                // Restaurar valor original
+                saludoInput.value = saludoTexto;
                 editTextarea.value = mensajeTexto;
                 displayDiv.style.display = 'block';
-                editTextarea.style.display = 'none';
+                editWrap.style.display = 'none';
                 editBtn.style.display = 'inline-block';
                 saveBtn.style.display = 'none';
                 cancelBtn.style.display = 'none';
@@ -1739,7 +1754,7 @@ class CVAnalyzer {
                 <strong>Estado:</strong> ${result.success ? 'Enviado' : 'Error'}
             `;
             if (result.mensajeIA) {
-                this.showMessagePreview(result.mensajeIA, result.sessionId);
+                this.showMessagePreview(result.mensajeIA, result.sessionId, result.saludo);
             }
             this.addLogEntry(
                 `${result.nombre} (${result.telefono})${sessionLabel ? ` [${sessionLabel}]` : ''} - ${result.success ? 'Enviado' : 'Error'}`,
@@ -1801,7 +1816,7 @@ class CVAnalyzer {
 
             // Mostrar mensaje que se está enviando
             if (result.mensajeIA) {
-                this.showMessagePreview(result.mensajeIA, result.sessionId);
+                this.showMessagePreview(result.mensajeIA, result.sessionId, result.saludo);
             }
 
             this.addLogEntry(
@@ -2198,9 +2213,10 @@ class CVAnalyzer {
     }
 
     // Mostrar mensaje que se está enviando
-    showMessagePreview(mensaje, sessionId = null) {
+    showMessagePreview(mensaje, sessionId = null, saludo = null) {
         if (this.messagePreview && this.messageContent) {
-            this.messageContent.textContent = this.resolveMessageForDisplay(mensaje, sessionId);
+            const completo = saludo ? `${saludo}\n\n${mensaje}` : mensaje;
+            this.messageContent.textContent = this.resolveMessageForDisplay(completo, sessionId);
             this.messagePreview.style.display = 'block';
         }
     }
@@ -2279,7 +2295,7 @@ class CVAnalyzer {
                     `;
                 }
                 if (data.mensajeIA) {
-                    this.showMessagePreview(data.mensajeIA, data.sessionId);
+                    this.showMessagePreview(data.mensajeIA, data.sessionId, data.saludo);
                 }
                 if (this.progressText && data.total) {
                     this.progressText.textContent = `${data.current} / ${data.total}`;

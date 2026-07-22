@@ -220,6 +220,7 @@ async function runWhatsAppSendJob({
       const contactsToSend = finalCvsToSend.map((cv) => ({
         nombre: cv.nombre,
         telefono: cv.telefono,
+        saludo: cv.saludo,
         mensajeIA: cv.mensajeIA
       }));
 
@@ -427,7 +428,9 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
       : cv.mensajeIA;
 
     console.log(`🧪 Simulando envío ${i + 1}/${cvsToSend.length} a ${cv.nombre} (${cv.telefono})`);
+    console.log(`👋 Saludo: ${cv.saludo || '(auto)'}`);
     console.log(`📱 Mensaje: ${mensajePreview}`);
+    console.log('🧪 Simulando pausa 2-3s entre saludo y mensaje principal...');
 
     // Simular éxito en 90% de los casos
     const success = Math.random() > 0.1;
@@ -436,6 +439,7 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
       index: i,
       nombre: cv.nombre,
       telefono: cv.telefono,
+      saludo: cv.saludo,
       mensajeIA: cv.mensajeIA,
       success: success,
       timestamp: new Date().toISOString(),
@@ -451,6 +455,7 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
         total: cvsToSend.length,
         nombre: cv.nombre,
         telefono: cv.telefono,
+        saludo: cv.saludo,
         mensajeIA: cv.mensajeIA,
         success: success
       });
@@ -545,6 +550,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
         const processedCV = {
           ...cvData,
           archivoOriginal: file.originalname,
+          saludo: '',
           mensajeIA: '', // Se llenará después
           procesado: true
         };
@@ -558,6 +564,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           telefono: 'N/A',
           experiencia: 'Error al extraer texto del PDF',
           archivoOriginal: file.originalname,
+          saludo: '',
           mensajeIA: '',
           procesado: false,
           error: error.message
@@ -635,6 +642,7 @@ app.post('/generate-messages', async (req, res) => {
         cvsWithMessages.forEach(cvWithMessage => {
           const index = cvsData.findIndex(cv => cv.archivoOriginal === cvWithMessage.archivoOriginal);
           if (index !== -1) {
+            cvsData[index].saludo = cvWithMessage.saludo;
             cvsData[index].mensajeIA = cvWithMessage.mensajeIA;
           }
         });
@@ -828,6 +836,7 @@ app.post('/send-whatsapp', async (req, res) => {
       cvsToProcess.forEach(editedCv => {
         const index = cvsData.findIndex(cv => cv.archivoOriginal === editedCv.archivoOriginal);
         if (index !== -1) {
+          if (editedCv.saludo != null) cvsData[index].saludo = editedCv.saludo;
           cvsData[index].mensajeIA = editedCv.mensajeIA;
         }
       });

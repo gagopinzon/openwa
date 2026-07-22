@@ -8,6 +8,7 @@ const {
 const { getSessionSenderName } = require('./sessionsStore');
 const { applySenderName } = require('./messageSignature');
 const { buildWeightedQueues, parseSessionWeights } = require('./sessionDistribution');
+const { buildGreeting } = require('./aiService');
 
 /** Id lógico para pausar/abortar envíos round-robin multi-sesión */
 const ROUND_ROBIN_CONTROL_ID = '__roundrobin__';
@@ -176,9 +177,10 @@ class OpenWAWhatsAppService {
   /**
    * @param {string} phone
    * @param {string} message
+   * @param {{ skipHumanDelay?: boolean }} [options]
    * @returns {Promise<boolean>}
    */
-  async sendMessage(phone, message) {
+  async sendMessage(phone, message, options = {}) {
     if (!this.isInitialized || !this.openwaSessionId) {
       throw new Error('WhatsApp no está inicializado. Llama a initWhatsApp() primero.');
     }
@@ -190,11 +192,13 @@ class OpenWAWhatsAppService {
 
       const chatId = formatPhoneToChatId(phone);
 
-      const humanDelayMs = Math.floor(3000 + Math.random() * 7000);
-      console.log(
-        `Esperando ${(humanDelayMs / 1000).toFixed(1)} segundos antes de enviar (delay humano)...`
-      );
-      await new Promise((resolve) => setTimeout(resolve, humanDelayMs));
+      if (!options.skipHumanDelay) {
+        const humanDelayMs = Math.floor(3000 + Math.random() * 7000);
+        console.log(
+          `Esperando ${(humanDelayMs / 1000).toFixed(1)} segundos antes de enviar (delay humano)...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, humanDelayMs));
+      }
 
       const result = await sendTextMessage(this.openwaSessionId, chatId, finalMessage);
       console.log(`Mensaje enviado a ${phone} (id: ${result.messageId || 'n/a'})`);
@@ -208,6 +212,42 @@ class OpenWAWhatsAppService {
       }
       return false;
     }
+  }
+
+  /**
+   * Envía saludo corto, espera 2–3 s, luego el mensaje principal.
+   * @param {{ telefono: string, nombre?: string, saludo?: string, mensajeIA: string }} contact
+   * @returns {Promise<boolean>}
+   */
+  async sendContactWithGreeting(contact) {
+    const saludo =
+      (contact.saludo && String(contact.saludo).trim()) ||
+      buildGreeting(contact.nombre);
+    let body = String(contact.mensajeIA || '').trim();
+
+    // Por si el cuerpo aún trae un saludo con nombre al inicio (mensajes viejos / ediciones)
+    body = body
+      .replace(
+        /^(Hola|Qué tal|Que tal|Buen[oa]s?\s+d[ií]as?)\s+[\wÁÉÍÓÚáéíóúÑñüÜ.'-]+[,!]?\s*\n+/i,
+        ''
+      )
+      .trim();
+
+    console.log(`1/2 Saludo → ${contact.telefono}: "${saludo}"`);
+    const okGreeting = await this.sendMessage(contact.telefono, saludo);
+    if (!okGreeting) return false;
+
+    const pauseMs = 2000 + Math.floor(Math.random() * 1000); // 2–3 s
+    console.log(
+      `Pausa ${(pauseMs / 1000).toFixed(1)}s entre saludo y mensaje principal...`
+    );
+    await new Promise((resolve) => setTimeout(resolve, pauseMs));
+
+    console.log(`2/2 Mensaje principal → ${contact.telefono}`);
+    const okBody = await this.sendMessage(contact.telefono, body, {
+      skipHumanDelay: true
+    });
+    return okBody;
   }
 
   /**
@@ -251,6 +291,7 @@ class OpenWAWhatsAppService {
       console.log(
         `Enviando mensaje ${i + 1}/${contacts.length} a ${contact.nombre} (${contact.telefono})`
       );
+      console.log(`Saludo: ${contact.saludo || '(auto)'}`);
       console.log(`Mensaje: ${mensajePreview}`);
 
       if (onProgress) {
@@ -262,6 +303,7 @@ class OpenWAWhatsAppService {
           sessionTotal: contacts.length,
           nombre: contact.nombre,
           telefono: contact.telefono,
+          saludo: contact.saludo,
           mensajeIA: contact.mensajeIA,
           sessionId: this.logicalSessionId,
           phase: 'sending'
@@ -269,12 +311,13 @@ class OpenWAWhatsAppService {
       }
 
       try {
-        const success = await this.sendMessage(contact.telefono, contact.mensajeIA);
+        const success = await this.sendContactWithGreeting(contact);
 
         const rowSuccess = {
           index: i,
           nombre: contact.nombre,
           telefono: contact.telefono,
+          saludo: contact.saludo,
           mensajeIA: contact.mensajeIA,
           success,
           timestamp: new Date().toISOString()
@@ -296,6 +339,7 @@ class OpenWAWhatsAppService {
             sessionTotal: contacts.length,
             nombre: contact.nombre,
             telefono: contact.telefono,
+            saludo: contact.saludo,
             mensajeIA: contact.mensajeIA,
             sessionId: this.logicalSessionId,
             success,
@@ -326,6 +370,7 @@ class OpenWAWhatsAppService {
           index: i,
           nombre: contact.nombre,
           telefono: contact.telefono,
+          saludo: contact.saludo,
           mensajeIA: contact.mensajeIA,
           success: false,
           error: error.message,
@@ -386,6 +431,7 @@ async function sendSessionQueue(
     console.log(
       `Sesión ${logicalSessionId} ${i + 1}/${queueItems.length} (global ${globalIndex + 1}/${totalContacts}): ${contact.nombre} (${contact.telefono})`
     );
+    console.log(`Saludo: ${contact.saludo || '(auto)'}`);
     console.log(`Mensaje: ${mensajePreview}`);
 
     if (onProgress) {
@@ -397,6 +443,7 @@ async function sendSessionQueue(
         sessionTotal: queueItems.length,
         nombre: contact.nombre,
         telefono: contact.telefono,
+        saludo: contact.saludo,
         mensajeIA: contact.mensajeIA,
         sessionId: logicalSessionId,
         phase: 'sending'
@@ -404,12 +451,13 @@ async function sendSessionQueue(
     }
 
     try {
-      const success = await service.sendMessage(contact.telefono, contact.mensajeIA);
+      const success = await service.sendContactWithGreeting(contact);
 
       const row = {
         index: globalIndex,
         nombre: contact.nombre,
         telefono: contact.telefono,
+        saludo: contact.saludo,
         mensajeIA: contact.mensajeIA,
         sessionId: logicalSessionId,
         success,
@@ -433,6 +481,7 @@ async function sendSessionQueue(
           sessionTotal: queueItems.length,
           nombre: contact.nombre,
           telefono: contact.telefono,
+          saludo: contact.saludo,
           mensajeIA: contact.mensajeIA,
           sessionId: logicalSessionId,
           success,
@@ -463,6 +512,7 @@ async function sendSessionQueue(
         index: globalIndex,
         nombre: contact.nombre,
         telefono: contact.telefono,
+        saludo: contact.saludo,
         mensajeIA: contact.mensajeIA,
         sessionId: logicalSessionId,
         success: false,

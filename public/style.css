@@ -403,6 +403,35 @@ section h2 {
     color: #374151;
 }
 
+.cvs-table .mensaje-edit-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.cvs-table .saludo-edit-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+}
+
+.cvs-table .saludo-edit {
+    width: 100%;
+    font-size: 0.85rem;
+    padding: 8px 12px;
+    border: 2px solid #3b82f6;
+    border-radius: 8px;
+    font-family: inherit;
+    background: white;
+    color: #374151;
+}
+
+.cvs-table .saludo-edit:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
 .cvs-table .mensaje-edit:focus {
     outline: none;
     border-color: #2563eb;
