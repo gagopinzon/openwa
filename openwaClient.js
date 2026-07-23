@@ -131,6 +131,79 @@ async function sendTextMessage(openwaSessionId, chatId, text) {
   };
 }
 
+/**
+ * Lista chats activos de una sesión OpenWA (más recientes primero).
+ * @param {string} openwaSessionId
+ * @param {{ limit?: number, offset?: number }} [opts]
+ */
+async function listChats(openwaSessionId, opts = {}) {
+  const qs = new URLSearchParams();
+  const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 100, 1), 1000);
+  const offset = Math.max(parseInt(opts.offset, 10) || 0, 0);
+  qs.set('limit', String(limit));
+  qs.set('offset', String(offset));
+
+  const data = await openwaRequest(
+    'GET',
+    `/sessions/${openwaSessionId}/chats?${qs.toString()}`
+  );
+  const raw = Array.isArray(data) ? data : data.data || data.chats || [];
+  return raw
+    .map((row) => {
+      if (!row || typeof row !== 'object') return null;
+      const id = row.id || row.chatId;
+      if (!id) return null;
+      return {
+        id: String(id),
+        name: String(row.name || row.pushName || row.chatName || id),
+        isGroup: Boolean(row.isGroup),
+        unreadCount: Number(row.unreadCount) || 0,
+        timestamp: row.timestamp != null ? Number(row.timestamp) : null,
+        lastMessage: row.lastMessage != null ? String(row.lastMessage) : ''
+      };
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Historial de un chat (live desde WhatsApp).
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {{ limit?: number }} [opts]
+ */
+async function getChatHistory(openwaSessionId, chatId, opts = {}) {
+  const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 100);
+  const encoded = encodeURIComponent(String(chatId));
+  const data = await openwaRequest(
+    'GET',
+    `/sessions/${openwaSessionId}/messages/${encoded}/history?limit=${limit}`
+  );
+  const raw = Array.isArray(data) ? data : data.messages || data.data || [];
+  return raw
+    .map((msg) => {
+      if (!msg || typeof msg !== 'object') return null;
+      const body = String(msg.body || msg.text || msg.caption || '').trim();
+      const type = String(msg.type || 'text');
+      return {
+        id: msg.id || msg.waMessageId || null,
+        chatId: msg.chatId || chatId,
+        from: msg.from || null,
+        to: msg.to || null,
+        body: body || (type !== 'text' ? `[${type}]` : ''),
+        type,
+        fromMe: Boolean(msg.fromMe || msg.direction === 'outgoing'),
+        isGroup: Boolean(msg.isGroup),
+        timestamp: msg.timestamp != null ? Number(msg.timestamp) : null,
+        contactName:
+          (msg.contact && (msg.contact.pushName || msg.contact.name)) ||
+          msg.pushName ||
+          msg.senderName ||
+          null
+      };
+    })
+    .filter(Boolean);
+}
+
 const INCOMING_WEBHOOK_FILTERS = {
   conditions: [
     { field: 'fromMe', operator: 'equals', value: false },
@@ -181,6 +254,8 @@ module.exports = {
   formatPhoneToChatId,
   getSessionStatus,
   sendTextMessage,
+  listChats,
+  getChatHistory,
   isConnectedStatus,
   listOpenWASessions,
   normalizeOpenWASessionRow,

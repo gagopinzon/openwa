@@ -15,7 +15,9 @@ const {
   listOpenWASessions,
   isConnectedStatus,
   extractProfileName,
-  formatPhoneToChatId
+  formatPhoneToChatId,
+  listChats,
+  getChatHistory
 } = require('./openwaClient');
 const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
@@ -1540,6 +1542,86 @@ app.delete('/api/incoming-messages', (req, res) => {
   try {
     incomingMessagesStore.clear();
     res.json({ success: true, message: 'Bandeja limpiada' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/** Resuelve sesión lógica o OpenWA id → sesión configurada + openwaSessionId */
+function resolveConfiguredSession(sessionParam) {
+  const raw = String(sessionParam || '').trim();
+  if (!raw) return null;
+  const byLogical = sessionsStore.getSession(raw);
+  if (byLogical) return byLogical;
+  return (
+    sessionsStore.getAllSessions().find((s) => s.openwaSessionId === raw) || null
+  );
+}
+
+app.get('/api/conversations', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.query.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+
+    const limit = req.query.limit || 100;
+    const offset = req.query.offset || 0;
+    const includeGroups = String(req.query.includeGroups || '') === '1';
+
+    let chats = await listChats(session.openwaSessionId, { limit, offset });
+    if (!includeGroups) {
+      chats = chats.filter((c) => !c.isGroup);
+    }
+
+    res.json({
+      success: true,
+      sessionId: session.id,
+      openwaSessionId: session.openwaSessionId,
+      label: session.label,
+      chats
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/conversations/:chatId/messages', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.query.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+
+    const chatId = decodeURIComponent(req.params.chatId || '');
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+
+    const messages = await getChatHistory(session.openwaSessionId, chatId, {
+      limit: req.query.limit || 50
+    });
+
+    // OpenWA suele devolver más antiguos primero; normalizamos a cronológico.
+    const sorted = [...messages].sort((a, b) => {
+      const ta = a.timestamp || 0;
+      const tb = b.timestamp || 0;
+      return ta - tb;
+    });
+
+    res.json({
+      success: true,
+      sessionId: session.id,
+      openwaSessionId: session.openwaSessionId,
+      chatId,
+      messages: sorted
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

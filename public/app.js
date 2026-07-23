@@ -117,6 +117,14 @@ class CVAnalyzer {
         this.clearIncomingInboxBtn = document.getElementById('clearIncomingInboxBtn');
         this.incomingInboxSoundToggle = document.getElementById('incomingInboxSoundToggle');
         this.incomingInboxIds = new Set();
+        this.conversationsSessionSelect = document.getElementById('conversationsSessionSelect');
+        this.refreshConversationsBtn = document.getElementById('refreshConversationsBtn');
+        this.conversationsChatList = document.getElementById('conversationsChatList');
+        this.conversationsThreadHeader = document.getElementById('conversationsThreadHeader');
+        this.conversationsThreadMessages = document.getElementById('conversationsThreadMessages');
+        this.conversationsStatus = document.getElementById('conversationsStatus');
+        this.conversationsChats = [];
+        this.activeConversationChatId = null;
     }
 
     attachAutoReplyListeners() {
@@ -145,6 +153,22 @@ class CVAnalyzer {
         }
         if (this.clearIncomingInboxBtn) {
             this.clearIncomingInboxBtn.addEventListener('click', () => this.clearIncomingInbox());
+        }
+        if (this.refreshConversationsBtn) {
+            this.refreshConversationsBtn.addEventListener('click', () => this.loadConversationsChats());
+        }
+        if (this.conversationsSessionSelect) {
+            this.conversationsSessionSelect.addEventListener('change', () => {
+                this.activeConversationChatId = null;
+                if (this.conversationsThreadHeader) {
+                    this.conversationsThreadHeader.textContent = 'Selecciona un chat';
+                }
+                if (this.conversationsThreadMessages) {
+                    this.conversationsThreadMessages.innerHTML =
+                        '<p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>';
+                }
+                this.loadConversationsChats();
+            });
         }
         document.querySelectorAll('.accordion-header').forEach((btn) => {
             btn.addEventListener('click', () => this.toggleAccordion(btn));
@@ -288,6 +312,157 @@ class CVAnalyzer {
         if (options.playSound && this.incomingInboxSoundToggle && this.incomingInboxSoundToggle.checked) {
             this.playNotificationSound();
         }
+    }
+
+    populateConversationsSessionSelect() {
+        if (!this.conversationsSessionSelect) return;
+        const prev = this.conversationsSessionSelect.value;
+        this.conversationsSessionSelect.innerHTML = '';
+        if (!this.configuredSessions.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '— Sin sesiones —';
+            this.conversationsSessionSelect.appendChild(opt);
+            return;
+        }
+        this.configuredSessions.forEach((s) => {
+            const opt = document.createElement('option');
+            opt.value = s.id;
+            opt.textContent = s.label || s.id;
+            this.conversationsSessionSelect.appendChild(opt);
+        });
+        if (prev && this.configuredSessions.some((s) => s.id === prev)) {
+            this.conversationsSessionSelect.value = prev;
+        }
+    }
+
+    formatConversationTime(ts) {
+        if (ts == null || ts === '') return '';
+        const n = Number(ts);
+        if (!Number.isFinite(n) || n <= 0) return '';
+        const ms = String(Math.trunc(n)).length <= 10 ? n * 1000 : n;
+        try {
+            return new Date(ms).toLocaleString();
+        } catch {
+            return '';
+        }
+    }
+
+    async loadConversationsChats() {
+        if (!this.conversationsChatList || !this.conversationsSessionSelect) return;
+        const sessionId = this.conversationsSessionSelect.value;
+        if (!sessionId) {
+            this.conversationsChatList.innerHTML =
+                '<p class="auto-reply-empty">Configura al menos una sesión primero.</p>';
+            return;
+        }
+
+        if (this.conversationsStatus) {
+            this.conversationsStatus.textContent = 'Cargando chats…';
+        }
+        this.conversationsChatList.innerHTML =
+            '<p class="auto-reply-empty">Cargando chats desde OpenWA…</p>';
+
+        try {
+            const response = await fetch(
+                `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&limit=150`
+            );
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudieron cargar los chats');
+
+            this.conversationsChats = data.chats || [];
+            this.renderConversationsChatList();
+            if (this.conversationsStatus) {
+                this.conversationsStatus.textContent = `${this.conversationsChats.length} chats`;
+            }
+        } catch (error) {
+            this.conversationsChatList.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;
+            if (this.conversationsStatus) {
+                this.conversationsStatus.textContent = 'Error';
+            }
+        }
+    }
+
+    renderConversationsChatList() {
+        if (!this.conversationsChatList) return;
+        if (!this.conversationsChats.length) {
+            this.conversationsChatList.innerHTML =
+                '<p class="auto-reply-empty">No hay chats en esta sesión.</p>';
+            return;
+        }
+
+        this.conversationsChatList.innerHTML = '';
+        this.conversationsChats.forEach((chat) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `conversations-chat-item${
+                this.activeConversationChatId === chat.id ? ' active' : ''
+            }`;
+            const unread =
+                chat.unreadCount > 0
+                    ? `<span class="unread">${chat.unreadCount}</span>`
+                    : '';
+            btn.innerHTML = `
+                <div class="chat-name">${this.escapeHtml(chat.name || chat.id)}</div>
+                <div class="chat-preview">${this.escapeHtml(chat.lastMessage || '')}</div>
+                <div class="chat-meta">
+                    <span>${this.escapeHtml(this.formatConversationTime(chat.timestamp))}</span>
+                    ${unread}
+                </div>
+            `;
+            btn.addEventListener('click', () => this.openConversationChat(chat));
+            this.conversationsChatList.appendChild(btn);
+        });
+    }
+
+    async openConversationChat(chat) {
+        if (!chat || !this.conversationsSessionSelect) return;
+        const sessionId = this.conversationsSessionSelect.value;
+        this.activeConversationChatId = chat.id;
+        this.renderConversationsChatList();
+
+        if (this.conversationsThreadHeader) {
+            this.conversationsThreadHeader.textContent = chat.name || chat.id;
+        }
+        if (this.conversationsThreadMessages) {
+            this.conversationsThreadMessages.innerHTML =
+                '<p class="auto-reply-empty">Cargando historial…</p>';
+        }
+
+        try {
+            const response = await fetch(
+                `/api/conversations/${encodeURIComponent(chat.id)}/messages?sessionId=${encodeURIComponent(sessionId)}&limit=80`
+            );
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo cargar el historial');
+            this.renderConversationMessages(data.messages || []);
+        } catch (error) {
+            if (this.conversationsThreadMessages) {
+                this.conversationsThreadMessages.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;
+            }
+        }
+    }
+
+    renderConversationMessages(messages) {
+        if (!this.conversationsThreadMessages) return;
+        if (!messages.length) {
+            this.conversationsThreadMessages.innerHTML =
+                '<p class="auto-reply-empty">Sin mensajes en este chat.</p>';
+            return;
+        }
+
+        this.conversationsThreadMessages.innerHTML = '';
+        messages.forEach((msg) => {
+            const bubble = document.createElement('div');
+            bubble.className = `conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}`;
+            const time = this.formatConversationTime(msg.timestamp);
+            bubble.innerHTML = `
+                ${this.escapeHtml(msg.body || '')}
+                ${time ? `<span class="bubble-time">${this.escapeHtml(time)}</span>` : ''}
+            `;
+            this.conversationsThreadMessages.appendChild(bubble);
+        });
+        this.conversationsThreadMessages.scrollTop = this.conversationsThreadMessages.scrollHeight;
     }
 
     async loadAutoReplyConfig() {
@@ -834,6 +1009,7 @@ class CVAnalyzer {
             if (data.success) {
                 this.configuredSessions = data.sessions || [];
                 this.renderSessionUI();
+                this.populateConversationsSessionSelect();
             }
         } catch (error) {
             console.error('Error cargando sesiones:', error);
