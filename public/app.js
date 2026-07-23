@@ -2677,15 +2677,12 @@ class CVAnalyzer {
             }
         });
 
-        // Manejar errores de conexión
-        this.eventSource.onerror = (error) => {
-            console.error('Error en conexión de eventos:', error);
-            // Intentar reconectar después de un delay
-            setTimeout(() => {
-                if (this.eventSource && this.eventSource.readyState === EventSource.CLOSED) {
-                    this.connectToEvents();
-                }
-            }, 5000);
+        // Manejar errores de conexión (nginx/timeouts son normales; se reconecta solo)
+        this.eventSource.onerror = () => {
+            if (this.eventSource && this.eventSource.readyState === EventSource.CLOSED) {
+                console.warn('SSE desconectado; reconectando…');
+                setTimeout(() => this.connectToEvents(), 5000);
+            }
         };
     }
 

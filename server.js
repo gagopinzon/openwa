@@ -393,6 +393,23 @@ function abortAllActiveSessions() {
 
 // Event emitters para notificaciones en tiempo real (Server-Sent Events)
 const eventClients = [];
+/** @type {ReturnType<typeof setInterval>|null} */
+let sseHeartbeatTimer = null;
+
+function ensureSseHeartbeat() {
+  if (sseHeartbeatTimer) return;
+  sseHeartbeatTimer = setInterval(() => {
+    if (eventClients.length === 0) return;
+    for (let i = eventClients.length - 1; i >= 0; i--) {
+      const client = eventClients[i];
+      try {
+        client.write(`: ping ${Date.now()}\n\n`);
+      } catch {
+        eventClients.splice(i, 1);
+      }
+    }
+  }, 20000);
+}
 
 // Función para enviar evento a todos los clientes conectados
 function broadcastEvent(event, data) {
@@ -1749,25 +1766,35 @@ app.post('/api/auto-reply/test', async (req, res) => {
 
 // Ruta para Server-Sent Events (notificaciones en tiempo real)
 app.get('/events', (req, res) => {
-  // Configurar headers para SSE
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  // Evita que nginx bufferice el stream (causa ERR_INCOMPLETE_CHUNKED_ENCODING).
+  res.setHeader('X-Accel-Buffering', 'no');
   res.setHeader('Access-Control-Allow-Origin', '*');
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
 
-  // Agregar este cliente a la lista
   eventClients.push(res);
+  ensureSseHeartbeat();
 
-  // Enviar conexión inicial
-  res.write(': connected\n\n');
+  try {
+    res.write(`: connected ${Date.now()}\n\n`);
+  } catch {
+    // ignore
+  }
 
-  // Limpiar cuando el cliente se desconecta
-  req.on('close', () => {
+  const cleanup = () => {
     const index = eventClients.indexOf(res);
     if (index > -1) {
       eventClients.splice(index, 1);
     }
-  });
+  };
+
+  req.on('close', cleanup);
+  req.on('aborted', cleanup);
+  res.on('error', cleanup);
 });
 
 // Servir archivos estáticos después de todas las rutas API
