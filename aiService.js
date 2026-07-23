@@ -16,7 +16,18 @@ const GREETING_TEMPLATES = [
 ];
 
 /**
- * Extrae solo el primer nombre (sin apellidos).
+ * Capitaliza un nombre: primera letra mayúscula, resto minúsculas.
+ * @param {string} word
+ * @returns {string}
+ */
+function capitalizeName(word) {
+  const s = String(word || '').trim();
+  if (!s) return s;
+  return s.charAt(0).toLocaleUpperCase('es') + s.slice(1).toLocaleLowerCase('es');
+}
+
+/**
+ * Extrae solo el primer nombre (sin apellidos), capitalizado.
  * @param {string} fullName
  * @returns {string}
  */
@@ -25,7 +36,7 @@ function extractFirstName(fullName) {
     .trim()
     .replace(/^No encontrado$/i, '');
   if (!cleaned) return 'amigo';
-  return cleaned.split(/\s+/)[0];
+  return capitalizeName(cleaned.split(/\s+/)[0]);
 }
 
 /**
@@ -79,6 +90,14 @@ function parseSaludoAndMessage(raw, nombre) {
     .trim();
 
   if (!saludo) saludo = fallbackSaludo;
+
+  // Forzar capitalización del nombre en el saludo (evitar TODO MAYÚSCULAS)
+  const firstName = extractFirstName(nombre);
+  saludo = saludo.replace(
+    /^(Hola|Qué tal|Que tal|Buen[oa]s?\s+d[ií]as?)\s+[\wÁÉÍÓÚáéíóúÑñüÜ.'-]+/i,
+    (_, greeting) => `${greeting} ${firstName}`
+  );
+
   if (!body) {
     body = `Vi tu perfil y me pareció muy sólido tu expertise profesional.
 
@@ -368,7 +387,7 @@ async function generateBulkMessages(cvs, onProgress = null) {
 }
 
 function generateBasicReply({ contactName, incomingBody, matchedRule, senderName }) {
-  const name = contactName || 'contacto';
+  const name = extractFirstName(contactName);
   if (matchedRule) {
     if (matchedRule.id === 'interes') {
       return `¡Excelente, ${name}! Me da gusto saberlo. ¿Qué día y horario te acomoda para una sesión gratuita de diagnóstico?\n\nAtte:\n${senderName}`;
@@ -413,9 +432,11 @@ async function generateReplyMessage({
     });
   }
 
+  const firstName = extractFirstName(contactName);
+
   const prompt = `${basePrompt || 'Eres un asistente de Pro Talent.'}
 
-Nombre del contacto: ${contactName || 'contacto'}
+Nombre del contacto: ${firstName}
 Mensaje que te escribió:
 "${incomingBody}"
 ${ruleHint}${contextBlock}
@@ -424,7 +445,7 @@ INSTRUCCIONES:
 - Responde en español, tono conversacional y profesional.
 - Máximo 400 caracteres (sin contar la firma).
 - Responde directamente a su mensaje; no repitas el pitch inicial completo.
-- Usa solo el primer nombre si aplica.
+- Usa solo el primer nombre "${firstName}" (con esa capitalización exacta) si aplica.
 - Termina con:
 Atte:
 ${sender}

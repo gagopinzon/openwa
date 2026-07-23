@@ -8,9 +8,9 @@ class CVAnalyzer {
         this.eventSource = null;
         this.sendJobCompleted = null;
         this.initializeElements();
+        this.initAutoReplyElements();
         this.attachEventListeners();
         this.setupSendingControls();
-        this.initAutoReplyElements();
         this.loadConfig().then(() => {
             this.loadSessions();
             this.loadAutoReplyConfig();
