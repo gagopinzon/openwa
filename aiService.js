@@ -15,6 +15,15 @@ const GREETING_TEMPLATES = [
   (name) => `Buen día ${name}`
 ];
 
+/** Saludos cortos sin nombre (mensajes intermedios del burst) */
+const EXTRA_GREETING_LINES = [
+  'Buen día',
+  '¿Cómo estás?',
+  'Espero que estés muy bien',
+  'Un gusto saludarte',
+  '¿Qué tal tu día?'
+];
+
 /**
  * Capitaliza un nombre: primera letra mayúscula, resto minúsculas.
  * @param {string} word
@@ -48,6 +57,109 @@ function buildGreeting(nombre) {
   const firstName = extractFirstName(nombre);
   const template = GREETING_TEMPLATES[Math.floor(Math.random() * GREETING_TEMPLATES.length)];
   return template(firstName);
+}
+
+/**
+ * Divide el speech en párrafos; la firma "Atte:" queda pegada al último bloque.
+ * @param {string} body
+ * @returns {string[]}
+ */
+function splitSpeechParts(body) {
+  const raw = String(body || '').trim();
+  if (!raw) return [];
+
+  const chunks = raw
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const merged = [];
+  for (const chunk of chunks) {
+    if (/^Atte:\s*/i.test(chunk) && merged.length) {
+      merged[merged.length - 1] += `\n\n${chunk}`;
+    } else {
+      merged.push(chunk);
+    }
+  }
+  return merged.length ? merged : [raw];
+}
+
+function pickExtraGreeting() {
+  return EXTRA_GREETING_LINES[Math.floor(Math.random() * EXTRA_GREETING_LINES.length)];
+}
+
+function joinSpeechFrom(parts, startIndex) {
+  return parts.slice(startIndex).join('\n\n');
+}
+
+/**
+ * Arma 1–4 mensajes de WhatsApp de forma aleatoria a partir del saludo + speech.
+ * Ejemplos:
+ * - 1: "Hola Ana\n\n[speech completo]"
+ * - 2: ["Hola Ana", speech]
+ * - 3: ["Hola Ana", "Buen día", speech] o ["Hola Ana", p1, resto]
+ * - 4: ["Hola Ana", "Buen día", p1, resto]
+ *
+ * @param {{ saludo?: string, nombre?: string, mensajeIA?: string }} contact
+ * @returns {string[]}
+ */
+function buildOutboundMessageParts(contact) {
+  const saludo =
+    (contact.saludo && String(contact.saludo).trim()) ||
+    buildGreeting(contact.nombre);
+
+  let body = String(contact.mensajeIA || '').trim();
+  body = body
+    .replace(
+      /^(Hola|Qué tal|Que tal|Buen[oa]s?\s+d[ií]as?)\s+[\wÁÉÍÓÚáéíóúÑñüÜ.'-]+[,!]?\s*\n+/i,
+      ''
+    )
+    .trim();
+
+  if (!body) return [saludo];
+
+  const speechParts = splitSpeechParts(body);
+  const count = 1 + Math.floor(Math.random() * 4); // 1..4
+
+  if (count === 1) {
+    return [`${saludo}\n\n${body}`];
+  }
+
+  if (count === 2) {
+    return [saludo, body];
+  }
+
+  if (count === 3) {
+    const variants = [[saludo, pickExtraGreeting(), body]];
+    if (speechParts.length >= 2) {
+      variants.push([saludo, speechParts[0], joinSpeechFrom(speechParts, 1)]);
+    }
+    return variants[Math.floor(Math.random() * variants.length)];
+  }
+
+  // count === 4
+  const variants = [];
+  if (speechParts.length >= 2) {
+    variants.push([
+      saludo,
+      pickExtraGreeting(),
+      speechParts[0],
+      joinSpeechFrom(speechParts, 1)
+    ]);
+  }
+  if (speechParts.length >= 3) {
+    variants.push([
+      saludo,
+      speechParts[0],
+      speechParts[1],
+      joinSpeechFrom(speechParts, 2)
+    ]);
+  }
+  // Fallback si el speech no se parte bien: saludo + 2 líneas cortas + cuerpo
+  if (!variants.length) {
+    variants.push([saludo, pickExtraGreeting(), pickExtraGreeting(), body]);
+  }
+  return variants[Math.floor(Math.random() * variants.length)];
 }
 
 /**
@@ -501,6 +613,7 @@ module.exports = {
   generateBulkMessages,
   generateReplyMessage,
   buildGreeting,
+  buildOutboundMessageParts,
   extractFirstName,
   parseSaludoAndMessage
 };

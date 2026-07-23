@@ -53,17 +53,17 @@
             <section class="conversations-panel" id="conversationsPanel">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Conversaciones</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                    Consulta los chats ya existentes en cada celular (sin esperar webhook). Elige una sesión y abre un chat.
+                    Chats de todos los celulares en un solo lugar. Cada conversación indica de qué sesión es, y puedes responder desde aquí.
                 </p>
                 <div class="conversations-toolbar">
-                    <label for="conversationsSessionSelect" style="font-weight: 600; font-size: 13px;">Sesión:</label>
+                    <label for="conversationsSessionSelect" style="font-weight: 600; font-size: 13px;">Filtrar:</label>
                     <select id="conversationsSessionSelect" class="form-select" style="min-width: 180px; padding: 8px;"></select>
                     <button type="button" id="refreshConversationsBtn" class="btn btn-secondary btn-sm">Cargar chats</button>
                     <span id="conversationsStatus" class="conversations-status"></span>
                 </div>
                 <div class="conversations-layout">
                     <div class="conversations-chat-list" id="conversationsChatList">
-                        <p class="auto-reply-empty">Elige una sesión y pulsa «Cargar chats».</p>
+                        <p class="auto-reply-empty">Pulsa «Cargar chats» para ver todas las conversaciones.</p>
                     </div>
                     <div class="conversations-thread" id="conversationsThread">
                         <div class="conversations-thread-header" id="conversationsThreadHeader">
@@ -71,6 +71,18 @@
                         </div>
                         <div class="conversations-thread-messages" id="conversationsThreadMessages">
                             <p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>
+                        </div>
+                        <div class="conversations-reply" id="conversationsReply">
+                            <textarea
+                                id="conversationsReplyInput"
+                                class="conversations-reply-input"
+                                rows="2"
+                                placeholder="Escribe una respuesta…"
+                                disabled
+                            ></textarea>
+                            <button type="button" id="conversationsReplyBtn" class="btn btn-success btn-sm" disabled>
+                                Enviar
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -294,7 +306,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=conversations-3"></script>
+    <script src="app.js?v=conversations-4"></script>
     <script>
         (async function initAuthUi() {
             try {

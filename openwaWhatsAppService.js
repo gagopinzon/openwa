@@ -8,7 +8,7 @@ const {
 const { getSessionSenderName } = require('./sessionsStore');
 const { applySenderName } = require('./messageSignature');
 const { buildWeightedQueues, parseSessionWeights } = require('./sessionDistribution');
-const { buildGreeting } = require('./aiService');
+const { buildOutboundMessageParts } = require('./aiService');
 
 /** Id lógico para pausar/abortar envíos round-robin multi-sesión */
 const ROUND_ROBIN_CONTROL_ID = '__roundrobin__';
@@ -215,39 +215,37 @@ class OpenWAWhatsAppService {
   }
 
   /**
-   * Envía saludo corto, espera 2–3 s, luego el mensaje principal.
+   * Envía el contacto en 1–4 mensajes (saludo / extras / speech), elegidos al azar.
    * @param {{ telefono: string, nombre?: string, saludo?: string, mensajeIA: string }} contact
    * @returns {Promise<boolean>}
    */
   async sendContactWithGreeting(contact) {
-    const saludo =
-      (contact.saludo && String(contact.saludo).trim()) ||
-      buildGreeting(contact.nombre);
-    let body = String(contact.mensajeIA || '').trim();
-
-    // Por si el cuerpo aún trae un saludo con nombre al inicio (mensajes viejos / ediciones)
-    body = body
-      .replace(
-        /^(Hola|Qué tal|Que tal|Buen[oa]s?\s+d[ií]as?)\s+[\wÁÉÍÓÚáéíóúÑñüÜ.'-]+[,!]?\s*\n+/i,
-        ''
-      )
-      .trim();
-
-    console.log(`1/2 Saludo → ${contact.telefono}: "${saludo}"`);
-    const okGreeting = await this.sendMessage(contact.telefono, saludo);
-    if (!okGreeting) return false;
-
-    const pauseMs = 2000 + Math.floor(Math.random() * 1000); // 2–3 s
+    const parts = buildOutboundMessageParts(contact);
     console.log(
-      `Pausa ${(pauseMs / 1000).toFixed(1)}s entre saludo y mensaje principal...`
+      `Burst → ${contact.telefono}: ${parts.length} mensaje${parts.length === 1 ? '' : 's'}`
     );
-    await new Promise((resolve) => setTimeout(resolve, pauseMs));
 
-    console.log(`2/2 Mensaje principal → ${contact.telefono}`);
-    const okBody = await this.sendMessage(contact.telefono, body, {
-      skipHumanDelay: true
-    });
-    return okBody;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const preview =
+        part.length > 80 ? `${part.substring(0, 80).replace(/\n/g, ' ')}...` : part;
+      console.log(`${i + 1}/${parts.length} → "${preview}"`);
+
+      const ok = await this.sendMessage(contact.telefono, part, {
+        skipHumanDelay: i > 0
+      });
+      if (!ok) return false;
+
+      if (i < parts.length - 1) {
+        const pauseMs = 1500 + Math.floor(Math.random() * 2000); // 1.5–3.5 s
+        console.log(
+          `Pausa ${(pauseMs / 1000).toFixed(1)}s antes del siguiente fragmento...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      }
+    }
+
+    return true;
   }
 
   /**

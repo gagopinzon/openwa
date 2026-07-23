@@ -123,8 +123,10 @@ class CVAnalyzer {
         this.conversationsThreadHeader = document.getElementById('conversationsThreadHeader');
         this.conversationsThreadMessages = document.getElementById('conversationsThreadMessages');
         this.conversationsStatus = document.getElementById('conversationsStatus');
+        this.conversationsReplyInput = document.getElementById('conversationsReplyInput');
+        this.conversationsReplyBtn = document.getElementById('conversationsReplyBtn');
         this.conversationsChats = [];
-        this.activeConversationChatId = null;
+        this.activeConversation = null;
     }
 
     attachAutoReplyListeners() {
@@ -159,7 +161,8 @@ class CVAnalyzer {
         }
         if (this.conversationsSessionSelect) {
             this.conversationsSessionSelect.addEventListener('change', () => {
-                this.activeConversationChatId = null;
+                this.activeConversation = null;
+                this.setConversationsReplyEnabled(false);
                 if (this.conversationsThreadHeader) {
                     this.conversationsThreadHeader.textContent = 'Selecciona un chat';
                 }
@@ -168,6 +171,17 @@ class CVAnalyzer {
                         '<p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>';
                 }
                 this.loadConversationsChats();
+            });
+        }
+        if (this.conversationsReplyBtn) {
+            this.conversationsReplyBtn.addEventListener('click', () => this.sendConversationReply());
+        }
+        if (this.conversationsReplyInput) {
+            this.conversationsReplyInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    this.sendConversationReply();
+                }
             });
         }
         document.querySelectorAll('.accordion-header').forEach((btn) => {
@@ -316,13 +330,15 @@ class CVAnalyzer {
 
     populateConversationsSessionSelect() {
         if (!this.conversationsSessionSelect) return;
-        const prev = this.conversationsSessionSelect.value;
+        const prev = this.conversationsSessionSelect.value || 'all';
         this.conversationsSessionSelect.innerHTML = '';
+
+        const allOpt = document.createElement('option');
+        allOpt.value = 'all';
+        allOpt.textContent = 'Todas las sesiones';
+        this.conversationsSessionSelect.appendChild(allOpt);
+
         if (!this.configuredSessions.length) {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = '— Sin sesiones —';
-            this.conversationsSessionSelect.appendChild(opt);
             return;
         }
         this.configuredSessions.forEach((s) => {
@@ -331,8 +347,10 @@ class CVAnalyzer {
             opt.textContent = s.label || s.id;
             this.conversationsSessionSelect.appendChild(opt);
         });
-        if (prev && this.configuredSessions.some((s) => s.id === prev)) {
+        if (prev === 'all' || this.configuredSessions.some((s) => s.id === prev)) {
             this.conversationsSessionSelect.value = prev;
+        } else {
+            this.conversationsSessionSelect.value = 'all';
         }
     }
 
@@ -348,19 +366,30 @@ class CVAnalyzer {
         }
     }
 
+    setConversationsReplyEnabled(enabled) {
+        if (this.conversationsReplyInput) {
+            this.conversationsReplyInput.disabled = !enabled;
+            if (!enabled) this.conversationsReplyInput.value = '';
+        }
+        if (this.conversationsReplyBtn) {
+            this.conversationsReplyBtn.disabled = !enabled;
+        }
+    }
+
     async loadConversationsChats() {
         if (!this.conversationsChatList || !this.conversationsSessionSelect) {
             console.error('Conversaciones: faltan elementos del DOM');
             this.showStatus('No se encontró el panel de conversaciones. Recarga forzada (Ctrl+F5).', 'error');
             return;
         }
-        const sessionId = this.conversationsSessionSelect.value;
-        if (!sessionId) {
+        if (!this.configuredSessions.length) {
             this.conversationsChatList.innerHTML =
                 '<p class="auto-reply-empty">Configura al menos una sesión primero.</p>';
-            this.showStatus('Elige una sesión antes de cargar chats', 'error');
+            this.showStatus('Configura sesiones antes de cargar chats', 'error');
             return;
         }
+
+        const sessionId = this.conversationsSessionSelect.value || 'all';
 
         if (this.refreshConversationsBtn) this.refreshConversationsBtn.disabled = true;
         if (this.conversationsStatus) {
@@ -371,11 +400,12 @@ class CVAnalyzer {
         console.log('[conversations] fetch', sessionId);
 
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timer = controller ? setTimeout(() => controller.abort(), 45000) : null;
+        // Varias sesiones en paralelo pueden tardar más
+        const timer = controller ? setTimeout(() => controller.abort(), 90000) : null;
 
         try {
             const response = await fetch(
-                `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&limit=150`,
+                `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&limit=120`,
                 controller ? { signal: controller.signal } : undefined
             );
             const raw = await response.text();
@@ -395,11 +425,23 @@ class CVAnalyzer {
 
             this.conversationsChats = data.chats || [];
             this.renderConversationsChatList();
-            if (this.conversationsStatus) {
-                this.conversationsStatus.textContent = `${this.conversationsChats.length} chats`;
+
+            const errCount = (data.errors || []).length;
+            const statusParts = [`${this.conversationsChats.length} chats`];
+            if (sessionId === 'all') {
+                statusParts.push(`${(data.sessions || []).length} sesiones`);
             }
-            console.log('[conversations] OK', this.conversationsChats.length);
-            this.showStatus(`Cargados ${this.conversationsChats.length} chats`, 'success');
+            if (errCount) statusParts.push(`${errCount} con error`);
+            if (this.conversationsStatus) {
+                this.conversationsStatus.textContent = statusParts.join(' · ');
+            }
+            console.log('[conversations] OK', this.conversationsChats.length, data.errors || []);
+            this.showStatus(
+                errCount
+                    ? `Cargados ${this.conversationsChats.length} chats (${errCount} sesión(es) fallaron)`
+                    : `Cargados ${this.conversationsChats.length} chats`,
+                errCount ? 'error' : 'success'
+            );
         } catch (error) {
             const msg =
                 error.name === 'AbortError'
@@ -421,22 +463,24 @@ class CVAnalyzer {
         if (!this.conversationsChatList) return;
         if (!this.conversationsChats.length) {
             this.conversationsChatList.innerHTML =
-                '<p class="auto-reply-empty">No hay chats en esta sesión.</p>';
+                '<p class="auto-reply-empty">No hay chats en estas sesiones.</p>';
             return;
         }
 
+        const activeKey = this.activeConversation && this.activeConversation.key;
         this.conversationsChatList.innerHTML = '';
         this.conversationsChats.forEach((chat) => {
+            const key = chat.key || `${chat.sessionId}::${chat.id}`;
             const btn = document.createElement('button');
             btn.type = 'button';
-            btn.className = `conversations-chat-item${
-                this.activeConversationChatId === chat.id ? ' active' : ''
-            }`;
+            btn.className = `conversations-chat-item${activeKey === key ? ' active' : ''}`;
             const unread =
                 chat.unreadCount > 0
                     ? `<span class="unread">${chat.unreadCount}</span>`
                     : '';
+            const sessionLabel = chat.sessionLabel || chat.sessionId || '';
             btn.innerHTML = `
+                <span class="chat-session">${this.escapeHtml(sessionLabel)}</span>
                 <div class="chat-name">${this.escapeHtml(chat.name || chat.id)}</div>
                 <div class="chat-preview">${this.escapeHtml(chat.lastMessage || '')}</div>
                 <div class="chat-meta">
@@ -450,22 +494,35 @@ class CVAnalyzer {
     }
 
     async openConversationChat(chat) {
-        if (!chat || !this.conversationsSessionSelect) return;
-        const sessionId = this.conversationsSessionSelect.value;
-        this.activeConversationChatId = chat.id;
+        if (!chat || !chat.id || !chat.sessionId) return;
+        const key = chat.key || `${chat.sessionId}::${chat.id}`;
+        this.activeConversation = {
+            key,
+            chatId: chat.id,
+            sessionId: chat.sessionId,
+            sessionLabel: chat.sessionLabel || chat.sessionId,
+            name: chat.name || chat.id
+        };
         this.renderConversationsChatList();
+        this.setConversationsReplyEnabled(true);
 
         if (this.conversationsThreadHeader) {
-            this.conversationsThreadHeader.textContent = chat.name || chat.id;
+            this.conversationsThreadHeader.innerHTML = `
+                ${this.escapeHtml(this.activeConversation.name)}
+                <span class="thread-session">Desde: ${this.escapeHtml(this.activeConversation.sessionLabel)}</span>
+            `;
         }
         if (this.conversationsThreadMessages) {
             this.conversationsThreadMessages.innerHTML =
                 '<p class="auto-reply-empty">Cargando historial…</p>';
         }
+        if (this.conversationsReplyInput) {
+            this.conversationsReplyInput.focus();
+        }
 
         try {
             const response = await fetch(
-                `/api/conversations/${encodeURIComponent(chat.id)}/messages?sessionId=${encodeURIComponent(sessionId)}&limit=80`
+                `/api/conversations/${encodeURIComponent(chat.id)}/messages?sessionId=${encodeURIComponent(chat.sessionId)}&limit=80`
             );
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo cargar el historial');
@@ -497,6 +554,80 @@ class CVAnalyzer {
             this.conversationsThreadMessages.appendChild(bubble);
         });
         this.conversationsThreadMessages.scrollTop = this.conversationsThreadMessages.scrollHeight;
+    }
+
+    async sendConversationReply() {
+        if (!this.activeConversation) {
+            this.showStatus('Selecciona un chat primero', 'error');
+            return;
+        }
+        const text = (this.conversationsReplyInput && this.conversationsReplyInput.value || '').trim();
+        if (!text) {
+            this.showStatus('Escribe un mensaje', 'error');
+            return;
+        }
+
+        if (this.conversationsReplyBtn) this.conversationsReplyBtn.disabled = true;
+        if (this.conversationsReplyInput) this.conversationsReplyInput.disabled = true;
+
+        try {
+            const response = await fetch('/api/conversations/reply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: this.activeConversation.sessionId,
+                    chatId: this.activeConversation.chatId,
+                    text
+                })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+
+            if (this.conversationsReplyInput) this.conversationsReplyInput.value = '';
+
+            // Mostrar el mensaje enviado de inmediato en el hilo
+            if (this.conversationsThreadMessages) {
+                const empty = this.conversationsThreadMessages.querySelector('.auto-reply-empty');
+                if (empty) empty.remove();
+                const bubble = document.createElement('div');
+                bubble.className = 'conv-bubble outgoing';
+                bubble.innerHTML = `
+                    ${this.escapeHtml(text)}
+                    <span class="bubble-time">${this.escapeHtml(new Date().toLocaleString())}</span>
+                `;
+                this.conversationsThreadMessages.appendChild(bubble);
+                this.conversationsThreadMessages.scrollTop =
+                    this.conversationsThreadMessages.scrollHeight;
+            }
+
+            // Actualizar preview en la lista
+            const chat = this.conversationsChats.find(
+                (c) => (c.key || `${c.sessionId}::${c.id}`) === this.activeConversation.key
+            );
+            if (chat) {
+                chat.lastMessage = text;
+                chat.timestamp = Math.floor(Date.now() / 1000);
+                this.conversationsChats.sort(
+                    (a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)
+                );
+                this.renderConversationsChatList();
+            }
+
+            this.showStatus(
+                `Enviado desde ${this.activeConversation.sessionLabel}`,
+                'success'
+            );
+        } catch (error) {
+            console.error('[conversations] reply error', error);
+            this.showStatus(error.message || 'No se pudo enviar', 'error');
+        } finally {
+            this.setConversationsReplyEnabled(Boolean(this.activeConversation));
+            if (this.conversationsReplyInput && this.activeConversation) {
+                this.conversationsReplyInput.focus();
+            }
+        }
     }
 
     async loadAutoReplyConfig() {

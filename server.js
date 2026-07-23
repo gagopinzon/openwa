@@ -5,7 +5,7 @@ const fs = require('fs');
 require('dotenv').config();
 
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
-const { generateBulkMessages } = require('./aiService');
+const { generateBulkMessages, buildOutboundMessageParts } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
 const { sendRoundRobinBulk, ROUND_ROBIN_CONTROL_ID } = WhatsAppService;
 const { previewDistribution } = require('./sessionDistribution');
@@ -17,7 +17,8 @@ const {
   extractProfileName,
   formatPhoneToChatId,
   listChats,
-  getChatHistory
+  getChatHistory,
+  sendTextMessage
 } = require('./openwaClient');
 const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
@@ -448,9 +449,15 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
       : cv.mensajeIA;
 
     console.log(`🧪 Simulando envío ${i + 1}/${cvsToSend.length} a ${cv.nombre} (${cv.telefono})`);
-    console.log(`👋 Saludo: ${cv.saludo || '(auto)'}`);
-    console.log(`📱 Mensaje: ${mensajePreview}`);
-    console.log('🧪 Simulando pausa 2-3s entre saludo y mensaje principal...');
+    const parts = buildOutboundMessageParts(cv);
+    console.log(`🧪 Burst: ${parts.length} mensaje${parts.length === 1 ? '' : 's'}`);
+    parts.forEach((part, idx) => {
+      const preview =
+        part.length > 100 ? `${part.substring(0, 100).replace(/\n/g, ' ')}...` : part;
+      console.log(`🧪   ${idx + 1}/${parts.length}: ${preview}`);
+    });
+    console.log(`📱 Mensaje base (preview): ${mensajePreview}`);
+    console.log('🧪 Simulando pausas cortas entre fragmentos del burst...');
 
     // Simular éxito en 90% de los casos
     const success = Math.random() > 0.1;
@@ -1577,7 +1584,93 @@ function resolveConfiguredSession(sessionParam) {
 
 app.get('/api/conversations', async (req, res) => {
   try {
-    const session = resolveConfiguredSession(req.query.sessionId);
+    const rawSession = String(req.query.sessionId || '').trim();
+    const wantAll = !rawSession || rawSession === 'all';
+    const sessions = wantAll
+      ? sessionsStore.getAllSessions()
+      : [resolveConfiguredSession(rawSession)].filter(Boolean);
+
+    if (!sessions.length) {
+      return res.status(400).json({
+        success: false,
+        error: wantAll
+          ? 'No hay sesiones configuradas'
+          : 'Indica sessionId de una sesión configurada'
+      });
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const includeGroups = String(req.query.includeGroups || '') === '1';
+
+    console.log(
+      `[conversations] listando chats sesiones=${sessions.map((s) => s.id).join(',')} limit=${limit}`
+    );
+
+    const settled = await Promise.all(
+      sessions.map(async (session) => {
+        try {
+          let chats = await listChats(session.openwaSessionId, {
+            limit,
+            offset: 0
+          });
+          if (!includeGroups) {
+            chats = chats.filter((c) => !c.isGroup);
+          }
+          return { session, chats, error: null };
+        } catch (err) {
+          console.error(
+            `[conversations] error sesión=${session.id}:`,
+            err.message
+          );
+          return { session, chats: [], error: err.message };
+        }
+      })
+    );
+
+    const chats = settled
+      .flatMap(({ session, chats: sessionChats }) =>
+        sessionChats.map((c) => ({
+          ...c,
+          sessionId: session.id,
+          sessionLabel: session.label || session.id,
+          openwaSessionId: session.openwaSessionId,
+          key: `${session.id}::${c.id}`
+        }))
+      )
+      .sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+
+    const errors = settled
+      .filter((row) => row.error)
+      .map((row) => ({
+        sessionId: row.session.id,
+        label: row.session.label || row.session.id,
+        error: row.error
+      }));
+
+    console.log(
+      `[conversations] OK ${chats.length} chats (${sessions.length} sesiones, ${errors.length} errores)`
+    );
+
+    res.json({
+      success: true,
+      all: wantAll,
+      sessions: sessions.map((s) => ({
+        id: s.id,
+        label: s.label || s.id,
+        openwaSessionId: s.openwaSessionId
+      })),
+      errors,
+      chats
+    });
+  } catch (error) {
+    console.error('[conversations] error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/reply', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
     if (!session) {
       return res.status(400).json({
         success: false,
@@ -1585,30 +1678,35 @@ app.get('/api/conversations', async (req, res) => {
       });
     }
 
-    const limit = req.query.limit || 100;
-    const offset = req.query.offset || 0;
-    const includeGroups = String(req.query.includeGroups || '') === '1';
-
-    console.log(
-      `[conversations] listando chats sesión=${session.id} openwa=${session.openwaSessionId} limit=${limit}`
-    );
-
-    let chats = await listChats(session.openwaSessionId, { limit, offset });
-    if (!includeGroups) {
-      chats = chats.filter((c) => !c.isGroup);
+    const chatId = String(req.body.chatId || '').trim();
+    const text = String(req.body.text || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    if (!text) {
+      return res.status(400).json({ success: false, error: 'El mensaje no puede estar vacío' });
+    }
+    if (text.length > 4000) {
+      return res.status(400).json({
+        success: false,
+        error: 'El mensaje es demasiado largo (máx. 4000 caracteres)'
+      });
     }
 
-    console.log(`[conversations] OK ${chats.length} chats para ${session.id}`);
+    console.log(
+      `[conversations] reply sesión=${session.id} chat=${chatId} chars=${text.length}`
+    );
 
+    const result = await sendTextMessage(session.openwaSessionId, chatId, text);
     res.json({
       success: true,
       sessionId: session.id,
-      openwaSessionId: session.openwaSessionId,
-      label: session.label,
-      chats
+      sessionLabel: session.label || session.id,
+      chatId,
+      messageId: result.messageId || null
     });
   } catch (error) {
-    console.error('[conversations] error:', error.message);
+    console.error('[conversations] reply error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1642,6 +1740,7 @@ app.get('/api/conversations/:chatId/messages', async (req, res) => {
     res.json({
       success: true,
       sessionId: session.id,
+      sessionLabel: session.label || session.id,
       openwaSessionId: session.openwaSessionId,
       chatId,
       messages: sorted
