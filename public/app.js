@@ -349,37 +349,71 @@ class CVAnalyzer {
     }
 
     async loadConversationsChats() {
-        if (!this.conversationsChatList || !this.conversationsSessionSelect) return;
+        if (!this.conversationsChatList || !this.conversationsSessionSelect) {
+            console.error('Conversaciones: faltan elementos del DOM');
+            this.showStatus('No se encontró el panel de conversaciones. Recarga forzada (Ctrl+F5).', 'error');
+            return;
+        }
         const sessionId = this.conversationsSessionSelect.value;
         if (!sessionId) {
             this.conversationsChatList.innerHTML =
                 '<p class="auto-reply-empty">Configura al menos una sesión primero.</p>';
+            this.showStatus('Elige una sesión antes de cargar chats', 'error');
             return;
         }
 
+        if (this.refreshConversationsBtn) this.refreshConversationsBtn.disabled = true;
         if (this.conversationsStatus) {
             this.conversationsStatus.textContent = 'Cargando chats…';
         }
         this.conversationsChatList.innerHTML =
             '<p class="auto-reply-empty">Cargando chats desde OpenWA…</p>';
+        console.log('[conversations] fetch', sessionId);
+
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = controller ? setTimeout(() => controller.abort(), 45000) : null;
 
         try {
             const response = await fetch(
-                `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&limit=150`
+                `/api/conversations?sessionId=${encodeURIComponent(sessionId)}&limit=150`,
+                controller ? { signal: controller.signal } : undefined
             );
-            const data = await response.json();
-            if (!data.success) throw new Error(data.error || 'No se pudieron cargar los chats');
+            const raw = await response.text();
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch {
+                throw new Error(
+                    response.status === 401 || response.status === 302
+                        ? 'Sesión expirada: vuelve a iniciar sesión'
+                        : `Respuesta inválida del servidor (HTTP ${response.status})`
+                );
+            }
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
 
             this.conversationsChats = data.chats || [];
             this.renderConversationsChatList();
             if (this.conversationsStatus) {
                 this.conversationsStatus.textContent = `${this.conversationsChats.length} chats`;
             }
+            console.log('[conversations] OK', this.conversationsChats.length);
+            this.showStatus(`Cargados ${this.conversationsChats.length} chats`, 'success');
         } catch (error) {
-            this.conversationsChatList.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;
+            const msg =
+                error.name === 'AbortError'
+                    ? 'Tiempo agotado al cargar chats (OpenWA no respondió)'
+                    : error.message || String(error);
+            console.error('[conversations] error', error);
+            this.conversationsChatList.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(msg)}</p>`;
             if (this.conversationsStatus) {
                 this.conversationsStatus.textContent = 'Error';
             }
+            this.showStatus(msg, 'error');
+        } finally {
+            if (timer) clearTimeout(timer);
+            if (this.refreshConversationsBtn) this.refreshConversationsBtn.disabled = false;
         }
     }
 

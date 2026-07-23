@@ -70,9 +70,11 @@ function formatPhoneToChatId(phoneNumber) {
   return `${normalized}@c.us`;
 }
 
-async function openwaRequest(method, path, body) {
+async function openwaRequest(method, path, body, opts = {}) {
   const { baseUrl, apiKey } = getBaseConfig();
   assertOpenWAConfigured();
+
+  const timeout = Number.isFinite(opts.timeout) ? opts.timeout : 30000;
 
   const response = await axios({
     method,
@@ -82,6 +84,7 @@ async function openwaRequest(method, path, body) {
       'X-API-Key': apiKey
     },
     data: body,
+    timeout,
     validateStatus: () => true
   });
 

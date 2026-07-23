@@ -1589,10 +1589,16 @@ app.get('/api/conversations', async (req, res) => {
     const offset = req.query.offset || 0;
     const includeGroups = String(req.query.includeGroups || '') === '1';
 
+    console.log(
+      `[conversations] listando chats sesión=${session.id} openwa=${session.openwaSessionId} limit=${limit}`
+    );
+
     let chats = await listChats(session.openwaSessionId, { limit, offset });
     if (!includeGroups) {
       chats = chats.filter((c) => !c.isGroup);
     }
+
+    console.log(`[conversations] OK ${chats.length} chats para ${session.id}`);
 
     res.json({
       success: true,
@@ -1602,6 +1608,7 @@ app.get('/api/conversations', async (req, res) => {
       chats
     });
   } catch (error) {
+    console.error('[conversations] error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
