@@ -20,6 +20,7 @@ const {
 const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
 const autoReplyStore = require('./autoReplyStore');
+const incomingMessagesStore = require('./incomingMessagesStore');
 const {
   isAuthEnabled,
   authMiddleware,
@@ -1494,16 +1495,53 @@ app.post('/api/webhooks/openwa', async (req, res) => {
     }
 
     const payload = req.body && Object.keys(req.body).length ? req.body : JSON.parse(rawBody.toString('utf8'));
+    const idempotencyKey = req.headers['x-openwa-idempotency-key'];
 
-    await autoReplyService.handleIncomingWebhook({
+    // Siempre registrar el mensaje entrante para la bandeja (aunque no haya auto-respuesta).
+    const inboxRecord = autoReplyService.captureIncomingMessage({
       payload,
-      idempotencyKey: req.headers['x-openwa-idempotency-key'],
+      broadcastEvent,
+      idempotencyKey
+    });
+
+    const replyResult = await autoReplyService.handleIncomingWebhook({
+      payload,
+      idempotencyKey,
       broadcastEvent,
       getCvContext: getCvContextForPhone,
       testMode: TEST_MODE
     });
+
+    if (inboxRecord && replyResult) {
+      incomingMessagesStore.update(inboxRecord.id, {
+        autoReplyHandled: Boolean(replyResult.handled),
+        autoReplyReason: replyResult.handled ? 'replied' : replyResult.reason || null,
+        replyMessage: replyResult.replyMessage || null
+      });
+    }
   } catch (err) {
     console.error('Webhook OpenWA error:', err.message);
+  }
+});
+
+app.get('/api/incoming-messages', (req, res) => {
+  try {
+    const messages = incomingMessagesStore.list({
+      limit: req.query.limit,
+      sessionId: req.query.sessionId
+    });
+    res.json({ success: true, messages, total: messages.length });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/incoming-messages', (req, res) => {
+  try {
+    incomingMessagesStore.clear();
+    res.json({ success: true, message: 'Bandeja limpiada' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -1539,11 +1577,11 @@ app.put('/api/auto-reply/config', (req, res) => {
 app.post('/api/auto-reply/activate', async (req, res) => {
   try {
     const status = autoReplyService.getStatus();
-    if (!status.canActivate) {
+    if (!status.canListen) {
       return res.status(400).json({
         success: false,
         error:
-          'No se puede activar: configura WEBHOOK_PUBLIC_URL, MongoDB y al menos una sesión.'
+          'No se puede activar: configura WEBHOOK_PUBLIC_URL y al menos una sesión. Sin URL pública OpenWA no puede enviar los mensajes a esta página.'
       });
     }
     const result = await autoReplyService.activateWebhooks();
@@ -1591,18 +1629,26 @@ app.post('/api/auto-reply/test', async (req, res) => {
     const prevEnabled = autoReplyStore.getConfig().enabled;
     autoReplyStore.updateConfig({ enabled: true });
 
+    const testPayload = {
+      event: 'message.received',
+      sessionId: openwaSessionId,
+      data: {
+        id: `test_${Date.now()}`,
+        from: chatId,
+        body: incomingBody,
+        fromMe: false,
+        isGroup: false
+      }
+    };
+
+    autoReplyService.captureIncomingMessage({
+      payload: testPayload,
+      broadcastEvent,
+      idempotencyKey: `test_inbox_${Date.now()}`
+    });
+
     const result = await autoReplyService.handleIncomingWebhook({
-      payload: {
-        event: 'message.received',
-        sessionId: openwaSessionId,
-        data: {
-          id: `test_${Date.now()}`,
-          from: chatId,
-          body: incomingBody,
-          fromMe: false,
-          isGroup: false
-        }
-      },
+      payload: testPayload,
       idempotencyKey: `test_${Date.now()}`,
       broadcastEvent,
       getCvContext: getCvContextForPhone,

@@ -4,6 +4,7 @@ user_data/
 user_data_session*/
 user_data_default/
 data/sessions.json
+data/incoming-messages.json
 logs/
 *.log
 *.zip

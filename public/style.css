@@ -877,6 +877,112 @@ footer p {
     text-align: left;
 }
 
+/* Bandeja de mensajes entrantes */
+.incoming-inbox-panel {
+    margin-top: 24px;
+    text-align: left;
+    padding: 16px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+}
+
+.incoming-inbox-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.incoming-inbox-count {
+    font-size: 13px;
+    font-weight: 600;
+    color: #334155;
+}
+
+.incoming-inbox-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.incoming-inbox-sound-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #475569;
+}
+
+.incoming-inbox-list {
+    max-height: 420px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.incoming-inbox-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    background: #fff;
+}
+
+.incoming-inbox-item:last-child {
+    margin-bottom: 0;
+}
+
+.incoming-inbox-item.is-new {
+    border-color: #86efac;
+    box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.15);
+}
+
+.incoming-inbox-item .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    color: #64748b;
+    font-size: 12px;
+    margin-bottom: 8px;
+}
+
+.incoming-inbox-item .meta .phone {
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.incoming-inbox-item .meta .session-tag {
+    background: #e0f2fe;
+    color: #0369a1;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: 600;
+}
+
+.incoming-inbox-item .body {
+    background: #f1f5f9;
+    padding: 10px 12px;
+    border-radius: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #1e293b;
+    line-height: 1.45;
+}
+
+.incoming-inbox-item .reply-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #059669;
+}
+
 .auto-reply-status {
     padding: 12px 16px;
     border-radius: 8px;

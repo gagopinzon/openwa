@@ -50,10 +50,33 @@
                 </p>
             </section>
 
+            <section class="incoming-inbox-panel" id="incomingInboxPanel">
+                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Mensajes entrantes</h2>
+                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+                    Aquí verás en vivo todos los mensajes que lleguen a los celulares conectados.
+                    Primero activa los webhooks (abajo) para que OpenWA envíe los eventos a esta página.
+                </p>
+                <div class="incoming-inbox-toolbar">
+                    <span id="incomingInboxCount" class="incoming-inbox-count">0 mensajes</span>
+                    <div class="incoming-inbox-actions">
+                        <label class="incoming-inbox-sound-toggle">
+                            <input type="checkbox" id="incomingInboxSoundToggle" checked>
+                            <span>Sonido</span>
+                        </label>
+                        <button type="button" id="refreshIncomingInboxBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                        <button type="button" id="clearIncomingInboxBtn" class="btn btn-danger btn-sm">Limpiar bandeja</button>
+                    </div>
+                </div>
+                <div id="incomingInboxList" class="incoming-inbox-list">
+                    <p class="auto-reply-empty">Aún no hay mensajes. Activa los webhooks y espera respuestas en los celulares.</p>
+                </div>
+            </section>
+
             <section class="auto-reply-panel" id="autoReplyPanel">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Auto-respuesta IA</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
                     Responde automáticamente a contactos que ya recibieron tu mensaje masivo. Cada número responde desde la misma sesión que recibió el mensaje.
+                    <strong>Activar webhooks</strong> también habilita la bandeja de mensajes entrantes de arriba.
                 </p>
                 <div id="autoReplyStatus" class="auto-reply-status"></div>
                 <div class="auto-reply-controls">

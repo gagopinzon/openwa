@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const contactHistory = require('./contactHistoryStore');
 const autoReplyStore = require('./autoReplyStore');
 const sessionsStore = require('./sessionsStore');
+const incomingMessagesStore = require('./incomingMessagesStore');
 const { generateReplyMessage } = require('./aiService');
 const {
   sendTextMessage,
@@ -74,6 +75,70 @@ function parseWebhookPayload(body) {
   const sessionId = body.sessionId;
   const data = body.data || body.message || body;
   return { event, sessionId, data };
+}
+
+/**
+ * Extrae un mensaje entrante del payload de OpenWA (sin auto-respuesta).
+ * @param {object} payload
+ * @returns {object|null}
+ */
+function extractIncomingMessage(payload) {
+  const parsed = parseWebhookPayload(payload);
+  if (!parsed) return null;
+
+  const event = String(parsed.event || '').toLowerCase();
+  if (event && event !== 'message.received' && event !== 'message') {
+    return null;
+  }
+
+  const openwaSessionId = String(parsed.sessionId || '').trim();
+  const msg = parsed.data || {};
+  const body = String(msg.body || msg.text || msg.caption || '').trim();
+  const mediaType = msg.type || msg.mediaType || msg.mimetype || null;
+  if (!body && !mediaType) return null;
+
+  const chatId = msg.from || msg.chatId || msg.sender || '';
+  const normalizedPhone = contactHistory.normalizePhone(extractPhoneFromChatId(chatId));
+  const logicalSession = findLogicalSessionByOpenwaId(openwaSessionId);
+  const messageId = msg.id || msg.messageId || null;
+
+  return {
+    openwaSessionId: openwaSessionId || null,
+    sessionId: logicalSession ? logicalSession.id : null,
+    telefono: normalizedPhone || extractPhoneFromChatId(chatId) || '',
+    contactName: msg.notifyName || msg.senderName || msg.pushName || null,
+    body: body || (mediaType ? `[${mediaType}]` : ''),
+    messageId,
+    chatId: chatId || null,
+    fromMe: Boolean(msg.fromMe),
+    isGroup: Boolean(msg.isGroup || (chatId && String(chatId).includes('@g.us'))),
+    mediaType: mediaType || null,
+    timestamp: msg.timestamp
+      ? new Date(Number(msg.timestamp) * (String(msg.timestamp).length <= 10 ? 1000 : 1)).toISOString()
+      : new Date().toISOString()
+  };
+}
+
+/**
+ * Guarda y (opcionalmente) retransmite por SSE cualquier mensaje entrante.
+ * @param {{ payload: object, broadcastEvent?: Function|null, idempotencyKey?: string }} params
+ */
+function captureIncomingMessage({ payload, broadcastEvent = null, idempotencyKey = null }) {
+  const extracted = extractIncomingMessage(payload);
+  if (!extracted) return null;
+  if (extracted.fromMe) return null;
+
+  const id =
+    idempotencyKey ||
+    payload.idempotencyKey ||
+    payload.deliveryId ||
+    `inbox_${extracted.openwaSessionId || 's'}_${extracted.messageId || extracted.body.slice(0, 24)}_${extracted.timestamp}`;
+
+  const record = incomingMessagesStore.add({ ...extracted, id });
+  if (broadcastEvent) {
+    broadcastEvent('incomingMessage', record);
+  }
+  return record;
 }
 
 /**
@@ -266,10 +331,7 @@ async function activateWebhooks() {
     }
   }
 
-  const cfg = autoReplyStore.getConfig();
-  cfg.enabled = true;
-  autoReplyStore.updateConfig({ enabled: true, rules: cfg.rules, basePrompt: cfg.basePrompt });
-
+  // Los webhooks alimentan la bandeja; la auto-respuesta se controla con el switch aparte.
   return { webhookUrl, results };
 }
 
@@ -290,12 +352,7 @@ async function deactivateWebhooks() {
   }
 
   autoReplyStore.clearAllWebhookIds();
-  autoReplyStore.updateConfig({
-    enabled: false,
-    rules: cfg.rules,
-    basePrompt: cfg.basePrompt
-  });
-
+  // No apaga la config de prompts; solo deja de recibir eventos de OpenWA.
   return results;
 }
 
@@ -304,6 +361,7 @@ function getStatus() {
   const webhookUrl = autoReplyStore.getWebhookUrl();
   const sessions = sessionsStore.getAllSessions();
   const webhookCount = Object.keys(cfg.webhookIdsBySession || {}).length;
+  const canListen = Boolean(webhookUrl && sessions.length > 0);
 
   return {
     enabled: cfg.enabled,
@@ -313,12 +371,17 @@ function getStatus() {
     sessionsConfigured: sessions.length,
     webhooksActive: webhookCount,
     webhookIdsBySession: cfg.webhookIdsBySession,
-    canActivate: Boolean(webhookUrl && contactHistory.mongoUriConfigured() && sessions.length > 0)
+    canListen,
+    /** Alias: activar webhooks solo requiere URL pública + sesiones (para ver mensajes). */
+    canActivate: canListen,
+    canAutoReply: Boolean(canListen && contactHistory.mongoUriConfigured())
   };
 }
 
 module.exports = {
   handleIncomingWebhook,
+  captureIncomingMessage,
+  extractIncomingMessage,
   activateWebhooks,
   deactivateWebhooks,
   getStatus,

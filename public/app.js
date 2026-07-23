@@ -15,6 +15,7 @@ class CVAnalyzer {
             this.loadSessions();
             this.loadAutoReplyConfig();
             this.loadAutoReplyStatus();
+            this.loadIncomingInbox();
             this.connectToEvents();
         });
     }
@@ -110,6 +111,12 @@ class CVAnalyzer {
         this.addAutoReplyRuleBtn = document.getElementById('addAutoReplyRuleBtn');
         this.saveAutoReplyConfigBtn = document.getElementById('saveAutoReplyConfigBtn');
         this.autoReplyConversations = document.getElementById('autoReplyConversations');
+        this.incomingInboxList = document.getElementById('incomingInboxList');
+        this.incomingInboxCount = document.getElementById('incomingInboxCount');
+        this.refreshIncomingInboxBtn = document.getElementById('refreshIncomingInboxBtn');
+        this.clearIncomingInboxBtn = document.getElementById('clearIncomingInboxBtn');
+        this.incomingInboxSoundToggle = document.getElementById('incomingInboxSoundToggle');
+        this.incomingInboxIds = new Set();
     }
 
     attachAutoReplyListeners() {
@@ -132,6 +139,12 @@ class CVAnalyzer {
             this.autoReplyEnabledToggle.addEventListener('change', () => {
                 this.saveAutoReplyConfig({ silent: true, enabledOnly: true });
             });
+        }
+        if (this.refreshIncomingInboxBtn) {
+            this.refreshIncomingInboxBtn.addEventListener('click', () => this.loadIncomingInbox());
+        }
+        if (this.clearIncomingInboxBtn) {
+            this.clearIncomingInboxBtn.addEventListener('click', () => this.clearIncomingInbox());
         }
         document.querySelectorAll('.accordion-header').forEach((btn) => {
             btn.addEventListener('click', () => this.toggleAccordion(btn));
@@ -156,13 +169,13 @@ class CVAnalyzer {
             if (!data.success) throw new Error(data.error || 'Error de estado');
 
             let html = '';
-            if (!data.mongodbConfigured) {
-                html += '<strong>MongoDB requerido</strong> para filtrar contactos ya enviados.<br>';
-            }
             if (!data.webhookConfigured) {
-                html += '<strong>WEBHOOK_PUBLIC_URL</strong> no configurado en el servidor.<br>';
+                html += '<strong>WEBHOOK_PUBLIC_URL</strong> no configurado en el servidor. Sin esto no llegan mensajes a la bandeja.<br>';
             } else {
                 html += `Webhook: <code>${this.escapeHtml(data.webhookUrl)}</code><br>`;
+            }
+            if (!data.mongodbConfigured) {
+                html += 'MongoDB no configurado: la bandeja sí funciona; la auto-respuesta IA no filtrará contactos.<br>';
             }
             html += `Sesiones: ${data.sessionsConfigured} · Webhooks activos: ${data.webhooksActive}`;
             if (data.enabled) {
@@ -170,14 +183,110 @@ class CVAnalyzer {
             }
 
             this.autoReplyStatus.innerHTML = html;
-            this.autoReplyStatus.className = `auto-reply-status ${data.canActivate ? 'ok' : 'warning'}`;
+            this.autoReplyStatus.className = `auto-reply-status ${data.canListen || data.canActivate ? 'ok' : 'warning'}`;
 
             if (this.activateAutoReplyBtn) {
-                this.activateAutoReplyBtn.disabled = !data.canActivate;
+                this.activateAutoReplyBtn.disabled = !(data.canListen || data.canActivate);
             }
         } catch (error) {
             this.autoReplyStatus.innerHTML = `Error cargando estado: ${this.escapeHtml(error.message)}`;
             this.autoReplyStatus.className = 'auto-reply-status warning';
+        }
+    }
+
+    async loadIncomingInbox() {
+        if (!this.incomingInboxList) return;
+        try {
+            const response = await fetch('/api/incoming-messages?limit=200');
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'Error cargando bandeja');
+            this.incomingInboxIds = new Set();
+            this.incomingInboxList.innerHTML = '';
+            const messages = data.messages || [];
+            if (!messages.length) {
+                this.incomingInboxList.innerHTML =
+                    '<p class="auto-reply-empty">Aún no hay mensajes. Activa los webhooks y espera respuestas en los celulares.</p>';
+            } else {
+                messages.forEach((msg) => this.appendIncomingMessage(msg, { prepend: false, playSound: false }));
+            }
+            this.updateIncomingInboxCount(messages.length);
+        } catch (error) {
+            console.error('Error cargando bandeja:', error);
+            this.incomingInboxList.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;
+        }
+    }
+
+    async clearIncomingInbox() {
+        if (!confirm('¿Limpiar toda la bandeja de mensajes entrantes?')) return;
+        try {
+            const response = await fetch('/api/incoming-messages', { method: 'DELETE' });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo limpiar');
+            this.incomingInboxIds = new Set();
+            if (this.incomingInboxList) {
+                this.incomingInboxList.innerHTML =
+                    '<p class="auto-reply-empty">Bandeja limpia. Los nuevos mensajes aparecerán aquí.</p>';
+            }
+            this.updateIncomingInboxCount(0);
+            this.showStatus('Bandeja limpiada', 'success');
+        } catch (error) {
+            this.showStatus(error.message, 'error');
+        }
+    }
+
+    updateIncomingInboxCount(n) {
+        if (!this.incomingInboxCount) return;
+        const count = typeof n === 'number' ? n : this.incomingInboxIds.size;
+        this.incomingInboxCount.textContent = `${count} mensaje${count === 1 ? '' : 's'}`;
+    }
+
+    appendIncomingMessage(item, options = {}) {
+        if (!this.incomingInboxList || !item) return;
+        const id = item.id || `${item.telefono}_${item.timestamp}`;
+        if (this.incomingInboxIds.has(id)) return;
+        this.incomingInboxIds.add(id);
+
+        const empty = this.incomingInboxList.querySelector('.auto-reply-empty');
+        if (empty) empty.remove();
+
+        const sessionLabel = item.sessionId
+            ? this.getSessionLabel(item.sessionId)
+            : item.openwaSessionId || 'Sesión';
+        const phone = item.telefono || item.chatId || 'desconocido';
+        const name = item.contactName ? ` · ${item.contactName}` : '';
+        const when = new Date(item.timestamp || Date.now()).toLocaleString();
+        const replyHint = item.replyMessage
+            ? `<div class="reply-hint">Auto-respuesta enviada</div>`
+            : item.autoReplyReason && item.autoReplyReason !== 'replied'
+              ? `<div class="reply-hint" style="color:#92400e">Sin auto-respuesta (${this.escapeHtml(item.autoReplyReason)})</div>`
+              : '';
+
+        const el = document.createElement('div');
+        el.className = `incoming-inbox-item fade-in${options.highlight ? ' is-new' : ''}`;
+        el.dataset.id = id;
+        el.innerHTML = `
+            <div class="meta">
+                <span class="phone">${this.escapeHtml(phone)}${this.escapeHtml(name)}</span>
+                <span class="session-tag">${this.escapeHtml(sessionLabel)}</span>
+                <span>${this.escapeHtml(when)}</span>
+            </div>
+            <div class="body">${this.escapeHtml(item.body || '')}</div>
+            ${replyHint}
+        `;
+
+        if (options.prepend === false) {
+            this.incomingInboxList.appendChild(el);
+        } else {
+            this.incomingInboxList.prepend(el);
+        }
+
+        this.updateIncomingInboxCount();
+
+        if (options.highlight) {
+            setTimeout(() => el.classList.remove('is-new'), 4000);
+        }
+        if (options.playSound && this.incomingInboxSoundToggle && this.incomingInboxSoundToggle.checked) {
+            this.playNotificationSound();
         }
     }
 
@@ -299,9 +408,9 @@ class CVAnalyzer {
             const ok = (data.results || []).filter((r) => r.success).length;
             const fail = (data.results || []).filter((r) => !r.success).length;
             this.showStatus(`Webhooks activados: ${ok} OK${fail ? `, ${fail} fallo(s)` : ''}`, ok ? 'success' : 'warning');
-            if (this.autoReplyEnabledToggle) this.autoReplyEnabledToggle.checked = true;
             await this.loadAutoReplyStatus();
             await this.loadAutoReplyConfig();
+            await this.loadIncomingInbox();
         } catch (error) {
             this.showStatus(error.message, 'error');
         }
@@ -313,7 +422,6 @@ class CVAnalyzer {
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo desactivar');
             this.showStatus('Webhooks desactivados', 'success');
-            if (this.autoReplyEnabledToggle) this.autoReplyEnabledToggle.checked = false;
             await this.loadAutoReplyStatus();
             await this.loadAutoReplyConfig();
         } catch (error) {
@@ -2381,6 +2489,15 @@ class CVAnalyzer {
                 this.playNotificationSound();
             } catch (error) {
                 console.warn('incomingReply SSE:', error);
+            }
+        });
+
+        this.eventSource.addEventListener('incomingMessage', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                this.appendIncomingMessage(data, { prepend: true, highlight: true, playSound: true });
+            } catch (error) {
+                console.warn('incomingMessage SSE:', error);
             }
         });
 
