@@ -910,6 +910,28 @@ footer p {
     color: #64748b;
 }
 
+.conversations-unread-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #334155;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.conversations-unread-filter input {
+    margin: 0;
+    cursor: pointer;
+}
+
+.conversations-chat-item.has-unread .chat-name {
+    font-weight: 700;
+    color: #0f172a;
+}
+
 .conversations-layout {
     display: grid;
     grid-template-columns: minmax(220px, 320px) 1fr;

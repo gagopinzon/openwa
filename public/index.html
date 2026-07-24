@@ -56,8 +56,12 @@
                     Chats de todos los celulares en un solo lugar. Cada conversación indica de qué sesión es, y puedes responder desde aquí.
                 </p>
                 <div class="conversations-toolbar">
-                    <label for="conversationsSessionSelect" style="font-weight: 600; font-size: 13px;">Filtrar:</label>
+                    <label for="conversationsSessionSelect" style="font-weight: 600; font-size: 13px;">Sesión:</label>
                     <select id="conversationsSessionSelect" class="form-select" style="min-width: 180px; padding: 8px;"></select>
+                    <label class="conversations-unread-filter" for="conversationsUnreadOnlyToggle">
+                        <input type="checkbox" id="conversationsUnreadOnlyToggle">
+                        Solo no leídos
+                    </label>
                     <button type="button" id="refreshConversationsBtn" class="btn btn-secondary btn-sm">Cargar chats</button>
                     <span id="conversationsStatus" class="conversations-status"></span>
                 </div>
@@ -306,7 +310,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=conversations-4"></script>
+    <script src="app.js?v=conversations-5"></script>
     <script>
         (async function initAuthUi() {
             try {
