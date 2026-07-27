@@ -11,7 +11,8 @@
 <body>
     <div class="container">
         <header>
-            <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+            <div style="display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-bottom: 8px;">
+                <span id="authUserLabel" style="display: none; font-size: 0.9rem; color: #64748b;"></span>
                 <button type="button" id="logoutBtn" class="btn btn-secondary" style="display: none; padding: 8px 16px; font-size: 0.9rem;">
                     Cerrar sesión
                 </button>
@@ -29,6 +30,25 @@
                     Verificar sesiones OpenWA
                 </button>
             </div>
+
+            <section class="users-panel" id="usersPanel" style="display: none; margin-top: 24px; text-align: left;">
+                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Usuarios y permisos</h2>
+                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+                    Como superusuario puedes crear cuentas y asignar a cada una permiso de
+                    <strong>control</strong> (enviar/responder) o solo <strong>ver</strong> por número/sesión de WhatsApp.
+                </p>
+                <div id="usersList" class="users-list"></div>
+                <form id="createUserForm" class="users-create-form">
+                    <h3 style="font-size: 0.95rem; margin: 16px 0 8px;">Crear usuario</h3>
+                    <div class="users-create-row">
+                        <input type="text" id="newUserUsername" class="form-select" placeholder="Usuario" required minlength="3" autocomplete="off">
+                        <input type="password" id="newUserPassword" class="form-select" placeholder="Contraseña" required minlength="6" autocomplete="new-password">
+                    </div>
+                    <div id="newUserPermissions" class="users-permissions"></div>
+                    <button type="submit" class="btn btn-primary" style="margin-top: 10px;">Crear usuario</button>
+                    <p id="usersFormStatus" class="users-form-status"></p>
+                </form>
+            </section>
 
             <section class="sessions-panel" id="sessionsPanel" style="margin-top: 24px; text-align: left;">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Sesiones WhatsApp (OpenWA)</h2>
@@ -310,19 +330,30 @@
         </div>
     </div>
 
-    <script src="app.js?v=conversations-5"></script>
+    <script src="app.js?v=conversations-poll-1"></script>
     <script>
         (async function initAuthUi() {
             try {
                 const response = await fetch('/api/auth/status');
                 const data = await response.json();
-                if (data.authEnabled) {
+                if (data.authEnabled && data.authenticated) {
                     const logoutBtn = document.getElementById('logoutBtn');
+                    const userLabel = document.getElementById('authUserLabel');
                     logoutBtn.style.display = 'inline-block';
+                    if (userLabel && data.user) {
+                        const role = data.user.isSuper ? 'superusuario' : 'usuario';
+                        userLabel.textContent = `${data.user.username} (${role})`;
+                        userLabel.style.display = 'inline';
+                    }
                     logoutBtn.addEventListener('click', async () => {
                         await fetch('/api/auth/logout', { method: 'POST' });
                         window.location.href = '/login';
                     });
+                    if (window.cvAnalyzer && typeof window.cvAnalyzer.setCurrentUser === 'function') {
+                        window.cvAnalyzer.setCurrentUser(data.user);
+                    } else {
+                        window.__pendingAuthUser = data.user;
+                    }
                 }
             } catch {
                 // Sin auth o error de red: no mostrar botón

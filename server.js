@@ -24,12 +24,19 @@ const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
 const autoReplyStore = require('./autoReplyStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
+const usersStore = require('./usersStore');
 const {
   isAuthEnabled,
   authMiddleware,
   validateCredentials,
   createSessionToken,
   isAuthenticated,
+  getRequestUser,
+  filterSessionsForUser,
+  canControlSession,
+  requireSuper,
+  forbidUnlessControlSessions,
+  forbidUnlessViewSession,
   setAuthCookie,
   clearAuthCookie
 } = require('./auth');
@@ -518,13 +525,28 @@ app.post('/api/auth/login', (req, res) => {
 
   const username = String(req.body.username || '').trim();
   const password = String(req.body.password || '');
+  const result = validateCredentials(username, password);
 
-  if (!validateCredentials(username, password)) {
+  if (!result.ok) {
     return res.status(401).json({ success: false, error: 'Usuario o contraseña incorrectos' });
   }
 
-  setAuthCookie(res, createSessionToken());
-  res.json({ success: true });
+  setAuthCookie(
+    res,
+    createSessionToken({
+      username: result.user.username,
+      role: result.user.role
+    })
+  );
+  res.json({
+    success: true,
+    user: {
+      username: result.user.username,
+      role: result.user.role,
+      isSuper: result.user.isSuper,
+      permissions: result.user.permissions || {}
+    }
+  });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -533,14 +555,71 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 app.get('/api/auth/status', (req, res) => {
+  const user = isAuthenticated(req) ? getRequestUser(req) : null;
   res.json({
     success: true,
     authEnabled: isAuthEnabled(),
-    authenticated: isAuthenticated(req)
+    authenticated: Boolean(user),
+    user: user
+      ? {
+          username: user.username,
+          role: user.role,
+          isSuper: user.isSuper,
+          permissions: user.permissions || {}
+        }
+      : null
   });
 });
 
 app.use(authMiddleware);
+
+// --- Gestión de usuarios (solo superusuario del .env) ---
+
+app.get('/api/users', requireSuper, (req, res) => {
+  try {
+    res.json({ success: true, users: usersStore.getAllUsers() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/users', requireSuper, (req, res) => {
+  try {
+    const user = usersStore.createUser({
+      username: req.body.username,
+      password: req.body.password,
+      permissions: req.body.permissions
+    });
+    res.status(201).json({ success: true, user });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/users/:id', requireSuper, (req, res) => {
+  try {
+    const patch = {};
+    if (req.body.password != null && String(req.body.password).length > 0) {
+      patch.password = req.body.password;
+    }
+    if (req.body.permissions != null) {
+      patch.permissions = req.body.permissions;
+    }
+    const user = usersStore.updateUser(req.params.id, patch);
+    res.json({ success: true, user });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/users/:id', requireSuper, (req, res) => {
+  try {
+    usersStore.deleteUser(req.params.id);
+    res.json({ success: true, message: 'Usuario eliminado' });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
 
 // Ruta principal - servir la interfaz web
 app.get('/', (req, res) => {
@@ -719,11 +798,20 @@ app.get('/cvs-status', (req, res) => {
 
 // Ruta para obtener configuración del sistema
 app.get('/config', (req, res) => {
+  const sessions = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
   res.json({
     success: true,
     testMode: TEST_MODE,
     whatsappProvider: 'openwa',
-    sessions: sessionsStore.getAllSessions(),
+    sessions,
+    user: req.user
+      ? {
+          username: req.user.username,
+          role: req.user.role,
+          isSuper: req.user.isSuper,
+          permissions: req.user.permissions || {}
+        }
+      : null,
     autoReply: autoReplyService.getStatus(),
     message: TEST_MODE
       ? 'Sistema en modo de prueba - los mensajes se simularán'
@@ -735,13 +823,14 @@ app.get('/config', (req, res) => {
 
 app.get('/api/sessions', (req, res) => {
   try {
-    res.json({ success: true, sessions: sessionsStore.getAllSessions() });
+    const sessions = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
+    res.json({ success: true, sessions });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-app.post('/api/sessions', async (req, res) => {
+app.post('/api/sessions', requireSuper, async (req, res) => {
   try {
     const openwaSessionId = String(req.body.openwaSessionId || '').trim();
     if (!openwaSessionId) {
@@ -771,7 +860,7 @@ app.post('/api/sessions', async (req, res) => {
   }
 });
 
-app.put('/api/sessions/:id', (req, res) => {
+app.put('/api/sessions/:id', requireSuper, (req, res) => {
   try {
     const session = sessionsStore.updateSession(req.params.id, {
       label: req.body.label,
@@ -784,7 +873,7 @@ app.put('/api/sessions/:id', (req, res) => {
   }
 });
 
-app.post('/api/sessions/:id/sync-sender-name', async (req, res) => {
+app.post('/api/sessions/:id/sync-sender-name', requireSuper, async (req, res) => {
   try {
     const logicalId = req.params.id;
     const session = sessionsStore.getSession(logicalId);
@@ -808,10 +897,11 @@ app.post('/api/sessions/:id/sync-sender-name', async (req, res) => {
   }
 });
 
-app.delete('/api/sessions/:id', (req, res) => {
+app.delete('/api/sessions/:id', requireSuper, (req, res) => {
   try {
     const logicalId = req.params.id;
     sessionsStore.removeSession(logicalId);
+    usersStore.removeSessionFromAllUsers(logicalId);
     const cached = whatsappServices.get(logicalId);
     if (cached) {
       cached.close().catch(() => {});
@@ -823,7 +913,7 @@ app.delete('/api/sessions/:id', (req, res) => {
   }
 });
 
-app.get('/api/openwa/sessions', async (req, res) => {
+app.get('/api/openwa/sessions', requireSuper, async (req, res) => {
   try {
     const status = req.query.status ? String(req.query.status) : undefined;
     const sessions = await listOpenWASessions({ status, limit: 100 });
@@ -833,7 +923,7 @@ app.get('/api/openwa/sessions', async (req, res) => {
   }
 });
 
-app.post('/api/sessions/import-connected', async (req, res) => {
+app.post('/api/sessions/import-connected', requireSuper, async (req, res) => {
   try {
     const remote = await listOpenWASessions({ limit: 100 });
     const connected = remote.filter((s) => isConnectedStatus(s.status));
@@ -975,7 +1065,11 @@ app.post('/send-whatsapp', async (req, res) => {
       });
     }
 
-    const configuredIds = getConfiguredSessionIds();
+    const configuredIds = filterSessionsForUser(
+      req.user,
+      sessionsStore.getAllSessions(),
+      'control'
+    ).map((s) => s.id);
     const selectedSessions =
       Array.isArray(req.body.selectedSessions) && req.body.selectedSessions.length > 0
         ? req.body.selectedSessions.map((id) => String(id)).filter(Boolean)
@@ -988,6 +1082,10 @@ app.post('/send-whatsapp', async (req, res) => {
         success: false,
         error: 'No hay sesiones configuradas. Agrega sesiones en la interfaz web.'
       });
+    }
+
+    if (!forbidUnlessControlSessions(selectedSessions || [], req, res)) {
+      return;
     }
 
     const sessionIds = TEST_MODE
@@ -1061,7 +1159,11 @@ app.post('/open-whatsapp', async (req, res) => {
     const openAllSessions = req.body.openAllSessions === true;
     /** @type {string[]} */
     let sessionIds;
-    const configuredIds = getConfiguredSessionIds();
+    const configuredIds = filterSessionsForUser(
+      req.user,
+      sessionsStore.getAllSessions(),
+      'control'
+    ).map((s) => s.id);
     if (openAllSessions) {
       sessionIds = configuredIds.length > 0 ? [...configuredIds] : [];
       if (sessionIds.length === 0) {
@@ -1073,6 +1175,10 @@ app.post('/open-whatsapp', async (req, res) => {
       sessionIds = req.body.sessionIds.map((id) => String(id)).filter(Boolean);
     } else {
       sessionIds = [req.body.sessionId || 'session1'];
+    }
+
+    if (!forbidUnlessControlSessions(sessionIds, req, res)) {
+      return;
     }
 
     /** @returns {Promise<{ sessionId: string, success: boolean, skippedAlreadyOpen?: boolean, message?: string, openwaSessionId?: string, status?: string }>} */
@@ -1206,6 +1312,17 @@ app.post('/clear-data', (req, res) => {
   });
 });
 
+function assertSendingControl(req, res, sessionId) {
+  if (sessionId === ROUND_ROBIN_CONTROL_ID) {
+    const activeIds = [...sessionStates.entries()]
+      .filter(([, state]) => state.sendingInProgress)
+      .map(([id]) => id);
+    if (activeIds.length === 0) return true;
+    return forbidUnlessControlSessions(activeIds, req, res);
+  }
+  return forbidUnlessControlSessions([sessionId], req, res);
+}
+
 // Ruta para pausar envíos (solo en producción)
 app.post('/pause-sending', (req, res) => {
   if (TEST_MODE) {
@@ -1215,6 +1332,7 @@ app.post('/pause-sending', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+  if (!assertSendingControl(req, res, sessionId)) return;
 
   if (sessionId === ROUND_ROBIN_CONTROL_ID) {
     let pausedAny = false;
@@ -1257,6 +1375,7 @@ app.post('/resume-sending', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+  if (!assertSendingControl(req, res, sessionId)) return;
 
   if (sessionId === ROUND_ROBIN_CONTROL_ID) {
     let resumedAny = false;
@@ -1299,6 +1418,7 @@ app.post('/abort-sending', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+  if (!assertSendingControl(req, res, sessionId)) return;
 
   if (sessionId === ROUND_ROBIN_CONTROL_ID) {
     const hadActive = [...sessionStates.values()].some((s) => s.sendingInProgress);
@@ -1337,6 +1457,7 @@ app.post('/pause-time', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+  if (!assertSendingControl(req, res, sessionId)) return;
 
   if (sessionId === ROUND_ROBIN_CONTROL_ID) {
     let pausedAny = false;
@@ -1378,6 +1499,7 @@ app.post('/resume-time', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+  if (!assertSendingControl(req, res, sessionId)) return;
 
   if (sessionId === ROUND_ROBIN_CONTROL_ID) {
     let resumedAny = false;
@@ -1419,6 +1541,7 @@ app.post('/skip-wait', (req, res) => {
   }
 
   const sessionId = req.body.sessionId || 'default';
+  if (!assertSendingControl(req, res, sessionId)) return;
 
   if (sessionId === ROUND_ROBIN_CONTROL_ID) {
     let skippedAny = false;
@@ -1552,10 +1675,26 @@ app.post('/api/webhooks/openwa', async (req, res) => {
 
 app.get('/api/incoming-messages', (req, res) => {
   try {
-    const messages = incomingMessagesStore.list({
+    const requestedSession = req.query.sessionId ? String(req.query.sessionId) : '';
+    if (requestedSession && !forbidUnlessViewSession(requestedSession, req, res)) {
+      return;
+    }
+
+    let messages = incomingMessagesStore.list({
       limit: req.query.limit,
-      sessionId: req.query.sessionId
+      sessionId: requestedSession || undefined
     });
+
+    if (!req.user?.isSuper) {
+      const allowed = new Set(
+        filterSessionsForUser(req.user, sessionsStore.getAllSessions()).map((s) => s.id)
+      );
+      messages = messages.filter((m) => {
+        const sid = m.sessionId || m.logicalSessionId;
+        return sid && allowed.has(sid);
+      });
+    }
+
     res.json({ success: true, messages, total: messages.length });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -1564,6 +1703,19 @@ app.get('/api/incoming-messages', (req, res) => {
 
 app.delete('/api/incoming-messages', (req, res) => {
   try {
+    if (!req.user?.isSuper) {
+      const hasControl = filterSessionsForUser(
+        req.user,
+        sessionsStore.getAllSessions(),
+        'control'
+      ).length > 0;
+      if (!hasControl) {
+        return res.status(403).json({
+          success: false,
+          error: 'No tienes permiso para limpiar la bandeja'
+        });
+      }
+    }
     incomingMessagesStore.clear();
     res.json({ success: true, message: 'Bandeja limpiada' });
   } catch (error) {
@@ -1586,9 +1738,17 @@ app.get('/api/conversations', async (req, res) => {
   try {
     const rawSession = String(req.query.sessionId || '').trim();
     const wantAll = !rawSession || rawSession === 'all';
-    const sessions = wantAll
+    const baseSessions = wantAll
       ? sessionsStore.getAllSessions()
       : [resolveConfiguredSession(rawSession)].filter(Boolean);
+    const sessions = filterSessionsForUser(req.user, baseSessions);
+
+    if (!wantAll && rawSession && sessions.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: `No tienes acceso a la sesión "${rawSession}"`
+      });
+    }
 
     if (!sessions.length) {
       return res.status(400).json({
@@ -1678,6 +1838,10 @@ app.post('/api/conversations/reply', async (req, res) => {
       });
     }
 
+    if (!forbidUnlessControlSessions([session.id], req, res)) {
+      return;
+    }
+
     const chatId = String(req.body.chatId || '').trim();
     const text = String(req.body.text || '').trim();
     if (!chatId) {
@@ -1719,6 +1883,10 @@ app.get('/api/conversations/:chatId/messages', async (req, res) => {
         success: false,
         error: 'Indica sessionId de una sesión configurada'
       });
+    }
+
+    if (!forbidUnlessViewSession(session.id, req, res)) {
+      return;
     }
 
     const chatId = decodeURIComponent(req.params.chatId || '');
@@ -1766,7 +1934,7 @@ app.get('/api/auto-reply/config', (req, res) => {
   }
 });
 
-app.put('/api/auto-reply/config', (req, res) => {
+app.put('/api/auto-reply/config', requireSuper, (req, res) => {
   try {
     const config = autoReplyStore.updateConfig({
       enabled: req.body.enabled,
@@ -1779,7 +1947,7 @@ app.put('/api/auto-reply/config', (req, res) => {
   }
 });
 
-app.post('/api/auto-reply/activate', async (req, res) => {
+app.post('/api/auto-reply/activate', requireSuper, async (req, res) => {
   try {
     const status = autoReplyService.getStatus();
     if (!status.canListen) {
@@ -1796,7 +1964,7 @@ app.post('/api/auto-reply/activate', async (req, res) => {
   }
 });
 
-app.post('/api/auto-reply/deactivate', async (req, res) => {
+app.post('/api/auto-reply/deactivate', requireSuper, async (req, res) => {
   try {
     const results = await autoReplyService.deactivateWebhooks();
     res.json({ success: true, results });
@@ -1805,7 +1973,7 @@ app.post('/api/auto-reply/deactivate', async (req, res) => {
   }
 });
 
-app.post('/api/auto-reply/test', async (req, res) => {
+app.post('/api/auto-reply/test', requireSuper, async (req, res) => {
   try {
     const openwaSessionId =
       req.body.openwaSessionId ||

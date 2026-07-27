@@ -5,19 +5,27 @@ class CVAnalyzer {
         this.testMode = false;
         this.whatsappProvider = 'openwa';
         this.configuredSessions = [];
+        this.currentUser = window.__pendingAuthUser || null;
+        this.managedUsers = [];
         this.eventSource = null;
         this.sendJobCompleted = null;
         this.initializeElements();
         this.initAutoReplyElements();
+        this.initUsersElements();
         this.attachEventListeners();
         this.setupSendingControls();
-        this.loadConfig().then(() => {
-            this.loadSessions();
+        this.applyPermissionUI();
+        this.loadConfig().then(async () => {
+            await this.loadSessions();
             this.loadAutoReplyConfig();
             this.loadAutoReplyStatus();
             this.loadIncomingInbox();
             this.connectToEvents();
+            if (this.isSuperUser()) {
+                this.loadUsers();
+            }
         });
+        window.cvAnalyzer = this;
     }
 
     initializeElements() {
@@ -95,6 +103,81 @@ class CVAnalyzer {
             this.abortAllSessionsBtn.addEventListener('click', () => this.abortSending('__roundrobin__'));
         }
         this.attachAutoReplyListeners();
+        if (this.createUserForm) {
+            this.createUserForm.addEventListener('submit', (event) => {
+                event.preventDefault();
+                this.createUser();
+            });
+        }
+    }
+
+    initUsersElements() {
+        this.usersPanel = document.getElementById('usersPanel');
+        this.usersList = document.getElementById('usersList');
+        this.createUserForm = document.getElementById('createUserForm');
+        this.newUserUsername = document.getElementById('newUserUsername');
+        this.newUserPassword = document.getElementById('newUserPassword');
+        this.newUserPermissions = document.getElementById('newUserPermissions');
+        this.usersFormStatus = document.getElementById('usersFormStatus');
+        this.sessionsAddForm = document.querySelector('.sessions-add-form');
+        this.autoReplyPanel = document.getElementById('autoReplyPanel');
+    }
+
+    setCurrentUser(user) {
+        this.currentUser = user || null;
+        this.applyPermissionUI();
+        if (this.isSuperUser()) {
+            this.loadUsers();
+        }
+        this.renderSessionUI();
+        this.renderNewUserPermissions();
+    }
+
+    isSuperUser() {
+        return Boolean(this.currentUser && this.currentUser.isSuper);
+    }
+
+    getSessionAccess(sessionId) {
+        if (this.isSuperUser()) return 'control';
+        const session = (this.configuredSessions || []).find((s) => s.id === sessionId);
+        if (session && session.access) return session.access;
+        const perms = (this.currentUser && this.currentUser.permissions) || {};
+        return perms[sessionId] || null;
+    }
+
+    canControlSession(sessionId) {
+        return this.getSessionAccess(sessionId) === 'control';
+    }
+
+    getControllableSessions() {
+        return (this.configuredSessions || []).filter((s) => this.canControlSession(s.id));
+    }
+
+    applyPermissionUI() {
+        const isSuper = this.isSuperUser();
+        const hasControl = this.getControllableSessions().length > 0 || isSuper;
+
+        if (this.usersPanel) {
+            this.usersPanel.style.display = isSuper ? 'block' : 'none';
+        }
+        if (this.sessionsAddForm) {
+            this.sessionsAddForm.style.display = isSuper ? 'flex' : 'none';
+        }
+        if (this.openWhatsAppBtn) {
+            this.openWhatsAppBtn.style.display = hasControl ? '' : 'none';
+        }
+        if (this.autoReplyPanel) {
+            this.autoReplyPanel.style.display = isSuper ? '' : 'none';
+        }
+
+        const uploadSection = document.querySelector('.upload-section');
+        const resultsSection = document.getElementById('resultsSection');
+        if (!hasControl) {
+            if (uploadSection) uploadSection.style.display = 'none';
+            if (resultsSection) resultsSection.style.display = 'none';
+        } else if (uploadSection) {
+            uploadSection.style.display = '';
+        }
     }
 
     initAutoReplyElements() {
@@ -132,6 +215,11 @@ class CVAnalyzer {
         this.conversationsUnreadOnly = false;
         this._conversationsRefreshTimer = null;
         this._conversationsLoadInFlight = false;
+        this._conversationsListPollTimer = null;
+        this._conversationsThreadPollTimer = null;
+        this._conversationsThreadLoadInFlight = false;
+        this._conversationsListPollMs = 5000;
+        this._conversationsThreadPollMs = 3000;
     }
 
     attachAutoReplyListeners() {
@@ -379,12 +467,19 @@ class CVAnalyzer {
     }
 
     setConversationsReplyEnabled(enabled) {
+        const canReply =
+            enabled &&
+            this.activeConversation &&
+            this.canControlSession(this.activeConversation.sessionId);
         if (this.conversationsReplyInput) {
-            this.conversationsReplyInput.disabled = !enabled;
-            if (!enabled) this.conversationsReplyInput.value = '';
+            this.conversationsReplyInput.disabled = !canReply;
+            if (!canReply) this.conversationsReplyInput.value = '';
+            this.conversationsReplyInput.placeholder = canReply
+                ? 'Escribe una respuesta…'
+                : 'Solo lectura en esta sesión';
         }
         if (this.conversationsReplyBtn) {
-            this.conversationsReplyBtn.disabled = !enabled;
+            this.conversationsReplyBtn.disabled = !canReply;
         }
     }
 
@@ -418,13 +513,45 @@ class CVAnalyzer {
         return this.conversationsChats.filter((c) => (Number(c.unreadCount) || 0) > 0);
     }
 
-    scheduleConversationsRefresh(delayMs = 1200) {
+    scheduleConversationsRefresh(delayMs = 600) {
         if (!this.conversationsEverLoaded) return;
         if (this._conversationsRefreshTimer) clearTimeout(this._conversationsRefreshTimer);
         this._conversationsRefreshTimer = setTimeout(() => {
             this._conversationsRefreshTimer = null;
             this.loadConversationsChats({ silent: true });
+            if (this.activeConversation) {
+                this.refreshActiveConversationMessages({ silent: true });
+            }
         }, delayMs);
+    }
+
+    startConversationsPolling() {
+        if (!this._conversationsListPollTimer) {
+            this._conversationsListPollTimer = setInterval(() => {
+                if (document.hidden) return;
+                if (!this.conversationsEverLoaded) return;
+                this.loadConversationsChats({ silent: true });
+            }, this._conversationsListPollMs);
+        }
+
+        if (!this._conversationsThreadPollTimer) {
+            this._conversationsThreadPollTimer = setInterval(() => {
+                if (document.hidden) return;
+                if (!this.activeConversation) return;
+                this.refreshActiveConversationMessages({ silent: true });
+            }, this._conversationsThreadPollMs);
+        }
+    }
+
+    stopConversationsPolling() {
+        if (this._conversationsListPollTimer) {
+            clearInterval(this._conversationsListPollTimer);
+            this._conversationsListPollTimer = null;
+        }
+        if (this._conversationsThreadPollTimer) {
+            clearInterval(this._conversationsThreadPollTimer);
+            this._conversationsThreadPollTimer = null;
+        }
     }
 
     sameConversationChatId(a, b) {
@@ -594,6 +721,7 @@ class CVAnalyzer {
 
             this.conversationsChats = data.chats || [];
             this.conversationsEverLoaded = true;
+            this.startConversationsPolling();
             if (this.activeConversation) {
                 const active = this.conversationsChats.find(
                     (c) =>
@@ -707,45 +835,86 @@ class CVAnalyzer {
         if (this.conversationsThreadMessages) {
             this.conversationsThreadMessages.innerHTML =
                 '<p class="auto-reply-empty">Cargando historial…</p>';
+            delete this.conversationsThreadMessages.dataset.lastMessagesHtml;
         }
         if (this.conversationsReplyInput) {
             this.conversationsReplyInput.focus();
         }
 
+        await this.refreshActiveConversationMessages({ silent: false });
+    }
+
+    async refreshActiveConversationMessages(options = {}) {
+        const silent = Boolean(options.silent);
+        const active = this.activeConversation;
+        if (!active || !active.chatId || !active.sessionId) return;
+        if (silent && this._conversationsThreadLoadInFlight) return;
+
+        this._conversationsThreadLoadInFlight = true;
+        const requestKey = `${active.sessionId}::${active.chatId}`;
+
         try {
             const response = await fetch(
-                `/api/conversations/${encodeURIComponent(chat.id)}/messages?sessionId=${encodeURIComponent(chat.sessionId)}&limit=80`
+                `/api/conversations/${encodeURIComponent(active.chatId)}/messages?sessionId=${encodeURIComponent(active.sessionId)}&limit=80`
             );
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo cargar el historial');
-            this.renderConversationMessages(data.messages || []);
+
+            // Si el usuario cambió de chat mientras cargaba, descartar.
+            if (
+                !this.activeConversation ||
+                `${this.activeConversation.sessionId}::${this.activeConversation.chatId}` !==
+                    requestKey
+            ) {
+                return;
+            }
+
+            this.renderConversationMessages(data.messages || [], { preserveScroll: silent });
         } catch (error) {
-            if (this.conversationsThreadMessages) {
+            if (!silent && this.conversationsThreadMessages) {
                 this.conversationsThreadMessages.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;
             }
+        } finally {
+            this._conversationsThreadLoadInFlight = false;
         }
     }
 
-    renderConversationMessages(messages) {
+    renderConversationMessages(messages, options = {}) {
         if (!this.conversationsThreadMessages) return;
+        const preserveScroll = Boolean(options.preserveScroll);
+        const el = this.conversationsThreadMessages;
+        const nearBottom =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        const prevScrollTop = el.scrollTop;
+
         if (!messages.length) {
-            this.conversationsThreadMessages.innerHTML =
-                '<p class="auto-reply-empty">Sin mensajes en este chat.</p>';
+            el.innerHTML = '<p class="auto-reply-empty">Sin mensajes en este chat.</p>';
             return;
         }
 
-        this.conversationsThreadMessages.innerHTML = '';
-        messages.forEach((msg) => {
-            const bubble = document.createElement('div');
-            bubble.className = `conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}`;
-            const time = this.formatConversationTime(msg.timestamp);
-            bubble.innerHTML = `
-                ${this.escapeHtml(msg.body || '')}
-                ${time ? `<span class="bubble-time">${this.escapeHtml(time)}</span>` : ''}
-            `;
-            this.conversationsThreadMessages.appendChild(bubble);
-        });
-        this.conversationsThreadMessages.scrollTop = this.conversationsThreadMessages.scrollHeight;
+        const nextHtml = messages
+            .map((msg) => {
+                const time = this.formatConversationTime(msg.timestamp);
+                return `
+                <div class="conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}">
+                    ${this.escapeHtml(msg.body || '')}
+                    ${time ? `<span class="bubble-time">${this.escapeHtml(time)}</span>` : ''}
+                </div>`;
+            })
+            .join('');
+
+        // Evita re-render innecesario (menos parpadeo en el poll).
+        if (el.dataset.lastMessagesHtml === nextHtml) {
+            return;
+        }
+        el.dataset.lastMessagesHtml = nextHtml;
+        el.innerHTML = nextHtml;
+
+        if (preserveScroll && !nearBottom) {
+            el.scrollTop = prevScrollTop;
+        } else {
+            el.scrollTop = el.scrollHeight;
+        }
     }
 
     async sendConversationReply() {
@@ -1214,25 +1383,29 @@ class CVAnalyzer {
 
     renderSessionUI() {
         const sessions = this.configuredSessions || [];
+        const controllable = this.getControllableSessions();
+        const isSuper = this.isSuperUser();
 
         if (this.sessionSelect) {
             const prev = this.sessionSelect.value;
             this.sessionSelect.innerHTML = '';
-            if (sessions.length === 0) {
+            if (controllable.length === 0) {
                 const opt = document.createElement('option');
                 opt.value = '';
-                opt.textContent = 'Sin sesiones configuradas';
+                opt.textContent = sessions.length
+                    ? 'Sin sesiones con control'
+                    : 'Sin sesiones configuradas';
                 this.sessionSelect.appendChild(opt);
                 this.sessionSelect.disabled = true;
             } else {
                 this.sessionSelect.disabled = false;
-                sessions.forEach((s) => {
+                controllable.forEach((s) => {
                     const opt = document.createElement('option');
                     opt.value = s.id;
                     opt.textContent = s.label;
                     this.sessionSelect.appendChild(opt);
                 });
-                if (prev && sessions.some((s) => s.id === prev)) {
+                if (prev && controllable.some((s) => s.id === prev)) {
                     this.sessionSelect.value = prev;
                 }
             }
@@ -1249,7 +1422,7 @@ class CVAnalyzer {
             this.sessionCheckboxes.innerHTML = '';
             if (!this._sessionWeightValues) this._sessionWeightValues = {};
 
-            sessions.forEach((s, index) => {
+            controllable.forEach((s, index) => {
                 const row = document.createElement('div');
                 row.className = 'session-send-row';
                 row.dataset.sessionId = s.id;
@@ -1280,8 +1453,8 @@ class CVAnalyzer {
                 weightInput.title = 'Porcentaje de mensajes para esta línea';
 
                 if (this._sessionWeightValues[s.id] == null) {
-                    const equalShare = sessions.length > 0 ? Math.floor(100 / sessions.length) : 100;
-                    const extra = index < 100 % Math.max(sessions.length, 1) ? 1 : 0;
+                    const equalShare = controllable.length > 0 ? Math.floor(100 / controllable.length) : 100;
+                    const extra = index < 100 % Math.max(controllable.length, 1) ? 1 : 0;
                     this._sessionWeightValues[s.id] = equalShare + extra;
                 }
                 weightInput.value = String(this._sessionWeightValues[s.id]);
@@ -1318,8 +1491,18 @@ class CVAnalyzer {
                     '<p style="color:#64748b;font-size:13px;">Aún no hay sesiones guardadas.</p>';
             } else {
                 this.sessionsList.innerHTML = sessions
-                    .map(
-                        (s) => `
+                    .map((s) => {
+                        const access = s.access || this.getSessionAccess(s.id) || 'view';
+                        const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
+                        if (!isSuper) {
+                            return `
+                    <div class="session-row" data-session-id="${s.id}" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
+                        <strong style="min-width:120px;">${this.escapeHtml(s.label)}</strong>
+                        <span class="session-access-badge session-access-${access}">${accessLabel}</span>
+                        <code style="font-size:12px;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${this.escapeHtml(s.openwaSessionId)}</code>
+                    </div>`;
+                        }
+                        return `
                     <div class="session-row" data-session-id="${s.id}" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
                         <strong style="min-width:120px;">${this.escapeHtml(s.label)}</strong>
                         <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1;min-width:200px;">
@@ -1330,25 +1513,30 @@ class CVAnalyzer {
                         </div>
                         <code style="font-size:12px;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${this.escapeHtml(s.openwaSessionId)}</code>
                         <button type="button" class="btn btn-danger btn-sm remove-session-btn" data-id="${s.id}" style="padding:4px 10px;font-size:12px;">Quitar</button>
-                    </div>`
-                    )
+                    </div>`;
+                    })
                     .join('');
 
-                this.sessionsList.querySelectorAll('.remove-session-btn').forEach((btn) => {
-                    btn.addEventListener('click', () => this.removeSession(btn.dataset.id));
-                });
-                this.sessionsList.querySelectorAll('.save-sender-btn').forEach((btn) => {
-                    btn.addEventListener('click', () => this.saveSessionSenderName(btn.dataset.id));
-                });
-                this.sessionsList.querySelectorAll('.sync-sender-btn').forEach((btn) => {
-                    btn.addEventListener('click', () => this.syncSessionSenderName(btn.dataset.id));
-                });
+                if (isSuper) {
+                    this.sessionsList.querySelectorAll('.remove-session-btn').forEach((btn) => {
+                        btn.addEventListener('click', () => this.removeSession(btn.dataset.id));
+                    });
+                    this.sessionsList.querySelectorAll('.save-sender-btn').forEach((btn) => {
+                        btn.addEventListener('click', () => this.saveSessionSenderName(btn.dataset.id));
+                    });
+                    this.sessionsList.querySelectorAll('.sync-sender-btn').forEach((btn) => {
+                        btn.addEventListener('click', () => this.syncSessionSenderName(btn.dataset.id));
+                    });
+                }
             }
         }
 
         if (this.sessionsEmptyHint) {
             this.sessionsEmptyHint.style.display = sessions.length === 0 ? 'block' : 'none';
         }
+
+        this.applyPermissionUI();
+        this.renderNewUserPermissions();
     }
 
     escapeHtml(str) {
@@ -1372,8 +1560,193 @@ class CVAnalyzer {
             console.error('Error cargando sesiones:', error);
         }
 
-        if (!this.testMode) {
+        if (!this.testMode && this.isSuperUser()) {
             this.loadOpenWASessionPicker();
+        }
+    }
+
+    collectPermissionsFromForm(container) {
+        /** @type {Record<string, string>} */
+        const permissions = {};
+        if (!container) return permissions;
+        container.querySelectorAll('.user-perm-select').forEach((select) => {
+            const sessionId = select.dataset.sessionId;
+            const value = String(select.value || '').trim();
+            if (sessionId && (value === 'view' || value === 'control')) {
+                permissions[sessionId] = value;
+            }
+        });
+        return permissions;
+    }
+
+    renderNewUserPermissions() {
+        if (!this.newUserPermissions) return;
+        const sessions = this.isSuperUser()
+            ? this.configuredSessions || []
+            : [];
+        if (!sessions.length) {
+            this.newUserPermissions.innerHTML =
+                '<p style="font-size:13px;color:#64748b;">Primero agrega sesiones WhatsApp para poder asignar permisos.</p>';
+            return;
+        }
+        this.newUserPermissions.innerHTML = `
+            <p style="font-size:13px;color:#64748b;margin:8px 0;">Permisos por sesión:</p>
+            ${sessions
+                .map(
+                    (s) => `
+                <div class="user-perm-row">
+                    <span class="user-perm-label">${this.escapeHtml(s.label || s.id)}</span>
+                    <select class="form-select user-perm-select" data-session-id="${this.escapeHtml(s.id)}">
+                        <option value="">Sin acceso</option>
+                        <option value="view">Solo ver</option>
+                        <option value="control">Controlar</option>
+                    </select>
+                </div>`
+                )
+                .join('')}
+        `;
+    }
+
+    async loadUsers() {
+        if (!this.isSuperUser() || !this.usersList) return;
+        try {
+            const response = await fetch('/api/users');
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudieron cargar usuarios');
+            this.managedUsers = data.users || [];
+            this.renderUsersList();
+        } catch (error) {
+            this.usersList.innerHTML = `<p style="color:#b91c1c;font-size:13px;">Error: ${this.escapeHtml(error.message)}</p>`;
+        }
+    }
+
+    renderUsersList() {
+        if (!this.usersList) return;
+        const users = this.managedUsers || [];
+        const sessions = this.configuredSessions || [];
+
+        if (!users.length) {
+            this.usersList.innerHTML =
+                '<p style="font-size:13px;color:#64748b;">Aún no hay usuarios creados.</p>';
+            return;
+        }
+
+        this.usersList.innerHTML = users
+            .map((user) => {
+                const perms = user.permissions || {};
+                const permRows = sessions
+                    .map((s) => {
+                        const current = perms[s.id] || '';
+                        return `
+                        <div class="user-perm-row">
+                            <span class="user-perm-label">${this.escapeHtml(s.label || s.id)}</span>
+                            <select class="form-select user-perm-select" data-user-id="${this.escapeHtml(user.id)}" data-session-id="${this.escapeHtml(s.id)}">
+                                <option value="" ${!current ? 'selected' : ''}>Sin acceso</option>
+                                <option value="view" ${current === 'view' ? 'selected' : ''}>Solo ver</option>
+                                <option value="control" ${current === 'control' ? 'selected' : ''}>Controlar</option>
+                            </select>
+                        </div>`;
+                    })
+                    .join('');
+
+                return `
+                <div class="user-card" data-user-id="${this.escapeHtml(user.id)}">
+                    <div class="user-card-header">
+                        <strong>${this.escapeHtml(user.username)}</strong>
+                        <button type="button" class="btn btn-danger btn-sm delete-user-btn" data-id="${this.escapeHtml(user.id)}">Eliminar</button>
+                    </div>
+                    <div class="user-card-perms">${permRows || '<p style="font-size:12px;color:#64748b;">No hay sesiones para asignar.</p>'}</div>
+                    <div class="user-card-actions">
+                        <input type="password" class="form-select user-password-input" data-id="${this.escapeHtml(user.id)}" placeholder="Nueva contraseña (opcional)" autocomplete="new-password">
+                        <button type="button" class="btn btn-secondary btn-sm save-user-btn" data-id="${this.escapeHtml(user.id)}">Guardar cambios</button>
+                    </div>
+                </div>`;
+            })
+            .join('');
+
+        this.usersList.querySelectorAll('.delete-user-btn').forEach((btn) => {
+            btn.addEventListener('click', () => this.deleteUser(btn.dataset.id));
+        });
+        this.usersList.querySelectorAll('.save-user-btn').forEach((btn) => {
+            btn.addEventListener('click', () => this.saveUser(btn.dataset.id));
+        });
+    }
+
+    async createUser() {
+        if (!this.isSuperUser()) return;
+        const username = this.newUserUsername ? this.newUserUsername.value.trim() : '';
+        const password = this.newUserPassword ? this.newUserPassword.value : '';
+        const permissions = this.collectPermissionsFromForm(this.newUserPermissions);
+
+        try {
+            const response = await fetch('/api/users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, permissions })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo crear');
+
+            if (this.newUserUsername) this.newUserUsername.value = '';
+            if (this.newUserPassword) this.newUserPassword.value = '';
+            this.renderNewUserPermissions();
+            if (this.usersFormStatus) {
+                this.usersFormStatus.textContent = `Usuario "${username}" creado`;
+                this.usersFormStatus.style.color = '#15803d';
+            }
+            await this.loadUsers();
+        } catch (error) {
+            if (this.usersFormStatus) {
+                this.usersFormStatus.textContent = error.message;
+                this.usersFormStatus.style.color = '#b91c1c';
+            }
+        }
+    }
+
+    async saveUser(userId) {
+        if (!this.isSuperUser() || !this.usersList) return;
+        const card = this.usersList.querySelector(`.user-card[data-user-id="${userId}"]`);
+        if (!card) return;
+
+        const passwordInput = card.querySelector('.user-password-input');
+        const password = passwordInput ? passwordInput.value : '';
+        const permissions = this.collectPermissionsFromForm(card);
+
+        try {
+            const response = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    permissions,
+                    ...(password ? { password } : {})
+                })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo guardar');
+            if (passwordInput) passwordInput.value = '';
+            this.showStatus(`Usuario actualizado`, 'success');
+            await this.loadUsers();
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async deleteUser(userId) {
+        if (!this.isSuperUser()) return;
+        const user = (this.managedUsers || []).find((u) => u.id === userId);
+        const name = user ? user.username : userId;
+        if (!confirm(`¿Eliminar al usuario "${name}"?`)) return;
+
+        try {
+            const response = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+                method: 'DELETE'
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo eliminar');
+            this.showStatus(`Usuario "${name}" eliminado`, 'success');
+            await this.loadUsers();
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
         }
     }
 
@@ -1541,10 +1914,14 @@ class CVAnalyzer {
             if (config.success) {
                 this.testMode = config.testMode;
                 this.whatsappProvider = config.whatsappProvider || 'openwa';
+                if (config.user) {
+                    this.currentUser = config.user;
+                }
                 if (Array.isArray(config.sessions)) {
                     this.configuredSessions = config.sessions;
                     this.renderSessionUI();
                 }
+                this.applyPermissionUI();
                 this.updateTestModeDisplay();
             }
         } catch (error) {
@@ -3050,6 +3427,7 @@ class CVAnalyzer {
             this.eventSource.close();
             this.eventSource = null;
         }
+        this.stopConversationsPolling();
     }
 }
 

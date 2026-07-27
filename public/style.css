@@ -1356,3 +1356,105 @@ footer p {
     font-size: 13px;
     font-style: italic;
 }
+
+/* Usuarios y permisos */
+.users-panel .users-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.user-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #f8fafc;
+    padding: 14px;
+}
+
+.user-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.user-card-perms,
+.users-permissions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.user-perm-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.user-perm-label {
+    font-size: 13px;
+    color: #334155;
+    min-width: 140px;
+}
+
+.user-perm-select {
+    min-width: 160px;
+    padding: 6px 8px;
+}
+
+.user-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+    align-items: center;
+}
+
+.user-password-input {
+    flex: 1;
+    min-width: 180px;
+    padding: 8px;
+}
+
+.users-create-form {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.users-create-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.users-create-row .form-select {
+    flex: 1;
+    min-width: 160px;
+    padding: 8px;
+}
+
+.users-form-status {
+    margin-top: 8px;
+    font-size: 13px;
+}
+
+.session-access-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+}
+
+.session-access-control {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.session-access-view {
+    background: #e0f2fe;
+    color: #075985;
+}
