@@ -1227,7 +1227,7 @@ class CVAnalyzer {
         return Number.isFinite(stored) && stored > 0 ? stored : null;
     }
 
-    /** Ponderaciones % solo de sesiones seleccionadas */
+    /** Cantidades exactas de mensajes solo de sesiones seleccionadas */
     getSelectedSessionWeights() {
         const weights = {};
         if (!this.sessionCheckboxes) return weights;
@@ -1236,19 +1236,35 @@ class CVAnalyzer {
             const cb = row.querySelector('.session-send-checkbox');
             const input = row.querySelector('.session-weight-input');
             if (!cb || !input || !cb.checked) return;
-            const value = parseFloat(String(input.value).replace(',', '.'));
+            const value = parseInt(String(input.value).replace(',', '.'), 10);
             weights[cb.value] = Number.isFinite(value) && value > 0 ? value : 0;
         });
 
         return weights;
     }
 
+    getReadyMessagesCount() {
+        return this.cvsData.filter(
+            (cv) =>
+                cv.procesado &&
+                cv.mensajeIA &&
+                cv.mensajeIA.trim() !== '' &&
+                cv.telefono !== 'No encontrado'
+        ).length;
+    }
+
     distributeSessionWeightsEqually() {
         const selected = this.getSelectedSessionIds();
         if (selected.length === 0) return;
 
-        const base = Math.floor(100 / selected.length);
-        let remainder = 100 - base * selected.length;
+        const total = this.getReadyMessagesCount();
+        if (total <= 0) {
+            this.showStatus('Primero genera los mensajes para repartir cantidades', 'error');
+            return;
+        }
+
+        const base = Math.floor(total / selected.length);
+        let remainder = total - base * selected.length;
 
         selected.forEach((id, index) => {
             const value = base + (index < remainder ? 1 : 0);
@@ -1261,47 +1277,72 @@ class CVAnalyzer {
             if (stored != null) input.value = String(stored);
         });
 
+        this._lastSeededReadyCount = total;
         this.updateSessionWeightUI();
+    }
+
+    /**
+     * Si cambió el total de mensajes listos, o los valores parecen % antiguos,
+     * reparte cantidades exactas automáticamente.
+     */
+    maybeReseedSessionCounts() {
+        const selected = this.getSelectedSessionIds();
+        const total = this.getReadyMessagesCount();
+        if (selected.length === 0 || total <= 0) return;
+
+        const weights = this.getSelectedSessionWeights();
+        const sum = Object.values(weights).reduce((a, b) => a + b, 0);
+        const looksLikeOldPercent =
+            sum === 100 &&
+            total !== 100 &&
+            Object.values(weights).every((w) => w > 0 && w <= 100);
+
+        const totalChanged = this._lastSeededReadyCount !== total;
+        if (!totalChanged && !looksLikeOldPercent) return;
+
+        const base = Math.floor(total / selected.length);
+        let remainder = total - base * selected.length;
+        selected.forEach((id, index) => {
+            if (!this._sessionWeightValues) this._sessionWeightValues = {};
+            this._sessionWeightValues[id] = base + (index < remainder ? 1 : 0);
+        });
+        this.getSessionWeightInputs().forEach((input) => {
+            const sid = input.dataset.sessionId;
+            if (this._sessionWeightValues[sid] != null) {
+                input.value = String(this._sessionWeightValues[sid]);
+            }
+        });
+        this._lastSeededReadyCount = total;
     }
 
     computeWeightDistributionPreview(totalMessages, weightsBySession) {
         const sessionIds = Object.keys(weightsBySession);
         if (sessionIds.length === 0 || totalMessages <= 0) {
-            return sessionIds.map((id) => ({ id, count: 0, pct: 0 }));
+            return sessionIds.map((id) => ({ id, count: 0 }));
         }
 
-        const values = sessionIds.map((id) => weightsBySession[id] || 0);
+        const values = sessionIds.map((id) => Math.floor(weightsBySession[id] || 0));
         const sum = values.reduce((a, b) => a + b, 0);
-        const proportions =
-            sum > 0 ? values.map((v) => v / sum) : values.map(() => 1 / sessionIds.length);
 
-        const raw = proportions.map((p) => p * totalMessages);
-        const counts = raw.map((q) => Math.floor(q));
-        let leftover = totalMessages - counts.reduce((a, b) => a + b, 0);
-        const remainders = raw
-            .map((q, i) => ({ i, r: q - counts[i] }))
-            .sort((a, b) => b.r - a.r || a.i - b.i);
-
-        for (let k = 0; k < leftover; k++) {
-            counts[remainders[k % remainders.length].i]++;
+        if (sum === totalMessages) {
+            return sessionIds.map((id, i) => ({ id, count: values[i] }));
         }
 
-        return sessionIds.map((id, i) => ({
-            id,
-            count: counts[i],
-            pct: Math.round(proportions[i] * 1000) / 10
-        }));
+        // Vista previa si aún no suman el total: muestra lo capturado y avisa en UI.
+        return sessionIds.map((id, i) => ({ id, count: values[i] }));
     }
 
     updateSessionWeightUI() {
         const selected = this.getSelectedSessionIds();
         const multi = selected.length > 1;
+        const cvsCount = this.getReadyMessagesCount();
 
         this.getSessionWeightInputs().forEach((input) => {
             const row = input.closest('.session-send-row');
             const cb = row ? row.querySelector('.session-send-checkbox') : null;
             const enabled = Boolean(cb && cb.checked && multi);
             input.disabled = !enabled;
+            input.max = cvsCount > 0 ? String(cvsCount) : '';
             row?.classList.toggle('session-send-row-disabled', Boolean(cb && !cb.checked));
         });
 
@@ -1316,12 +1357,13 @@ class CVAnalyzer {
             if (!multi) {
                 this.sessionWeightSum.textContent = '';
                 this.sessionWeightSum.className = 'session-weight-sum';
-            } else {
-                const rounded = Math.round(sum * 10) / 10;
-                this.sessionWeightSum.textContent = `Total: ${rounded}%`;
+            } else if (cvsCount > 0) {
+                this.sessionWeightSum.textContent = `Asignados: ${sum} / ${cvsCount}`;
                 this.sessionWeightSum.className =
-                    'session-weight-sum' +
-                    (Math.abs(rounded - 100) > 0.5 ? ' session-weight-sum-warn' : '');
+                    'session-weight-sum' + (sum !== cvsCount ? ' session-weight-sum-warn' : '');
+            } else {
+                this.sessionWeightSum.textContent = `Asignados: ${sum}`;
+                this.sessionWeightSum.className = 'session-weight-sum';
             }
         }
 
@@ -1331,25 +1373,21 @@ class CVAnalyzer {
                 return;
             }
 
-            const cvsCount = this.cvsData.filter(
-                (cv) =>
-                    cv.procesado &&
-                    cv.mensajeIA &&
-                    cv.mensajeIA.trim() !== '' &&
-                    cv.telefono !== 'No encontrado'
-            ).length;
-
             if (cvsCount === 0) {
                 this.sessionWeightPreview.textContent =
-                    'Indica el % de cada línea. Deben sumar 100%.';
+                    'Indica cuántos mensajes enviará cada línea. Deben sumar el total de mensajes listos.';
                 return;
             }
 
             const preview = this.computeWeightDistributionPreview(cvsCount, weights);
             const parts = preview.map(
-                (row) => `${this.getSessionLabel(row.id)}: ${row.count} (${row.pct}%)`
+                (row) => `${this.getSessionLabel(row.id)}: ${row.count}`
             );
-            this.sessionWeightPreview.textContent = `Con ${cvsCount} mensajes → ${parts.join(' · ')}`;
+            const diff = cvsCount - sum;
+            let hint = '';
+            if (diff > 0) hint = ` · faltan ${diff}`;
+            else if (diff < 0) hint = ` · sobran ${Math.abs(diff)}`;
+            this.sessionWeightPreview.textContent = `${cvsCount} mensajes → ${parts.join(' · ')}${hint}`;
         }
     }
 
@@ -1359,18 +1397,19 @@ class CVAnalyzer {
 
         const weights = this.getSelectedSessionWeights();
         const sum = Object.values(weights).reduce((a, b) => a + b, 0);
+        const cvsCount = this.getReadyMessagesCount();
 
         if (Object.values(weights).some((w) => w <= 0)) {
             return {
                 ok: false,
-                message: 'Cada sesión seleccionada debe tener un porcentaje mayor a 0.'
+                message: 'Cada línea seleccionada debe tener al menos 1 mensaje.'
             };
         }
 
-        if (Math.abs(sum - 100) > 0.5) {
+        if (cvsCount > 0 && sum !== cvsCount) {
             return {
                 ok: false,
-                message: `Los porcentajes deben sumar 100% (actualmente suman ${Math.round(sum * 10) / 10}%). Usa "Repartir igual" o ajusta los valores.`
+                message: `Las cantidades deben sumar ${cvsCount} mensajes (actualmente suman ${sum}). Usa "Repartir igual" o ajusta los valores.`
             };
         }
 
@@ -1445,26 +1484,34 @@ class CVAnalyzer {
 
                 const weightInput = document.createElement('input');
                 weightInput.type = 'number';
-                weightInput.min = '1';
-                weightInput.max = '100';
+                weightInput.min = '0';
                 weightInput.step = '1';
                 weightInput.className = 'session-weight-input form-select';
                 weightInput.dataset.sessionId = s.id;
-                weightInput.title = 'Porcentaje de mensajes para esta línea';
+                weightInput.title = 'Cantidad exacta de mensajes para esta línea';
+
+                const readyCount = this.getReadyMessagesCount();
+                if (readyCount > 0) {
+                    weightInput.max = String(readyCount);
+                }
 
                 if (this._sessionWeightValues[s.id] == null) {
-                    const equalShare = controllable.length > 0 ? Math.floor(100 / controllable.length) : 100;
-                    const extra = index < 100 % Math.max(controllable.length, 1) ? 1 : 0;
-                    this._sessionWeightValues[s.id] = equalShare + extra;
+                    if (readyCount > 0) {
+                        const equalShare = Math.floor(readyCount / controllable.length);
+                        const extra = index < readyCount % Math.max(controllable.length, 1) ? 1 : 0;
+                        this._sessionWeightValues[s.id] = equalShare + extra;
+                    } else {
+                        this._sessionWeightValues[s.id] = 1;
+                    }
                 }
                 weightInput.value = String(this._sessionWeightValues[s.id]);
 
-                const pctLabel = document.createElement('span');
-                pctLabel.className = 'session-weight-suffix';
-                pctLabel.textContent = '%';
+                const countLabel = document.createElement('span');
+                countLabel.className = 'session-weight-suffix';
+                countLabel.textContent = 'msgs';
 
                 weightWrap.appendChild(weightInput);
-                weightWrap.appendChild(pctLabel);
+                weightWrap.appendChild(countLabel);
 
                 label.appendChild(cb);
                 label.appendChild(span);
@@ -1474,14 +1521,15 @@ class CVAnalyzer {
 
                 cb.addEventListener('change', () => this.updateSessionWeightUI());
                 weightInput.addEventListener('input', () => {
-                    const value = parseFloat(String(weightInput.value).replace(',', '.'));
-                    if (Number.isFinite(value) && value > 0) {
+                    const value = parseInt(String(weightInput.value).replace(',', '.'), 10);
+                    if (Number.isFinite(value) && value >= 0) {
                         this._sessionWeightValues[s.id] = value;
                     }
                     this.updateSessionWeightUI();
                 });
             });
             this._sessionsCheckboxesInitialized = true;
+            this.maybeReseedSessionCounts();
             this.updateSessionWeightUI();
         }
 
@@ -2423,6 +2471,7 @@ class CVAnalyzer {
             this.progressText.textContent = `${doneTotal} / ${doneTotal}`;
             this.showStatus(`Se generaron mensajes de IA para ${doneTotal} CVs`, 'success');
             this.sendWhatsAppBtn.disabled = false;
+            this.maybeReseedSessionCounts();
             this.updateSessionWeightUI();
             this.progressSection.style.display = 'none';
             return;

@@ -244,7 +244,7 @@ async function runWhatsAppSendJob({
         const pct = Math.round(distribution.proportions[i] * 1000) / 10;
         return `${sId}: ${distribution.counts[i]} (${pct}%)`;
       });
-      console.log(`📊 Distribución ponderada → ${distributionLog.join(', ')}`);
+      console.log(`📊 Distribución por cantidad → ${distributionLog.join(', ')}`);
 
       initSessionSendingState(controlId);
       for (const sId of sessionIds) {

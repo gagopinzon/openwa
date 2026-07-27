@@ -249,8 +249,9 @@
                 </div>
                 <p id="sessionWeightPreview" class="session-weight-preview"></p>
                 <p style="font-size: 12px; color: #64748b; margin-top: 8px;">
-                    Marca las sesiones que participarán. Con varias líneas, indica el % de cada una (deben sumar 100%).
-                    Cada celular envía su primer mensaje al mismo tiempo; luego cada sesión espera su propio tiempo aleatorio.
+                    Marca las sesiones que participarán. Con varias líneas, indica cuántos mensajes enviará cada una
+                    (deben sumar el total de mensajes listos). Cada celular envía su primer mensaje al mismo tiempo;
+                    luego cada sesión espera su propio tiempo aleatorio.
                 </p>
             </div>
 
@@ -330,7 +331,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=conversations-poll-1"></script>
+    <script src="app.js?v=session-counts-1"></script>
     <script>
         (async function initAuthUi() {
             try {
