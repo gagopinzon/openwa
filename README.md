@@ -8,6 +8,7 @@ Documentación completa en [README-OPENWA.md](README-OPENWA.md).
 
 ```bash
 cp .env.example .env   # completa DEEPSEEK_API_KEY, OPENWA_API_KEY y sesiones
+# Para agendar en panel: MSG_INTEGRATION_API_KEY, MSG_GERENTE_EMAIL, WEBHOOK_PUBLIC_URL
 npm install
 npm start
 ```

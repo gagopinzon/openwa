@@ -206,7 +206,9 @@ async function getContactSession(normalizedPhone) {
   return {
     logicalSessionId: doc.logicalSessionId || null,
     openwaSessionId: doc.openwaSessionId || null,
-    name: doc.name || null
+    name: doc.name || null,
+    aiPaused: Boolean(doc.aiPaused),
+    aiPausedAt: doc.aiPausedAt || null
   };
 }
 
@@ -238,6 +240,50 @@ async function assignContactSession(normalizedPhone, { logicalSessionId, openwaS
   );
 }
 
+/**
+ * Pausa o reactiva la auto-respuesta IA para un contacto concreto.
+ * @param {string} normalizedPhone
+ * @param {boolean} paused
+ * @returns {Promise<{ ok: boolean, aiPaused?: boolean, error?: string }>}
+ */
+async function setContactAiPaused(normalizedPhone, paused) {
+  if (!normalizedPhone) {
+    return { ok: false, error: 'teléfono inválido' };
+  }
+  if (!mongoUriConfigured()) {
+    return { ok: false, error: 'MongoDB no configurado' };
+  }
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch (err) {
+    console.error('contactHistory setContactAiPaused:', err.message);
+    return { ok: false, error: err.message };
+  }
+  if (!coll) return { ok: false, error: 'MongoDB no disponible' };
+
+  const aiPaused = Boolean(paused);
+  const update = aiPaused
+    ? { $set: { aiPaused: true, aiPausedAt: new Date() } }
+    : { $set: { aiPaused: false }, $unset: { aiPausedAt: '' } };
+
+  const result = await coll.updateOne({ normalizedPhone }, update);
+  if (result.matchedCount === 0) {
+    return { ok: false, error: 'Contacto no está en el historial' };
+  }
+  return { ok: true, aiPaused };
+}
+
+/**
+ * @param {string} normalizedPhone
+ * @returns {Promise<boolean>}
+ */
+async function isContactAiPaused(normalizedPhone) {
+  const doc = await getContactByPhone(normalizedPhone);
+  return Boolean(doc && doc.aiPaused);
+}
+
 module.exports = {
   normalizePhone,
   mongoUriConfigured,
@@ -246,5 +292,7 @@ module.exports = {
   getContactByPhone,
   isKnownContact,
   getContactSession,
-  assignContactSession
+  assignContactSession,
+  setContactAiPaused,
+  isContactAiPaused
 };

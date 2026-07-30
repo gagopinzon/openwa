@@ -113,7 +113,10 @@ function getRequestUser(req) {
       username: 'local',
       role: 'super',
       isSuper: true,
-      permissions: {}
+      permissions: {},
+      gerenteEmail:
+        usersStore.getSuperGerenteEmail() ||
+        String(process.env.MSG_GERENTE_EMAIL || '').trim()
     };
   }
 
@@ -130,7 +133,10 @@ function getRequestUser(req) {
       username: superName,
       role: 'super',
       isSuper: true,
-      permissions: {}
+      permissions: {},
+      gerenteEmail:
+        usersStore.getSuperGerenteEmail() ||
+        String(process.env.MSG_GERENTE_EMAIL || '').trim()
     };
   }
 
@@ -142,7 +148,8 @@ function getRequestUser(req) {
     username: stored.username,
     role: 'user',
     isSuper: false,
-    permissions: { ...(stored.permissions || {}) }
+    permissions: { ...(stored.permissions || {}) },
+    gerenteEmail: String(stored.gerenteEmail || '').trim()
   };
 }
 
@@ -178,7 +185,10 @@ function validateCredentials(username, password) {
         username: expectedUser,
         role: 'super',
         isSuper: true,
-        permissions: {}
+        permissions: {},
+        gerenteEmail:
+          usersStore.getSuperGerenteEmail() ||
+          String(process.env.MSG_GERENTE_EMAIL || '').trim()
       }
     };
   }
@@ -192,7 +202,8 @@ function validateCredentials(username, password) {
         username: stored.username,
         role: 'user',
         isSuper: false,
-        permissions: { ...(stored.permissions || {}) }
+        permissions: { ...(stored.permissions || {}) },
+        gerenteEmail: String(stored.gerenteEmail || '').trim()
       }
     };
   }
@@ -245,6 +256,8 @@ function isPublicPath(pathname) {
   if (pathname === '/login') return true;
   if (pathname === '/api/auth/login') return true;
   if (pathname === '/api/webhooks/openwa') return true;
+  // Panel descarga CVs con token firmado (sin cookie de sesión Msg)
+  if (pathname.startsWith('/api/public/cv/')) return true;
   return false;
 }
 

@@ -42,5 +42,6 @@
       "instruction": "Despídete brevemente y con respeto. No insistas ni vendas más."
     }
   ],
+  "enabledSessionIds": null,
   "webhookIdsBySession": {}
 }

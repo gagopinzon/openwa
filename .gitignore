@@ -6,6 +6,8 @@ user_data_default/
 data/sessions.json
 data/users.json
 data/incoming-messages.json
+data/cv-files/
+data/super-profile.json
 logs/
 *.log
 *.zip

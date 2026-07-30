@@ -18,13 +18,21 @@ const {
   formatPhoneToChatId,
   listChats,
   getChatHistory,
-  sendTextMessage
+  invalidateOpenWACache,
+  sendTextMessage,
+  editMessage,
+  deleteMessage,
+  getContact,
+  blockContact,
+  unblockContact
 } = require('./openwaClient');
 const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
 const autoReplyStore = require('./autoReplyStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
 const usersStore = require('./usersStore');
+const cvFileStore = require('./cvFileStore');
+const panelMsgClient = require('./panelMsgClient');
 const {
   isAuthEnabled,
   authMiddleware,
@@ -544,7 +552,8 @@ app.post('/api/auth/login', (req, res) => {
       username: result.user.username,
       role: result.user.role,
       isSuper: result.user.isSuper,
-      permissions: result.user.permissions || {}
+      permissions: result.user.permissions || {},
+      gerenteEmail: result.user.gerenteEmail || ''
     }
   });
 });
@@ -565,10 +574,61 @@ app.get('/api/auth/status', (req, res) => {
           username: user.username,
           role: user.role,
           isSuper: user.isSuper,
-          permissions: user.permissions || {}
+          permissions: user.permissions || {},
+          gerenteEmail: user.gerenteEmail || ''
         }
       : null
   });
+});
+
+/** Perfil del usuario logueado: correo de gerente para Panel */
+app.get('/api/me', (req, res) => {
+  const user = req.user || getRequestUser(req);
+  if (!user) {
+    return res.status(401).json({ success: false, error: 'No autenticado' });
+  }
+  res.json({
+    success: true,
+    user: {
+      username: user.username,
+      role: user.role,
+      isSuper: user.isSuper,
+      gerenteEmail: user.gerenteEmail || '',
+      envGerenteEmail: panelMsgClient.defaultGerenteEmail() || ''
+    }
+  });
+});
+
+app.put('/api/me', (req, res) => {
+  try {
+    const user = req.user || getRequestUser(req);
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'No autenticado' });
+    }
+
+    const gerenteEmail = usersStore.sanitizeGerenteEmail(req.body?.gerenteEmail);
+
+    if (user.isSuper) {
+      usersStore.setSuperGerenteEmail(gerenteEmail);
+    } else if (user.id) {
+      usersStore.updateUser(user.id, { gerenteEmail });
+    } else {
+      return res.status(400).json({ success: false, error: 'No se pudo actualizar el perfil' });
+    }
+
+    const refreshed = getRequestUser(req);
+    res.json({
+      success: true,
+      user: {
+        username: refreshed?.username || user.username,
+        role: refreshed?.role || user.role,
+        isSuper: Boolean(refreshed?.isSuper ?? user.isSuper),
+        gerenteEmail: refreshed?.gerenteEmail || gerenteEmail
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
 });
 
 app.use(authMiddleware);
@@ -588,7 +648,8 @@ app.post('/api/users', requireSuper, (req, res) => {
     const user = usersStore.createUser({
       username: req.body.username,
       password: req.body.password,
-      permissions: req.body.permissions
+      permissions: req.body.permissions,
+      gerenteEmail: req.body.gerenteEmail
     });
     res.status(201).json({ success: true, user });
   } catch (error) {
@@ -604,6 +665,9 @@ app.put('/api/users/:id', requireSuper, (req, res) => {
     }
     if (req.body.permissions != null) {
       patch.permissions = req.body.permissions;
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'gerenteEmail')) {
+      patch.gerenteEmail = req.body.gerenteEmail;
     }
     const user = usersStore.updateUser(req.params.id, patch);
     res.json({ success: true, user });
@@ -637,8 +701,9 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
 
     console.log(`Procesando ${req.files.length} archivos PDF...`);
 
-    // Limpiar datos anteriores
+    // Limpiar datos y archivos anteriores
     cvsData = [];
+    cvFileStore.clearAllCvFiles();
 
     // Procesar cada archivo PDF
     for (let i = 0; i < req.files.length; i++) {
@@ -646,6 +711,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
       console.log(`Procesando archivo ${i + 1}/${req.files.length}: ${file.originalname}`);
 
       try {
+        const saved = cvFileStore.saveCvFile(file.buffer, file.originalname);
+
         // Extraer texto del PDF
         const text = await extractTextFromPDF(file.buffer);
 
@@ -656,6 +723,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
         const processedCV = {
           ...cvData,
           archivoOriginal: file.originalname,
+          cvId: saved.cvId,
+          cvFileName: saved.cvFileName,
           saludo: '',
           mensajeIA: '', // Se llenará después
           procesado: true
@@ -670,6 +739,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           telefono: 'N/A',
           experiencia: 'Error al extraer texto del PDF',
           archivoOriginal: file.originalname,
+          cvId: null,
+          cvFileName: null,
           saludo: '',
           mensajeIA: '',
           procesado: false,
@@ -799,24 +870,196 @@ app.get('/cvs-status', (req, res) => {
 // Ruta para obtener configuración del sistema
 app.get('/config', (req, res) => {
   const sessions = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
+  const current = req.user || getRequestUser(req);
+  const userGerente = (current && current.gerenteEmail) || '';
+  const envGerente = panelMsgClient.defaultGerenteEmail() || '';
   res.json({
     success: true,
     testMode: TEST_MODE,
     whatsappProvider: 'openwa',
     sessions,
-    user: req.user
+    user: current
       ? {
-          username: req.user.username,
-          role: req.user.role,
-          isSuper: req.user.isSuper,
-          permissions: req.user.permissions || {}
+          username: current.username,
+          role: current.role,
+          isSuper: current.isSuper,
+          permissions: current.permissions || {},
+          gerenteEmail: current.gerenteEmail || ''
         }
       : null,
     autoReply: autoReplyService.getStatus(),
+    panel: {
+      configured: panelMsgClient.isConfigured(),
+      publicCvUrlConfigured: cvFileStore.isPublicUrlConfigured(),
+      gerenteEmail: userGerente || envGerente,
+      envGerenteEmail: envGerente,
+      baseUrl: panelMsgClient.panelBaseUrl()
+    },
     message: TEST_MODE
       ? 'Sistema en modo de prueba - los mensajes se simularán'
       : 'Sistema en modo producción - se enviarán mensajes reales vía OpenWA'
   });
+});
+
+// CV público firmado (panel descarga sin sesión Msg)
+app.get('/api/public/cv/:cvId', (req, res) => {
+  try {
+    const cvId = String(req.params.cvId || '').trim();
+    const token = String(req.query.token || '').trim();
+    if (!cvId || !token) {
+      return res.status(400).json({ success: false, error: 'cvId y token son obligatorios' });
+    }
+    if (!cvFileStore.verifySignedToken(cvId, token)) {
+      return res.status(401).json({ success: false, error: 'Token inválido o expirado' });
+    }
+    const meta = cvFileStore.getCvFileMeta(cvId);
+    if (!meta) {
+      return res.status(404).json({ success: false, error: 'CV no encontrado' });
+    }
+    res.setHeader('Content-Type', meta.mime);
+    res.setHeader('Content-Disposition', `inline; filename="${meta.fileName}"`);
+    return res.sendFile(meta.filePath);
+  } catch (error) {
+    console.error('[public/cv] Error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Proxy autenticado → panel disponibilidad
+app.get('/api/panel/disponibilidad', async (req, res) => {
+  try {
+    if (!panelMsgClient.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error:
+          'Integración con panel no configurada. Define MSG_INTEGRATION_API_KEY en .env'
+      });
+    }
+    const data = await panelMsgClient.getDisponibilidad({
+      gerenteEmail:
+        req.query.gerenteEmail ||
+        (req.user && req.user.gerenteEmail) ||
+        panelMsgClient.defaultGerenteEmail(),
+      fechaInicio: req.query.fechaInicio,
+      fechaFin: req.query.fechaFin,
+      slotMinutos: req.query.slotMinutos ? Number(req.query.slotMinutos) : undefined
+    });
+    return res.json({ success: true, ...data });
+  } catch (error) {
+    const status = error.status || 502;
+    return res.status(status).json({
+      success: false,
+      error: error.message,
+      ...(error.panelBody && typeof error.panelBody === 'object' ? { panel: error.panelBody } : {})
+    });
+  }
+});
+
+// Proxy autenticado → crear reunión en panel
+app.post('/api/panel/reuniones', async (req, res) => {
+  try {
+    if (!panelMsgClient.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error:
+          'Integración con panel no configurada. Define MSG_INTEGRATION_API_KEY en .env'
+      });
+    }
+    if (!cvFileStore.isPublicUrlConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error:
+          'WEBHOOK_PUBLIC_URL no está configurada. El panel necesita una URL pública para descargar el CV.'
+      });
+    }
+
+    const body = req.body || {};
+    const cvId = String(body.cvId || '').trim();
+    const {
+      vendedorId,
+      fecha,
+      horaInicio,
+      horaFin,
+      urlReunion,
+      gerenteEmail,
+      titulo,
+      leadCorreo,
+      leadNombre,
+      leadTelefono,
+      leadCiudad,
+      leadEstado
+    } = body;
+
+    if (!cvId || !vendedorId || !fecha || !horaInicio || !horaFin || !urlReunion) {
+      return res.status(400).json({
+        success: false,
+        error: 'Faltan campos obligatorios',
+        required: ['cvId', 'vendedorId', 'fecha', 'horaInicio', 'horaFin', 'urlReunion']
+      });
+    }
+
+    const cv = cvsData.find((c) => c.cvId === cvId);
+    if (!cv || !cv.procesado) {
+      return res.status(404).json({
+        success: false,
+        error: 'CV no encontrado en la sesión actual. Vuelve a subir el PDF.'
+      });
+    }
+    if (!cvFileStore.getCvFileMeta(cvId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Archivo del CV no está disponible en disco. Vuelve a subir el PDF.'
+      });
+    }
+
+    const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
+    if (!cvUrl) {
+      return res.status(503).json({
+        success: false,
+        error: 'No se pudo construir cvUrl pública'
+      });
+    }
+
+    const resolvedGerente =
+      String(gerenteEmail || '').trim() ||
+      (req.user && req.user.gerenteEmail) ||
+      panelMsgClient.defaultGerenteEmail();
+
+    const data = await panelMsgClient.crearReunion({
+      gerenteEmail: resolvedGerente,
+      vendedorId,
+      fecha,
+      horaInicio,
+      horaFin,
+      urlReunion: String(urlReunion).trim(),
+      cvUrl,
+      titulo: titulo || `Sesión — ${cv.nombre || cv.archivoOriginal || 'candidato'}`,
+      leadCorreo,
+      leadNombre,
+      leadTelefono,
+      leadCiudad,
+      leadEstado,
+      origen: 'msg'
+    });
+
+    return res.status(201).json({ success: true, ...data });
+  } catch (error) {
+    const status = error.status || 502;
+    const payload = {
+      success: false,
+      error: error.message,
+      ...(error.panelBody && typeof error.panelBody === 'object' ? { panel: error.panelBody } : {}),
+      ...(error.leadExtraido ? { leadExtraido: error.leadExtraido } : {})
+    };
+    if (status === 400 && /email|correo/i.test(error.message || '')) {
+      payload.hint =
+        'DeepSeek no encontró email en el CV. Reintenta enviando leadCorreo, o sube un CV con correo visible.';
+    }
+    if (status === 409) {
+      payload.hint = 'El horario ya no está disponible. Elige otro slot.';
+    }
+    return res.status(status).json(payload);
+  }
 });
 
 // --- Gestión de sesiones WhatsApp (persistidas en data/sessions.json) ---
@@ -1304,6 +1547,7 @@ app.post('/close-whatsapp', async (req, res) => {
 // Ruta para limpiar datos
 app.post('/clear-data', (req, res) => {
   cvsData = [];
+  cvFileStore.clearAllCvFiles();
   console.log('Datos de CVs limpiados');
 
   res.json({
@@ -1734,6 +1978,35 @@ function resolveConfiguredSession(sessionParam) {
   );
 }
 
+function openwaHttpStatus(error) {
+  if (error && error.code === 'RATE_LIMIT') return 429;
+  const status = Number(error && error.status);
+  if (status >= 400 && status < 600) return status;
+  return 500;
+}
+
+/** Ejecuta tareas async con concurrencia limitada. */
+async function mapWithConcurrency(items, concurrency, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const limit = Math.max(1, Number(concurrency) || 1);
+  const results = new Array(list.length);
+  let nextIndex = 0;
+
+  async function runWorker() {
+    while (nextIndex < list.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(list[index], index);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, list.length) }, () =>
+    runWorker()
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 app.get('/api/conversations', async (req, res) => {
   try {
     const rawSession = String(req.query.sessionId || '').trim();
@@ -1766,26 +2039,24 @@ app.get('/api/conversations', async (req, res) => {
       `[conversations] listando chats sesiones=${sessions.map((s) => s.id).join(',')} limit=${limit}`
     );
 
-    const settled = await Promise.all(
-      sessions.map(async (session) => {
-        try {
-          let chats = await listChats(session.openwaSessionId, {
-            limit,
-            offset: 0
-          });
-          if (!includeGroups) {
-            chats = chats.filter((c) => !c.isGroup);
-          }
-          return { session, chats, error: null };
-        } catch (err) {
-          console.error(
-            `[conversations] error sesión=${session.id}:`,
-            err.message
-          );
-          return { session, chats: [], error: err.message };
+    const settled = await mapWithConcurrency(sessions, 2, async (session) => {
+      try {
+        let chats = await listChats(session.openwaSessionId, {
+          limit,
+          offset: 0
+        });
+        if (!includeGroups) {
+          chats = chats.filter((c) => !c.isGroup);
         }
-      })
-    );
+        return { session, chats, error: null };
+      } catch (err) {
+        console.error(
+          `[conversations] error sesión=${session.id}:`,
+          err.message
+        );
+        return { session, chats: [], error: err.message, rateLimited: err.code === 'RATE_LIMIT' };
+      }
+    });
 
     const chats = settled
       .flatMap(({ session, chats: sessionChats }) =>
@@ -1807,6 +2078,15 @@ app.get('/api/conversations', async (req, res) => {
         error: row.error
       }));
 
+    const rateLimited = settled.some((row) => row.rateLimited);
+    if (rateLimited && !chats.length) {
+      return res.status(429).json({
+        success: false,
+        error: errors[0]?.error || 'Too Many Requests',
+        errors
+      });
+    }
+
     console.log(
       `[conversations] OK ${chats.length} chats (${sessions.length} sesiones, ${errors.length} errores)`
     );
@@ -1824,7 +2104,7 @@ app.get('/api/conversations', async (req, res) => {
     });
   } catch (error) {
     console.error('[conversations] error:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
   }
 });
 
@@ -1862,15 +2142,177 @@ app.post('/api/conversations/reply', async (req, res) => {
     );
 
     const result = await sendTextMessage(session.openwaSessionId, chatId, text);
+    invalidateOpenWACache({
+      openwaSessionId: session.openwaSessionId,
+      chatId
+    });
+
+    // Al contestar manualmente, pausar la IA de ese remitente para no pelear la conversación.
+    let aiPaused = null;
+    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    if (phone && contactHistory.mongoUriConfigured()) {
+      try {
+        const pauseResult = await contactHistory.setContactAiPaused(phone, true);
+        if (pauseResult.ok) {
+          aiPaused = true;
+          broadcastEvent('aiControlChanged', {
+            sessionId: session.id,
+            chatId,
+            telefono: phone,
+            aiPaused: true,
+            reason: 'manual_reply',
+            timestamp: new Date().toISOString()
+          });
+        }
+      } catch (err) {
+        console.warn('[conversations] no se pudo pausar IA tras reply manual:', err.message);
+      }
+    }
+
     res.json({
       success: true,
       sessionId: session.id,
       sessionLabel: session.label || session.id,
       chatId,
-      messageId: result.messageId || null
+      messageId: result.messageId || null,
+      aiPaused
     });
   } catch (error) {
     console.error('[conversations] reply error:', error.message);
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/conversations/contact-status', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.query.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessViewSession(session.id, req, res)) return;
+
+    const chatId = String(req.query.chatId || req.query.contactId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    if (chatId.endsWith('@g.us')) {
+      return res.json({
+        success: true,
+        sessionId: session.id,
+        chatId,
+        isGroup: true,
+        isBlocked: false,
+        aiPaused: false,
+        sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id)
+      });
+    }
+
+    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    let aiPaused = false;
+    let knownContact = false;
+    if (phone) {
+      const contactDoc = await contactHistory.getContactByPhone(phone);
+      if (contactDoc) {
+        knownContact = true;
+        aiPaused = Boolean(contactDoc.aiPaused);
+      }
+    }
+
+    try {
+      const contact = await getContact(session.openwaSessionId, chatId);
+      res.json({
+        success: true,
+        sessionId: session.id,
+        chatId,
+        telefono: phone || null,
+        isGroup: false,
+        isBlocked: contact.isBlocked,
+        name: contact.name,
+        knownContact,
+        aiPaused,
+        sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
+        autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled)
+      });
+    } catch (err) {
+      res.json({
+        success: true,
+        sessionId: session.id,
+        chatId,
+        telefono: phone || null,
+        isGroup: false,
+        isBlocked: false,
+        knownContact,
+        aiPaused,
+        sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
+        autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled),
+        warning: err.message
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/ai-control', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+
+    const chatId = String(req.body.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    if (chatId.endsWith('@g.us')) {
+      return res.status(400).json({
+        success: false,
+        error: 'La IA no se aplica a grupos'
+      });
+    }
+
+    if (typeof req.body.aiPaused !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'aiPaused (boolean) es obligatorio'
+      });
+    }
+
+    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'No se pudo obtener el teléfono del chat' });
+    }
+
+    const result = await contactHistory.setContactAiPaused(phone, req.body.aiPaused);
+    if (!result.ok) {
+      return res.status(400).json({ success: false, error: result.error || 'No se pudo actualizar' });
+    }
+
+    broadcastEvent('aiControlChanged', {
+      sessionId: session.id,
+      chatId,
+      telefono: phone,
+      aiPaused: result.aiPaused,
+      reason: 'manual_toggle',
+      timestamp: new Date().toISOString()
+    });
+
+    res.json({
+      success: true,
+      sessionId: session.id,
+      chatId,
+      telefono: phone,
+      aiPaused: result.aiPaused
+    });
+  } catch (error) {
+    console.error('[conversations] ai-control error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1914,6 +2356,146 @@ app.get('/api/conversations/:chatId/messages', async (req, res) => {
       messages: sorted
     });
   } catch (error) {
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/edit-message', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+
+    const chatId = String(req.body.chatId || '').trim();
+    const messageId = String(req.body.messageId || '').trim();
+    const body = String(req.body.body || req.body.text || '').trim();
+    if (!chatId) return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    if (!messageId) {
+      return res.status(400).json({ success: false, error: 'messageId es obligatorio' });
+    }
+    if (!body) {
+      return res.status(400).json({ success: false, error: 'El mensaje no puede estar vacío' });
+    }
+
+    const result = await editMessage(session.openwaSessionId, { chatId, messageId, body });
+    invalidateOpenWACache({
+      openwaSessionId: session.openwaSessionId,
+      chatId
+    });
+    res.json({
+      success: true,
+      sessionId: session.id,
+      chatId,
+      messageId: result.messageId,
+      body
+    });
+  } catch (error) {
+    console.error('[conversations] edit error:', error.message);
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/delete-message', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+
+    const chatId = String(req.body.chatId || '').trim();
+    const messageId = String(req.body.messageId || '').trim();
+    if (!chatId) return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    if (!messageId) {
+      return res.status(400).json({ success: false, error: 'messageId es obligatorio' });
+    }
+
+    await deleteMessage(session.openwaSessionId, {
+      chatId,
+      messageId,
+      forEveryone: req.body.forEveryone !== false
+    });
+    invalidateOpenWACache({
+      openwaSessionId: session.openwaSessionId,
+      chatId
+    });
+    res.json({ success: true, sessionId: session.id, chatId, messageId });
+  } catch (error) {
+    console.error('[conversations] delete error:', error.message);
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/block', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+
+    const chatId = String(req.body.chatId || req.body.contactId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    if (chatId.endsWith('@g.us')) {
+      return res.status(400).json({
+        success: false,
+        error: 'No se pueden bloquear grupos desde aquí'
+      });
+    }
+
+    const result = await blockContact(session.openwaSessionId, chatId);
+    res.json({
+      success: true,
+      sessionId: session.id,
+      chatId,
+      isBlocked: true,
+      message: result.message
+    });
+  } catch (error) {
+    console.error('[conversations] block error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/unblock', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+
+    const chatId = String(req.body.chatId || req.body.contactId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+
+    const result = await unblockContact(session.openwaSessionId, chatId);
+    res.json({
+      success: true,
+      sessionId: session.id,
+      chatId,
+      isBlocked: false,
+      message: result.message
+    });
+  } catch (error) {
+    console.error('[conversations] unblock error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1939,7 +2521,8 @@ app.put('/api/auto-reply/config', requireSuper, (req, res) => {
     const config = autoReplyStore.updateConfig({
       enabled: req.body.enabled,
       basePrompt: req.body.basePrompt,
-      rules: req.body.rules
+      rules: req.body.rules,
+      enabledSessionIds: req.body.enabledSessionIds
     });
     res.json({ success: true, config });
   } catch (error) {

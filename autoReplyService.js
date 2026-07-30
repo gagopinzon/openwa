@@ -201,7 +201,15 @@ async function handleIncomingWebhook({
   const logicalSession = findLogicalSessionByOpenwaId(openwaSessionId);
   const logicalSessionId = logicalSession ? logicalSession.id : null;
 
+  if (!autoReplyStore.isSessionEnabled(logicalSessionId, cfg)) {
+    return { handled: false, reason: 'session_ai_disabled' };
+  }
+
   let contactSession = await contactHistory.getContactSession(normalizedPhone);
+  if (contactSession && contactSession.aiPaused) {
+    return { handled: false, reason: 'ai_paused_for_contact' };
+  }
+
   if (contactSession && contactSession.openwaSessionId) {
     if (contactSession.openwaSessionId !== openwaSessionId) {
       return { handled: false, reason: 'wrong_session_for_contact' };
@@ -362,9 +370,16 @@ function getStatus() {
   const sessions = sessionsStore.getAllSessions();
   const webhookCount = Object.keys(cfg.webhookIdsBySession || {}).length;
   const canListen = Boolean(webhookUrl && sessions.length > 0);
+  const enabledSessionIds = cfg.enabledSessionIds;
+  const enabledSessionsCount =
+    enabledSessionIds === null || enabledSessionIds === undefined
+      ? sessions.length
+      : enabledSessionIds.filter((id) => sessions.some((s) => s.id === id)).length;
 
   return {
     enabled: cfg.enabled,
+    enabledSessionIds,
+    enabledSessionsCount,
     webhookUrl,
     webhookConfigured: Boolean(webhookUrl),
     mongodbConfigured: contactHistory.mongoUriConfigured(),

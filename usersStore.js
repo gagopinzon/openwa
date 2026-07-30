@@ -18,10 +18,14 @@ const ACCESS_LEVELS = Object.freeze({
  *   passwordHash: string,
  *   role: 'user',
  *   permissions: Record<string, SessionAccess>,
+ *   gerenteEmail?: string,
  *   createdAt: string,
  *   updatedAt: string
  * }} StoredUser
  */
+
+const SUPER_PROFILE_FILE = path.join(DATA_DIR, 'super-profile.json');
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -86,6 +90,61 @@ function sanitizePermissions(permissions) {
   return out;
 }
 
+/**
+ * Normaliza y valida correo de gerente (panel). Vacío permitido.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function sanitizeGerenteEmail(value) {
+  const email = String(value == null ? '' : value).trim().toLowerCase();
+  if (!email) return '';
+  if (!EMAIL_RE.test(email)) {
+    throw new Error('El correo del gerente no es válido');
+  }
+  return email;
+}
+
+function readSuperProfile() {
+  ensureDataDir();
+  if (!fs.existsSync(SUPER_PROFILE_FILE)) {
+    return { gerenteEmail: '' };
+  }
+  try {
+    const raw = fs.readFileSync(SUPER_PROFILE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      gerenteEmail: String(parsed?.gerenteEmail || '').trim().toLowerCase()
+    };
+  } catch {
+    return { gerenteEmail: '' };
+  }
+}
+
+function writeSuperProfile(profile) {
+  ensureDataDir();
+  fs.writeFileSync(
+    SUPER_PROFILE_FILE,
+    JSON.stringify(
+      {
+        gerenteEmail: String(profile?.gerenteEmail || '').trim().toLowerCase()
+      },
+      null,
+      2
+    ),
+    'utf8'
+  );
+}
+
+function getSuperGerenteEmail() {
+  return readSuperProfile().gerenteEmail || '';
+}
+
+function setSuperGerenteEmail(email) {
+  const gerenteEmail = sanitizeGerenteEmail(email);
+  writeSuperProfile({ gerenteEmail });
+  return gerenteEmail;
+}
+
 function publicUser(user) {
   if (!user) return null;
   return {
@@ -93,6 +152,7 @@ function publicUser(user) {
     username: user.username,
     role: user.role,
     permissions: { ...(user.permissions || {}) },
+    gerenteEmail: String(user.gerenteEmail || '').trim(),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
   };
@@ -115,7 +175,7 @@ function findUserById(id) {
 }
 
 /**
- * @param {{ username: string, password: string, permissions?: Record<string, SessionAccess> }} input
+ * @param {{ username: string, password: string, permissions?: Record<string, SessionAccess>, gerenteEmail?: string }} input
  */
 function createUser(input) {
   const username = String(input.username || '').trim();
@@ -132,6 +192,8 @@ function createUser(input) {
     throw new Error('Ese nombre está reservado para el superusuario del .env');
   }
 
+  const gerenteEmail = sanitizeGerenteEmail(input.gerenteEmail);
+
   const store = readStore();
   if (store.users.some((u) => normalizeUsername(u.username) === normalizeUsername(username))) {
     throw new Error(`El usuario "${username}" ya existe`);
@@ -145,6 +207,7 @@ function createUser(input) {
     passwordHash: hashPassword(password),
     role: 'user',
     permissions: sanitizePermissions(input.permissions),
+    gerenteEmail,
     createdAt: now,
     updatedAt: now
   };
@@ -156,7 +219,7 @@ function createUser(input) {
 
 /**
  * @param {string} id
- * @param {{ password?: string, permissions?: Record<string, SessionAccess> }} patch
+ * @param {{ password?: string, permissions?: Record<string, SessionAccess>, gerenteEmail?: string }} patch
  */
 function updateUser(id, patch) {
   const store = readStore();
@@ -172,6 +235,10 @@ function updateUser(id, patch) {
 
   if (patch.permissions != null) {
     store.users[idx].permissions = sanitizePermissions(patch.permissions);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'gerenteEmail')) {
+    store.users[idx].gerenteEmail = sanitizeGerenteEmail(patch.gerenteEmail);
   }
 
   store.users[idx].updatedAt = new Date().toISOString();
@@ -227,5 +294,8 @@ module.exports = {
   removeSessionFromAllUsers,
   authenticateStoredUser,
   publicUser,
-  sanitizePermissions
+  sanitizePermissions,
+  sanitizeGerenteEmail,
+  getSuperGerenteEmail,
+  setSuperGerenteEmail
 };

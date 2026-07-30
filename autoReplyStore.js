@@ -37,12 +37,25 @@ function ensureDataDir() {
   }
 }
 
+function normalizeSessionIds(value) {
+  if (!Array.isArray(value)) return null;
+  return [
+    ...new Set(
+      value
+        .map((id) => String(id || '').trim())
+        .filter(Boolean)
+    )
+  ];
+}
+
 function defaultConfig() {
   return {
     version: 1,
     enabled: process.env.AUTO_REPLY_ENABLED === 'true',
     basePrompt: DEFAULT_BASE_PROMPT,
     rules: DEFAULT_RULES.map((r) => ({ ...r, keywords: [...r.keywords] })),
+    /** null = todas las líneas; array = solo esas logicalSessionId */
+    enabledSessionIds: null,
     webhookIdsBySession: {}
   };
 }
@@ -58,10 +71,16 @@ function readConfig() {
     const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     const base = defaultConfig();
+    const enabledSessionIds =
+      parsed.enabledSessionIds === null || parsed.enabledSessionIds === undefined
+        ? null
+        : normalizeSessionIds(parsed.enabledSessionIds);
+
     return {
       ...base,
       ...parsed,
       rules: Array.isArray(parsed.rules) ? parsed.rules : base.rules,
+      enabledSessionIds,
       webhookIdsBySession:
         parsed.webhookIdsBySession && typeof parsed.webhookIdsBySession === 'object'
           ? parsed.webhookIdsBySession
@@ -87,17 +106,34 @@ function getPublicConfig() {
     enabled: cfg.enabled,
     basePrompt: cfg.basePrompt,
     rules: cfg.rules,
+    enabledSessionIds: cfg.enabledSessionIds,
     webhookIdsBySession: cfg.webhookIdsBySession
   };
 }
 
 /**
- * @param {{ enabled?: boolean, basePrompt?: string, rules?: Array }} patch
+ * true si la línea (logicalSessionId) tiene auto-respuesta IA habilitada.
+ * null/undefined en config = todas las líneas.
+ */
+function isSessionEnabled(logicalSessionId, cfg = null) {
+  const config = cfg || readConfig();
+  const ids = config.enabledSessionIds;
+  if (ids === null || ids === undefined) return true;
+  if (!logicalSessionId) return false;
+  return ids.includes(String(logicalSessionId));
+}
+
+/**
+ * @param {{ enabled?: boolean, basePrompt?: string, rules?: Array, enabledSessionIds?: string[]|null }} patch
  */
 function updateConfig(patch) {
   const cfg = readConfig();
   if (patch.enabled !== undefined) cfg.enabled = Boolean(patch.enabled);
   if (patch.basePrompt !== undefined) cfg.basePrompt = String(patch.basePrompt).trim();
+  if (patch.enabledSessionIds !== undefined) {
+    cfg.enabledSessionIds =
+      patch.enabledSessionIds === null ? null : normalizeSessionIds(patch.enabledSessionIds);
+  }
   if (Array.isArray(patch.rules)) {
     cfg.rules = patch.rules.map((rule) => ({
       id: String(rule.id || crypto.randomUUID()).trim(),
@@ -156,6 +192,7 @@ module.exports = {
   getConfig,
   getPublicConfig,
   updateConfig,
+  isSessionEnabled,
   setWebhookId,
   clearAllWebhookIds,
   getWebhookUrl,

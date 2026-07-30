@@ -31,6 +31,19 @@
                 </button>
             </div>
 
+            <section class="panel-profile" id="panelProfileSection" style="margin-top: 20px; text-align: left;">
+                <h2 style="font-size: 1.05rem; margin-bottom: 8px;">Tu correo en Panel (gerente)</h2>
+                <p style="font-size: 13px; color: #64748b; margin-bottom: 10px;">
+                    Este correo identifica tu equipo en panel.protalentconnections.com al consultar
+                    disponibilidad y agendar reuniones. Debe ser el mismo correo de gerente registrado en Panel.
+                </p>
+                <div class="panel-profile-row">
+                    <input type="email" id="myGerenteEmail" class="form-select" placeholder="tu-correo@protalentconnections.com" autocomplete="email">
+                    <button type="button" id="saveMyGerenteEmailBtn" class="btn btn-secondary">Guardar correo</button>
+                </div>
+                <p id="panelProfileStatus" class="users-form-status" style="display: none;"></p>
+            </section>
+
             <section class="users-panel" id="usersPanel" style="display: none; margin-top: 24px; text-align: left;">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Usuarios y permisos</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
@@ -43,6 +56,9 @@
                     <div class="users-create-row">
                         <input type="text" id="newUserUsername" class="form-select" placeholder="Usuario" required minlength="3" autocomplete="off">
                         <input type="password" id="newUserPassword" class="form-select" placeholder="Contraseña" required minlength="6" autocomplete="new-password">
+                    </div>
+                    <div class="users-create-row" style="margin-top: 8px;">
+                        <input type="email" id="newUserGerenteEmail" class="form-select" placeholder="Correo gerente en Panel (opcional)" autocomplete="off">
                     </div>
                     <div id="newUserPermissions" class="users-permissions"></div>
                     <button type="submit" class="btn btn-primary" style="margin-top: 10px;">Crear usuario</button>
@@ -92,6 +108,14 @@
                     <div class="conversations-thread" id="conversationsThread">
                         <div class="conversations-thread-header" id="conversationsThreadHeader">
                             Selecciona un chat
+                        </div>
+                        <div class="conversations-thread-actions" id="conversationsThreadActions" style="display: none;">
+                            <button type="button" id="conversationsAiPauseBtn" class="btn btn-warning btn-sm">
+                                Pausar IA
+                            </button>
+                            <button type="button" id="conversationsBlockBtn" class="btn btn-danger btn-sm">
+                                Bloquear
+                            </button>
                         </div>
                         <div class="conversations-thread-messages" id="conversationsThreadMessages">
                             <p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>
@@ -149,6 +173,13 @@
                     <button type="button" id="activateAutoReplyBtn" class="btn btn-success">Activar webhooks</button>
                     <button type="button" id="deactivateAutoReplyBtn" class="btn btn-secondary">Desactivar webhooks</button>
                     <button type="button" id="testAutoReplyBtn" class="btn btn-info">Probar respuesta</button>
+                </div>
+                <div class="auto-reply-sessions" id="autoReplySessionsBox">
+                    <div class="auto-reply-sessions-title">Líneas con auto-respuesta IA</div>
+                    <p style="font-size: 12px; color: #64748b; margin: 0 0 8px;">
+                        Elige en qué celulares responde la IA. Las líneas desmarcadas siguen recibiendo mensajes en la bandeja, pero no contestan solas.
+                    </p>
+                    <div id="autoReplySessionsList" class="auto-reply-sessions-list"></div>
                 </div>
                 <div class="auto-reply-test-form" style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
                     <input type="text" id="autoReplyTestPhone" placeholder="Teléfono en historial" class="form-select" style="padding: 8px; min-width: 180px;">
@@ -331,7 +362,48 @@
         </div>
     </div>
 
-    <script src="app.js?v=session-counts-1"></script>
+    <!-- Modal Agendar reunión (Panel) -->
+    <div class="agendar-modal-overlay" id="agendarModal" style="display: none;" aria-hidden="true">
+        <div class="agendar-modal" role="dialog" aria-labelledby="agendarModalTitle">
+            <div class="agendar-modal-header">
+                <h3 id="agendarModalTitle">Agendar reunión</h3>
+                <button type="button" class="agendar-modal-close" id="agendarModalClose" title="Cerrar">&times;</button>
+            </div>
+            <div class="agendar-modal-body">
+                <p class="agendar-cv-label" id="agendarCvLabel"></p>
+
+                <label class="agendar-field-label" for="agendarGerenteEmail">Correo del gerente</label>
+                <input type="email" id="agendarGerenteEmail" class="agendar-input" placeholder="gerente@protalentconnections.com" />
+
+                <label class="agendar-field-label" for="agendarVendedor">Vendedor</label>
+                <select id="agendarVendedor" class="agendar-input">
+                    <option value="">Cargando disponibilidad…</option>
+                </select>
+
+                <label class="agendar-field-label" for="agendarSlot">Horario disponible</label>
+                <select id="agendarSlot" class="agendar-input" disabled>
+                    <option value="">Elige un vendedor primero</option>
+                </select>
+
+                <label class="agendar-field-label" for="agendarUrlReunion">Liga Zoom / Meet / Teams</label>
+                <input type="url" id="agendarUrlReunion" class="agendar-input" placeholder="https://zoom.us/j/..." required />
+
+                <label class="agendar-field-label" for="agendarLeadCorreo">Email del candidato (opcional, override)</label>
+                <input type="email" id="agendarLeadCorreo" class="agendar-input" placeholder="Solo si el CV no trae email visible" />
+
+                <p class="agendar-hint" id="agendarHint">
+                    El panel descarga el CV, lo analiza con DeepSeek y crea la reunión.
+                </p>
+                <p class="agendar-status" id="agendarStatus" style="display: none;"></p>
+            </div>
+            <div class="agendar-modal-footer">
+                <button type="button" class="btn btn-secondary" id="agendarCancelBtn">Cancelar</button>
+                <button type="button" class="btn btn-primary" id="agendarConfirmBtn">Confirmar reunión</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js?v=gerente-email-1"></script>
     <script>
         (async function initAuthUi() {
             try {

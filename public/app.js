@@ -7,11 +7,22 @@ class CVAnalyzer {
         this.configuredSessions = [];
         this.currentUser = window.__pendingAuthUser || null;
         this.managedUsers = [];
+        this.panelConfig = {
+            configured: false,
+            publicCvUrlConfigured: false,
+            gerenteEmail: '',
+            baseUrl: ''
+        };
+        this.disponibilidadCache = null;
+        this.disponibilidadCacheAt = 0;
+        this.agendarCvIndex = null;
         this.eventSource = null;
         this.sendJobCompleted = null;
         this.initializeElements();
         this.initAutoReplyElements();
         this.initUsersElements();
+        this.initPanelProfile();
+        this.initAgendarModal();
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
@@ -117,14 +128,71 @@ class CVAnalyzer {
         this.createUserForm = document.getElementById('createUserForm');
         this.newUserUsername = document.getElementById('newUserUsername');
         this.newUserPassword = document.getElementById('newUserPassword');
+        this.newUserGerenteEmail = document.getElementById('newUserGerenteEmail');
         this.newUserPermissions = document.getElementById('newUserPermissions');
         this.usersFormStatus = document.getElementById('usersFormStatus');
         this.sessionsAddForm = document.querySelector('.sessions-add-form');
         this.autoReplyPanel = document.getElementById('autoReplyPanel');
     }
 
+    initPanelProfile() {
+        this.panelProfileSection = document.getElementById('panelProfileSection');
+        this.myGerenteEmail = document.getElementById('myGerenteEmail');
+        this.saveMyGerenteEmailBtn = document.getElementById('saveMyGerenteEmailBtn');
+        this.panelProfileStatus = document.getElementById('panelProfileStatus');
+        if (this.saveMyGerenteEmailBtn) {
+            this.saveMyGerenteEmailBtn.addEventListener('click', () => this.saveMyGerenteEmail());
+        }
+    }
+
+    setPanelProfileStatus(message, ok = true) {
+        if (!this.panelProfileStatus) return;
+        if (!message) {
+            this.panelProfileStatus.style.display = 'none';
+            this.panelProfileStatus.textContent = '';
+            return;
+        }
+        this.panelProfileStatus.style.display = 'block';
+        this.panelProfileStatus.textContent = message;
+        this.panelProfileStatus.style.color = ok ? '#15803d' : '#b91c1c';
+    }
+
+    async saveMyGerenteEmail() {
+        const gerenteEmail = this.myGerenteEmail ? this.myGerenteEmail.value.trim() : '';
+        try {
+            const response = await fetch('/api/me', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ gerenteEmail })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || 'No se pudo guardar');
+            }
+            const saved = (data.user && data.user.gerenteEmail) || gerenteEmail;
+            if (this.currentUser) {
+                this.currentUser.gerenteEmail = saved;
+            }
+            this.panelConfig.gerenteEmail = saved;
+            if (this.myGerenteEmail) this.myGerenteEmail.value = saved;
+            this.disponibilidadCacheAt = 0;
+            this.setPanelProfileStatus(
+                saved
+                    ? `Correo guardado: ${saved}. El panel usará este gerente al agendar.`
+                    : 'Correo borrado. Usa MSG_GERENTE_EMAIL del .env o escríbelo al agendar.',
+                true
+            );
+            this.showStatus('Correo de gerente actualizado', 'success');
+        } catch (error) {
+            this.setPanelProfileStatus(error.message, false);
+        }
+    }
+
     setCurrentUser(user) {
         this.currentUser = user || null;
+        if (this.myGerenteEmail && user && user.gerenteEmail != null) {
+            this.myGerenteEmail.value = user.gerenteEmail || '';
+        }
         this.applyPermissionUI();
         if (this.isSuperUser()) {
             this.loadUsers();
@@ -194,6 +262,8 @@ class CVAnalyzer {
         this.addAutoReplyRuleBtn = document.getElementById('addAutoReplyRuleBtn');
         this.saveAutoReplyConfigBtn = document.getElementById('saveAutoReplyConfigBtn');
         this.autoReplyConversations = document.getElementById('autoReplyConversations');
+        this.autoReplySessionsList = document.getElementById('autoReplySessionsList');
+        this.autoReplyEnabledSessionIds = null; // null = todas
         this.incomingInboxList = document.getElementById('incomingInboxList');
         this.incomingInboxCount = document.getElementById('incomingInboxCount');
         this.refreshIncomingInboxBtn = document.getElementById('refreshIncomingInboxBtn');
@@ -209,17 +279,26 @@ class CVAnalyzer {
         this.conversationsStatus = document.getElementById('conversationsStatus');
         this.conversationsReplyInput = document.getElementById('conversationsReplyInput');
         this.conversationsReplyBtn = document.getElementById('conversationsReplyBtn');
+        this.conversationsThreadActions = document.getElementById('conversationsThreadActions');
+        this.conversationsBlockBtn = document.getElementById('conversationsBlockBtn');
+        this.conversationsAiPauseBtn = document.getElementById('conversationsAiPauseBtn');
         this.conversationsChats = [];
         this.activeConversation = null;
+        this.activeConversationBlocked = false;
+        this.activeConversationAiPaused = false;
+        this.activeConversationKnownContact = false;
+        this.activeConversationSessionAiEnabled = true;
+        this.activeConversationAutoReplyEnabled = false;
         this.conversationsEverLoaded = false;
         this.conversationsUnreadOnly = false;
         this._conversationsRefreshTimer = null;
         this._conversationsLoadInFlight = false;
+        this._conversationsLoadPending = false;
         this._conversationsListPollTimer = null;
         this._conversationsThreadPollTimer = null;
         this._conversationsThreadLoadInFlight = false;
-        this._conversationsListPollMs = 5000;
-        this._conversationsThreadPollMs = 3000;
+        this._conversationsListPollMs = 20000;
+        this._conversationsThreadPollMs = 15000;
     }
 
     attachAutoReplyListeners() {
@@ -270,6 +349,12 @@ class CVAnalyzer {
                     this.conversationsThreadMessages.innerHTML =
                         '<p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>';
                 }
+                this.activeConversation = null;
+                this.activeConversationBlocked = false;
+                this.activeConversationAiPaused = false;
+                this.activeConversationKnownContact = false;
+                this.updateConversationThreadActions();
+                this.setConversationsReplyEnabled(false);
                 this.loadConversationsChats();
             });
         }
@@ -282,6 +367,32 @@ class CVAnalyzer {
                     event.preventDefault();
                     this.sendConversationReply();
                 }
+            });
+        }
+        if (this.conversationsBlockBtn) {
+            this.conversationsBlockBtn.addEventListener('click', () => this.toggleBlockActiveConversation());
+        }
+        if (this.conversationsAiPauseBtn) {
+            this.conversationsAiPauseBtn.addEventListener('click', () => this.toggleAiPauseActiveConversation());
+        }
+        if (this.conversationsThreadMessages && !this._conversationActionsBound) {
+            this._conversationActionsBound = true;
+            this.conversationsThreadMessages.addEventListener('click', (event) => {
+                const btn = event.target.closest('.bubble-action-btn');
+                if (!btn) return;
+                const messageId = btn.dataset.messageId;
+                const action = btn.dataset.action;
+                if (!messageId || !action) return;
+                if (action === 'edit') {
+                    let body = '';
+                    try {
+                        body = decodeURIComponent(btn.dataset.body || '');
+                    } catch {
+                        body = btn.dataset.body || '';
+                    }
+                    this.editConversationMessage(messageId, body);
+                }
+                if (action === 'delete') this.deleteConversationMessage(messageId);
             });
         }
         document.querySelectorAll('.accordion-header').forEach((btn) => {
@@ -316,6 +427,9 @@ class CVAnalyzer {
                 html += 'MongoDB no configurado: la bandeja sí funciona; la auto-respuesta IA no filtrará contactos.<br>';
             }
             html += `Sesiones: ${data.sessionsConfigured} · Webhooks activos: ${data.webhooksActive}`;
+            if (typeof data.enabledSessionsCount === 'number') {
+                html += ` · Líneas IA: ${data.enabledSessionsCount}/${data.sessionsConfigured}`;
+            }
             if (data.enabled) {
                 html += ' · <strong>Auto-respuesta ON</strong>';
             }
@@ -393,10 +507,26 @@ class CVAnalyzer {
         const phone = item.telefono || item.chatId || 'desconocido';
         const name = item.contactName ? ` · ${item.contactName}` : '';
         const when = new Date(item.timestamp || Date.now()).toLocaleString();
+        const reasonLabels = {
+            auto_reply_disabled: 'IA global off',
+            session_ai_disabled: 'IA off en esta línea',
+            ai_paused_for_contact: 'IA pausada (humano)',
+            unknown_contact: 'contacto desconocido',
+            wrong_session_for_contact: 'sesión incorrecta',
+            no_text_body: 'sin texto',
+            is_group: 'grupo',
+            duplicate: 'duplicado',
+            chat_busy: 'chat ocupado',
+            mongodb_not_configured: 'sin MongoDB'
+        };
+        const reasonText =
+            item.autoReplyReason && reasonLabels[item.autoReplyReason]
+                ? reasonLabels[item.autoReplyReason]
+                : item.autoReplyReason;
         const replyHint = item.replyMessage
             ? `<div class="reply-hint">Auto-respuesta enviada</div>`
             : item.autoReplyReason && item.autoReplyReason !== 'replied'
-              ? `<div class="reply-hint" style="color:#92400e">Sin auto-respuesta (${this.escapeHtml(item.autoReplyReason)})</div>`
+              ? `<div class="reply-hint" style="color:#92400e">Sin auto-respuesta (${this.escapeHtml(reasonText)})</div>`
               : '';
 
         const el = document.createElement('div');
@@ -655,7 +785,6 @@ class CVAnalyzer {
 
         this.renderConversationsChatList();
         this.updateConversationsStatus({ suffix: 'en vivo' });
-        this.scheduleConversationsRefresh();
     }
 
     async loadConversationsChats(options = {}) {
@@ -676,13 +805,14 @@ class CVAnalyzer {
             return;
         }
         if (silent && this._conversationsLoadInFlight) {
-            this.scheduleConversationsRefresh(800);
+            this._conversationsLoadPending = true;
             return;
         }
 
         const sessionId = this.conversationsSessionSelect.value || 'all';
 
         this._conversationsLoadInFlight = true;
+        this._conversationsLoadPending = false;
         if (this.refreshConversationsBtn) this.refreshConversationsBtn.disabled = true;
         if (!silent) {
             if (this.conversationsStatus) {
@@ -766,6 +896,10 @@ class CVAnalyzer {
             if (timer) clearTimeout(timer);
             this._conversationsLoadInFlight = false;
             if (this.refreshConversationsBtn) this.refreshConversationsBtn.disabled = false;
+            if (this._conversationsLoadPending) {
+                this._conversationsLoadPending = false;
+                this.loadConversationsChats({ silent: true });
+            }
         }
     }
 
@@ -818,13 +952,20 @@ class CVAnalyzer {
             chatId: chat.id,
             sessionId: chat.sessionId,
             sessionLabel: chat.sessionLabel || chat.sessionId,
-            name: chat.name || chat.id
+            name: chat.name || chat.id,
+            isGroup: Boolean(chat.isGroup)
         };
+        this.activeConversationBlocked = false;
+        this.activeConversationAiPaused = false;
+        this.activeConversationKnownContact = false;
+        this.activeConversationSessionAiEnabled = true;
+        this.activeConversationAutoReplyEnabled = false;
         // Al abrir, marcar como leído en la UI (OpenWA actualizará en el próximo sync)
         chat.unreadCount = 0;
         this.renderConversationsChatList();
         this.updateConversationsStatus();
         this.setConversationsReplyEnabled(true);
+        this.updateConversationThreadActions();
 
         if (this.conversationsThreadHeader) {
             this.conversationsThreadHeader.innerHTML = `
@@ -841,7 +982,262 @@ class CVAnalyzer {
             this.conversationsReplyInput.focus();
         }
 
-        await this.refreshActiveConversationMessages({ silent: false });
+        await Promise.all([
+            this.refreshActiveConversationMessages({ silent: false }),
+            this.refreshActiveConversationBlockStatus()
+        ]);
+    }
+
+    updateConversationThreadActions() {
+        const canControl =
+            this.activeConversation && this.canControlSession(this.activeConversation.sessionId);
+        const isGroup = Boolean(this.activeConversation && this.activeConversation.isGroup);
+
+        if (this.conversationsThreadActions) {
+            this.conversationsThreadActions.style.display =
+                canControl && !isGroup ? 'flex' : 'none';
+        }
+        if (this.conversationsBlockBtn) {
+            this.conversationsBlockBtn.textContent = this.activeConversationBlocked
+                ? 'Desbloquear'
+                : 'Bloquear';
+            this.conversationsBlockBtn.className = this.activeConversationBlocked
+                ? 'btn btn-secondary btn-sm'
+                : 'btn btn-danger btn-sm';
+            this.conversationsBlockBtn.disabled = !canControl || isGroup;
+        }
+        if (this.conversationsAiPauseBtn) {
+            const known = this.activeConversationKnownContact;
+            const paused = this.activeConversationAiPaused;
+            this.conversationsAiPauseBtn.textContent = paused ? 'Reactivar IA' : 'Pausar IA';
+            this.conversationsAiPauseBtn.className = paused
+                ? 'btn btn-success btn-sm'
+                : 'btn btn-warning btn-sm';
+            this.conversationsAiPauseBtn.disabled = !canControl || isGroup || !known;
+            this.conversationsAiPauseBtn.title = !known
+                ? 'Solo contactos del historial (mensaje masivo) tienen auto-respuesta IA'
+                : paused
+                  ? 'Volver a dejar que la IA responda a este remitente'
+                  : 'Detener la IA en este chat para contestar tú';
+        }
+    }
+
+    updateActiveConversationHeaderBadges() {
+        if (!this.conversationsThreadHeader || !this.activeConversation) return;
+        const blockedBadge = this.activeConversationBlocked
+            ? '<span class="thread-blocked">Bloqueado</span>'
+            : '';
+        let aiBadge = '';
+        if (!this.activeConversation.isGroup) {
+            if (!this.activeConversationSessionAiEnabled) {
+                aiBadge = '<span class="thread-ai-line-off">IA off en esta línea</span>';
+            } else if (this.activeConversationAiPaused) {
+                aiBadge = '<span class="thread-ai-paused">IA pausada (tú contestas)</span>';
+            } else if (
+                this.activeConversationAutoReplyEnabled &&
+                this.activeConversationKnownContact
+            ) {
+                aiBadge = '<span class="thread-ai-active">IA activa</span>';
+            }
+        }
+        this.conversationsThreadHeader.innerHTML = `
+            ${this.escapeHtml(this.activeConversation.name)}
+            <span class="thread-session">Desde: ${this.escapeHtml(this.activeConversation.sessionLabel)}</span>
+            ${blockedBadge}${aiBadge}
+        `;
+    }
+
+    async refreshActiveConversationBlockStatus() {
+        const active = this.activeConversation;
+        if (!active || active.isGroup || String(active.chatId || '').endsWith('@g.us')) {
+            this.activeConversationBlocked = false;
+            this.activeConversationAiPaused = false;
+            this.activeConversationKnownContact = false;
+            this.updateConversationThreadActions();
+            return;
+        }
+
+        try {
+            const response = await fetch(
+                `/api/conversations/contact-status?sessionId=${encodeURIComponent(active.sessionId)}&chatId=${encodeURIComponent(active.chatId)}`
+            );
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo consultar el contacto');
+            this.activeConversationBlocked = Boolean(data.isBlocked);
+            this.activeConversationAiPaused = Boolean(data.aiPaused);
+            this.activeConversationKnownContact = Boolean(data.knownContact);
+            this.activeConversationSessionAiEnabled =
+                data.sessionAiEnabled !== undefined ? Boolean(data.sessionAiEnabled) : true;
+            this.activeConversationAutoReplyEnabled = Boolean(data.autoReplyEnabled);
+            this.updateActiveConversationHeaderBadges();
+        } catch (error) {
+            console.warn('contact-status:', error.message);
+        }
+        this.updateConversationThreadActions();
+    }
+
+    async toggleAiPauseActiveConversation() {
+        const active = this.activeConversation;
+        if (!active) return;
+        if (!this.canControlSession(active.sessionId)) {
+            this.showStatus('No tienes permiso de control en esta sesión', 'error');
+            return;
+        }
+        if (active.isGroup || String(active.chatId || '').endsWith('@g.us')) {
+            this.showStatus('La IA no se aplica a grupos', 'error');
+            return;
+        }
+        if (!this.activeConversationKnownContact) {
+            this.showStatus(
+                'Este número no está en el historial; la IA solo responde a contactos del envío masivo',
+                'error'
+            );
+            return;
+        }
+
+        const willPause = !this.activeConversationAiPaused;
+        const label = active.name || active.chatId;
+
+        try {
+            const response = await fetch('/api/conversations/ai-control', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId,
+                    aiPaused: willPause
+                })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo actualizar la IA');
+            this.activeConversationAiPaused = Boolean(data.aiPaused);
+            this.updateConversationThreadActions();
+            this.updateActiveConversationHeaderBadges();
+            this.showStatus(
+                willPause
+                    ? `IA pausada para ${label}. Puedes contestar tú.`
+                    : `IA reactivada para ${label}`,
+                'success'
+            );
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async toggleBlockActiveConversation() {
+        const active = this.activeConversation;
+        if (!active) return;
+        if (!this.canControlSession(active.sessionId)) {
+            this.showStatus('No tienes permiso de control en esta sesión', 'error');
+            return;
+        }
+        if (active.isGroup || String(active.chatId || '').endsWith('@g.us')) {
+            this.showStatus('No se pueden bloquear grupos', 'error');
+            return;
+        }
+
+        const willBlock = !this.activeConversationBlocked;
+        const label = active.name || active.chatId;
+        if (
+            !confirm(
+                willBlock
+                    ? `¿Bloquear a "${label}" en WhatsApp?`
+                    : `¿Desbloquear a "${label}"?`
+            )
+        ) {
+            return;
+        }
+
+        try {
+            const response = await fetch(
+                willBlock ? '/api/conversations/block' : '/api/conversations/unblock',
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId: active.sessionId,
+                        chatId: active.chatId
+                    })
+                }
+            );
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo completar la acción');
+            this.activeConversationBlocked = willBlock;
+            this.updateConversationThreadActions();
+            await this.refreshActiveConversationBlockStatus();
+            this.showStatus(
+                willBlock ? `Contacto bloqueado: ${label}` : `Contacto desbloqueado: ${label}`,
+                'success'
+            );
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async editConversationMessage(messageId, currentBody = '') {
+        const active = this.activeConversation;
+        if (!active) return;
+        if (!this.canControlSession(active.sessionId)) {
+            this.showStatus('No tienes permiso de control en esta sesión', 'error');
+            return;
+        }
+
+        const nextBody = window.prompt('Editar mensaje:', currentBody || '');
+        if (nextBody == null) return;
+        const body = String(nextBody).trim();
+        if (!body) {
+            this.showStatus('El mensaje no puede estar vacío', 'error');
+            return;
+        }
+        if (body === String(currentBody || '').trim()) return;
+
+        try {
+            const response = await fetch('/api/conversations/edit-message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId,
+                    messageId,
+                    body
+                })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo editar');
+            this.showStatus('Mensaje editado', 'success');
+            await this.refreshActiveConversationMessages({ silent: true });
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async deleteConversationMessage(messageId) {
+        const active = this.activeConversation;
+        if (!active) return;
+        if (!this.canControlSession(active.sessionId)) {
+            this.showStatus('No tienes permiso de control en esta sesión', 'error');
+            return;
+        }
+        if (!confirm('¿Eliminar este mensaje para todos?')) return;
+
+        try {
+            const response = await fetch('/api/conversations/delete-message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId,
+                    messageId,
+                    forEveryone: true
+                })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo eliminar');
+            this.showStatus('Mensaje eliminado', 'success');
+            await this.refreshActiveConversationMessages({ silent: true });
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
     }
 
     async refreshActiveConversationMessages(options = {}) {
@@ -886,19 +1282,33 @@ class CVAnalyzer {
         const nearBottom =
             el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         const prevScrollTop = el.scrollTop;
+        const canControl =
+            this.activeConversation &&
+            this.canControlSession(this.activeConversation.sessionId);
 
         if (!messages.length) {
             el.innerHTML = '<p class="auto-reply-empty">Sin mensajes en este chat.</p>';
+            delete el.dataset.lastMessagesHtml;
             return;
         }
 
         const nextHtml = messages
             .map((msg) => {
                 const time = this.formatConversationTime(msg.timestamp);
+                const messageId = msg.id ? String(msg.id) : '';
+                const canEdit =
+                    canControl && msg.fromMe && messageId && msg.type !== 'revoked';
+                const actions = canEdit
+                    ? `<div class="bubble-actions">
+                        <button type="button" class="bubble-action-btn" data-action="edit" data-message-id="${this.escapeHtml(messageId)}" data-body="${encodeURIComponent(msg.body || '')}">Editar</button>
+                        <button type="button" class="bubble-action-btn" data-action="delete" data-message-id="${this.escapeHtml(messageId)}">Eliminar</button>
+                       </div>`
+                    : '';
                 return `
-                <div class="conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}">
+                <div class="conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}" data-message-id="${this.escapeHtml(messageId)}">
                     ${this.escapeHtml(msg.body || '')}
                     ${time ? `<span class="bubble-time">${this.escapeHtml(time)}</span>` : ''}
+                    ${actions}
                 </div>`;
             })
             .join('');
@@ -977,9 +1387,18 @@ class CVAnalyzer {
             }
 
             this.showStatus(
-                `Enviado desde ${this.activeConversation.sessionLabel}`,
+                data.aiPaused === true
+                    ? `Enviado desde ${this.activeConversation.sessionLabel}. IA pausada en este chat.`
+                    : `Enviado desde ${this.activeConversation.sessionLabel}`,
                 'success'
             );
+
+            if (data.aiPaused === true) {
+                this.activeConversationAiPaused = true;
+                this.activeConversationKnownContact = true;
+                this.updateConversationThreadActions();
+                this.updateActiveConversationHeaderBadges();
+            }
         } catch (error) {
             console.error('[conversations] reply error', error);
             this.showStatus(error.message || 'No se pudo enviar', 'error');
@@ -998,6 +1417,12 @@ class CVAnalyzer {
             if (!data.success) throw new Error(data.error || 'Error cargando config');
             const config = data.config || {};
             this.autoReplyRules = Array.isArray(config.rules) ? config.rules : [];
+            this.autoReplyEnabledSessionIds =
+                config.enabledSessionIds === null || config.enabledSessionIds === undefined
+                    ? null
+                    : Array.isArray(config.enabledSessionIds)
+                      ? config.enabledSessionIds
+                      : null;
             if (this.autoReplyBasePrompt) {
                 this.autoReplyBasePrompt.value = config.basePrompt || '';
             }
@@ -1005,9 +1430,47 @@ class CVAnalyzer {
                 this.autoReplyEnabledToggle.checked = Boolean(config.enabled);
             }
             this.renderAutoReplyRules();
+            this.renderAutoReplySessions();
         } catch (error) {
             console.error('Error cargando auto-reply config:', error);
         }
+    }
+
+    renderAutoReplySessions() {
+        if (!this.autoReplySessionsList) return;
+        const sessions = this.configuredSessions || [];
+        if (!sessions.length) {
+            this.autoReplySessionsList.innerHTML =
+                '<p class="auto-reply-empty">No hay sesiones configuradas.</p>';
+            return;
+        }
+
+        const allEnabled = this.autoReplyEnabledSessionIds === null;
+        this.autoReplySessionsList.innerHTML = sessions
+            .map((session) => {
+                const checked =
+                    allEnabled ||
+                    (Array.isArray(this.autoReplyEnabledSessionIds) &&
+                        this.autoReplyEnabledSessionIds.includes(session.id));
+                return `
+                <label class="auto-reply-session-item">
+                    <input type="checkbox" class="auto-reply-session-check" data-session-id="${this.escapeHtml(session.id)}" ${checked ? 'checked' : ''}>
+                    <span>${this.escapeHtml(session.label || session.id)}</span>
+                </label>`;
+            })
+            .join('');
+    }
+
+    collectEnabledSessionIdsFromDom() {
+        if (!this.autoReplySessionsList) {
+            return this.autoReplyEnabledSessionIds;
+        }
+        const checks = this.autoReplySessionsList.querySelectorAll('.auto-reply-session-check');
+        if (!checks.length) return this.autoReplyEnabledSessionIds;
+        return Array.from(checks)
+            .filter((el) => el.checked)
+            .map((el) => el.dataset.sessionId)
+            .filter(Boolean);
     }
 
     renderAutoReplyRules() {
@@ -1077,7 +1540,10 @@ class CVAnalyzer {
             const payload = {
                 enabled: this.autoReplyEnabledToggle ? this.autoReplyEnabledToggle.checked : false,
                 basePrompt: this.autoReplyBasePrompt ? this.autoReplyBasePrompt.value : '',
-                rules: options.enabledOnly ? undefined : this.collectAutoReplyRulesFromDom()
+                rules: options.enabledOnly ? undefined : this.collectAutoReplyRulesFromDom(),
+                enabledSessionIds: options.enabledOnly
+                    ? this.autoReplyEnabledSessionIds
+                    : this.collectEnabledSessionIdsFromDom()
             };
             if (options.enabledOnly) {
                 payload.rules = this.autoReplyRules;
@@ -1090,7 +1556,15 @@ class CVAnalyzer {
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo guardar');
             this.autoReplyRules = data.config.rules || [];
-            if (!options.enabledOnly) this.renderAutoReplyRules();
+            this.autoReplyEnabledSessionIds =
+                data.config.enabledSessionIds === null ||
+                data.config.enabledSessionIds === undefined
+                    ? null
+                    : data.config.enabledSessionIds;
+            if (!options.enabledOnly) {
+                this.renderAutoReplyRules();
+                this.renderAutoReplySessions();
+            }
             if (!options.silent) {
                 this.showStatus('Configuración de auto-respuesta guardada', 'success');
             }
@@ -1603,6 +2077,7 @@ class CVAnalyzer {
                 this.configuredSessions = data.sessions || [];
                 this.renderSessionUI();
                 this.populateConversationsSessionSelect();
+                this.renderAutoReplySessions();
             }
         } catch (error) {
             console.error('Error cargando sesiones:', error);
@@ -1703,6 +2178,8 @@ class CVAnalyzer {
                         <strong>${this.escapeHtml(user.username)}</strong>
                         <button type="button" class="btn btn-danger btn-sm delete-user-btn" data-id="${this.escapeHtml(user.id)}">Eliminar</button>
                     </div>
+                    <label style="font-size:12px;color:#64748b;display:block;margin:6px 0 4px;">Correo gerente (Panel)</label>
+                    <input type="email" class="form-select user-gerente-input" data-id="${this.escapeHtml(user.id)}" value="${this.escapeHtml(user.gerenteEmail || '')}" placeholder="correo@protalentconnections.com" autocomplete="off">
                     <div class="user-card-perms">${permRows || '<p style="font-size:12px;color:#64748b;">No hay sesiones para asignar.</p>'}</div>
                     <div class="user-card-actions">
                         <input type="password" class="form-select user-password-input" data-id="${this.escapeHtml(user.id)}" placeholder="Nueva contraseña (opcional)" autocomplete="new-password">
@@ -1724,19 +2201,21 @@ class CVAnalyzer {
         if (!this.isSuperUser()) return;
         const username = this.newUserUsername ? this.newUserUsername.value.trim() : '';
         const password = this.newUserPassword ? this.newUserPassword.value : '';
+        const gerenteEmail = this.newUserGerenteEmail ? this.newUserGerenteEmail.value.trim() : '';
         const permissions = this.collectPermissionsFromForm(this.newUserPermissions);
 
         try {
             const response = await fetch('/api/users', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password, permissions })
+                body: JSON.stringify({ username, password, permissions, gerenteEmail })
             });
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo crear');
 
             if (this.newUserUsername) this.newUserUsername.value = '';
             if (this.newUserPassword) this.newUserPassword.value = '';
+            if (this.newUserGerenteEmail) this.newUserGerenteEmail.value = '';
             this.renderNewUserPermissions();
             if (this.usersFormStatus) {
                 this.usersFormStatus.textContent = `Usuario "${username}" creado`;
@@ -1757,7 +2236,9 @@ class CVAnalyzer {
         if (!card) return;
 
         const passwordInput = card.querySelector('.user-password-input');
+        const gerenteInput = card.querySelector('.user-gerente-input');
         const password = passwordInput ? passwordInput.value : '';
+        const gerenteEmail = gerenteInput ? gerenteInput.value.trim() : '';
         const permissions = this.collectPermissionsFromForm(card);
 
         try {
@@ -1766,6 +2247,7 @@ class CVAnalyzer {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     permissions,
+                    gerenteEmail,
                     ...(password ? { password } : {})
                 })
             });
@@ -1964,10 +2446,28 @@ class CVAnalyzer {
                 this.whatsappProvider = config.whatsappProvider || 'openwa';
                 if (config.user) {
                     this.currentUser = config.user;
+                    if (this.myGerenteEmail && config.user.gerenteEmail != null) {
+                        this.myGerenteEmail.value = config.user.gerenteEmail || '';
+                    }
                 }
                 if (Array.isArray(config.sessions)) {
                     this.configuredSessions = config.sessions;
                     this.renderSessionUI();
+                }
+                if (config.panel && typeof config.panel === 'object') {
+                    this.panelConfig = {
+                        configured: Boolean(config.panel.configured),
+                        publicCvUrlConfigured: Boolean(config.panel.publicCvUrlConfigured),
+                        gerenteEmail: config.panel.gerenteEmail || '',
+                        baseUrl: config.panel.baseUrl || ''
+                    };
+                    if (
+                        this.myGerenteEmail &&
+                        !this.myGerenteEmail.value &&
+                        config.panel.gerenteEmail
+                    ) {
+                        this.myGerenteEmail.value = config.panel.gerenteEmail;
+                    }
                 }
                 this.applyPermissionUI();
                 this.updateTestModeDisplay();
@@ -2187,6 +2687,9 @@ class CVAnalyzer {
                     <button class="btn-cancel-edit" data-index="${index}" data-mensaje-id="${mensajeId}" style="display: none;" title="Cancelar">
                         ❌ Cancelar
                     </button>
+                    <button class="btn-agendar" data-index="${index}" ${cv.procesado && cv.cvId ? '' : 'disabled'} title="Agendar reunión en Panel">
+                        📅 Agendar
+                    </button>
                 </td>
                 <td class="estado ${estadoClass}">${estadoText}</td>
             `;
@@ -2253,9 +2756,320 @@ class CVAnalyzer {
                 saveBtn.style.display = 'none';
                 cancelBtn.style.display = 'none';
             });
+
+            const agendarBtn = row.querySelector('.btn-agendar');
+            if (agendarBtn && !agendarBtn.disabled) {
+                agendarBtn.addEventListener('click', () => this.openAgendarModal(index));
+            }
         });
 
         this.resultsSection.style.display = 'block';
+    }
+
+    initAgendarModal() {
+        this.agendarModal = document.getElementById('agendarModal');
+        this.agendarCvLabel = document.getElementById('agendarCvLabel');
+        this.agendarGerenteEmail = document.getElementById('agendarGerenteEmail');
+        this.agendarVendedor = document.getElementById('agendarVendedor');
+        this.agendarSlot = document.getElementById('agendarSlot');
+        this.agendarUrlReunion = document.getElementById('agendarUrlReunion');
+        this.agendarLeadCorreo = document.getElementById('agendarLeadCorreo');
+        this.agendarHint = document.getElementById('agendarHint');
+        this.agendarStatus = document.getElementById('agendarStatus');
+        this.agendarConfirmBtn = document.getElementById('agendarConfirmBtn');
+
+        const close = () => this.closeAgendarModal();
+        const closeBtn = document.getElementById('agendarModalClose');
+        const cancelBtn = document.getElementById('agendarCancelBtn');
+        if (closeBtn) closeBtn.addEventListener('click', close);
+        if (cancelBtn) cancelBtn.addEventListener('click', close);
+        if (this.agendarModal) {
+            this.agendarModal.addEventListener('click', (e) => {
+                if (e.target === this.agendarModal) close();
+            });
+        }
+        if (this.agendarVendedor) {
+            this.agendarVendedor.addEventListener('change', () => this.renderAgendarSlots());
+        }
+        if (this.agendarConfirmBtn) {
+            this.agendarConfirmBtn.addEventListener('click', () => this.confirmAgendarReunion());
+        }
+    }
+
+    setAgendarStatus(message, type = 'info') {
+        if (!this.agendarStatus) return;
+        if (!message) {
+            this.agendarStatus.style.display = 'none';
+            this.agendarStatus.textContent = '';
+            return;
+        }
+        this.agendarStatus.style.display = 'block';
+        this.agendarStatus.className = `agendar-status ${type}`;
+        this.agendarStatus.textContent = message;
+    }
+
+    closeAgendarModal() {
+        if (this.agendarModal) {
+            this.agendarModal.style.display = 'none';
+            this.agendarModal.setAttribute('aria-hidden', 'true');
+        }
+        this.agendarCvIndex = null;
+        if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;
+    }
+
+    async openAgendarModal(index) {
+        const cv = this.cvsData[index];
+        if (!cv || !cv.cvId) {
+            this.showStatus('Este CV no tiene archivo guardado. Vuelve a subirlo.', 'error');
+            return;
+        }
+        if (!this.panelConfig.configured) {
+            this.showStatus(
+                'Integración con panel no configurada. Define MSG_INTEGRATION_API_KEY en .env',
+                'error'
+            );
+            return;
+        }
+        const gerentePreview =
+            (this.currentUser && this.currentUser.gerenteEmail) ||
+            this.panelConfig.gerenteEmail ||
+            '';
+        if (!gerentePreview) {
+            this.showStatus(
+                'Guarda tu correo de gerente arriba (Tu correo en Panel) antes de agendar.',
+                'error'
+            );
+            return;
+        }
+        if (!this.panelConfig.publicCvUrlConfigured) {
+            this.showStatus(
+                'Configura WEBHOOK_PUBLIC_URL para que el panel pueda descargar el CV.',
+                'error'
+            );
+            return;
+        }
+
+        this.agendarCvIndex = index;
+        if (this.agendarCvLabel) {
+            this.agendarCvLabel.textContent = `CV: ${cv.nombre || cv.archivoOriginal} (${cv.archivoOriginal})`;
+        }
+        if (this.agendarGerenteEmail) {
+            this.agendarGerenteEmail.value =
+                (this.currentUser && this.currentUser.gerenteEmail) ||
+                this.panelConfig.gerenteEmail ||
+                '';
+        }
+        if (this.agendarUrlReunion) this.agendarUrlReunion.value = '';
+        if (this.agendarLeadCorreo) this.agendarLeadCorreo.value = '';
+        this.setAgendarStatus('');
+        if (this.agendarVendedor) {
+            this.agendarVendedor.innerHTML = '<option value="">Cargando disponibilidad…</option>';
+            this.agendarVendedor.disabled = true;
+        }
+        if (this.agendarSlot) {
+            this.agendarSlot.innerHTML = '<option value="">Elige un vendedor primero</option>';
+            this.agendarSlot.disabled = true;
+        }
+
+        if (this.agendarModal) {
+            this.agendarModal.style.display = 'flex';
+            this.agendarModal.setAttribute('aria-hidden', 'false');
+        }
+
+        try {
+            const data = await this.fetchDisponibilidad(this.agendarGerenteEmail?.value);
+            this.disponibilidadData = data;
+            this.populateAgendarVendedores(data);
+        } catch (error) {
+            this.setAgendarStatus(error.message || 'No se pudo cargar disponibilidad', 'error');
+            if (this.agendarVendedor) {
+                this.agendarVendedor.innerHTML = '<option value="">Sin disponibilidad</option>';
+            }
+        }
+    }
+
+    async fetchDisponibilidad(gerenteEmail, force = false) {
+        const cacheTtlMs = 90 * 1000;
+        const sameGerente =
+            this.disponibilidadCache &&
+            String(this.disponibilidadCache._gerenteEmail || '') === String(gerenteEmail || '');
+        if (
+            !force &&
+            sameGerente &&
+            this.disponibilidadCacheAt &&
+            Date.now() - this.disponibilidadCacheAt < cacheTtlMs
+        ) {
+            return this.disponibilidadCache;
+        }
+
+        const params = new URLSearchParams();
+        if (gerenteEmail) params.set('gerenteEmail', gerenteEmail);
+        const response = await fetch(`/api/panel/disponibilidad?${params.toString()}`);
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.error || data.message || `Error ${response.status}`);
+        }
+        data._gerenteEmail = gerenteEmail || '';
+        this.disponibilidadCache = data;
+        this.disponibilidadCacheAt = Date.now();
+        return data;
+    }
+
+    populateAgendarVendedores(data) {
+        const vendedores = Array.isArray(data.vendedores) ? data.vendedores : [];
+        if (!this.agendarVendedor) return;
+
+        if (vendedores.length === 0) {
+            this.agendarVendedor.innerHTML = '<option value="">No hay vendedores con slots libres</option>';
+            this.agendarVendedor.disabled = true;
+            this.setAgendarStatus('No hay horarios libres en el rango consultado.', 'info');
+            return;
+        }
+
+        const withSlots = vendedores.filter(
+            (v) => Array.isArray(v.disponibilidad) && v.disponibilidad.length > 0
+        );
+        if (withSlots.length === 0) {
+            this.agendarVendedor.innerHTML = '<option value="">Sin slots libres</option>';
+            this.agendarVendedor.disabled = true;
+            this.setAgendarStatus('Los vendedores del equipo no tienen slots libres.', 'info');
+            return;
+        }
+
+        this.agendarVendedor.innerHTML =
+            '<option value="">Selecciona vendedor…</option>' +
+            withSlots
+                .map((v) => {
+                    const n = (v.disponibilidad || []).length;
+                    const label = `${v.nombre || v.correo} (${n} slots)`;
+                    return `<option value="${String(v.id).replace(/"/g, '')}">${label.replace(/</g, '&lt;')}</option>`;
+                })
+                .join('');
+        this.agendarVendedor.disabled = false;
+        this.setAgendarStatus('');
+        this.renderAgendarSlots();
+    }
+
+    renderAgendarSlots() {
+        if (!this.agendarSlot || !this.agendarVendedor) return;
+        const vendedorId = this.agendarVendedor.value;
+        const vendedores = Array.isArray(this.disponibilidadData?.vendedores)
+            ? this.disponibilidadData.vendedores
+            : [];
+        const vendedor = vendedores.find((v) => String(v.id) === String(vendedorId));
+        const slots = Array.isArray(vendedor?.disponibilidad) ? vendedor.disponibilidad : [];
+
+        if (!vendedorId || slots.length === 0) {
+            this.agendarSlot.innerHTML = '<option value="">Elige un vendedor primero</option>';
+            this.agendarSlot.disabled = true;
+            return;
+        }
+
+        this.agendarSlot.innerHTML = slots
+            .map((s, i) => {
+                const label = `${s.fecha} ${s.horaInicio}–${s.horaFin}`;
+                const value = JSON.stringify({
+                    fecha: s.fecha,
+                    horaInicio: s.horaInicio,
+                    horaFin: s.horaFin
+                });
+                return `<option value="${encodeURIComponent(value)}">${label}</option>`;
+            })
+            .join('');
+        this.agendarSlot.disabled = false;
+    }
+
+    async confirmAgendarReunion() {
+        const index = this.agendarCvIndex;
+        const cv = index != null ? this.cvsData[index] : null;
+        if (!cv || !cv.cvId) {
+            this.setAgendarStatus('CV inválido', 'error');
+            return;
+        }
+
+        const vendedorId = this.agendarVendedor?.value;
+        const slotRaw = this.agendarSlot?.value;
+        const urlReunion = (this.agendarUrlReunion?.value || '').trim();
+        const gerenteEmail = (this.agendarGerenteEmail?.value || '').trim();
+        const leadCorreo = (this.agendarLeadCorreo?.value || '').trim();
+
+        if (!vendedorId) {
+            this.setAgendarStatus('Selecciona un vendedor', 'error');
+            return;
+        }
+        if (!slotRaw) {
+            this.setAgendarStatus('Selecciona un horario', 'error');
+            return;
+        }
+        if (!urlReunion) {
+            this.setAgendarStatus('La liga de videollamada es obligatoria', 'error');
+            return;
+        }
+
+        let slot;
+        try {
+            slot = JSON.parse(decodeURIComponent(slotRaw));
+        } catch {
+            this.setAgendarStatus('Slot inválido', 'error');
+            return;
+        }
+
+        if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = true;
+        this.setAgendarStatus('Creando reunión (el panel analiza el CV con DeepSeek)…', 'info');
+
+        try {
+            // Refrescar disponibilidad justo antes de confirmar (TTL corto)
+            this.disponibilidadCacheAt = 0;
+
+            const response = await fetch('/api/panel/reuniones', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    cvId: cv.cvId,
+                    vendedorId,
+                    fecha: slot.fecha,
+                    horaInicio: slot.horaInicio,
+                    horaFin: slot.horaFin,
+                    urlReunion,
+                    gerenteEmail: gerenteEmail || undefined,
+                    leadCorreo: leadCorreo || undefined
+                })
+            });
+            const data = await response.json();
+
+            if (!response.ok || data.success === false) {
+                const hint = data.hint ? ` ${data.hint}` : '';
+                this.setAgendarStatus((data.error || data.message || 'Error al agendar') + hint, 'error');
+                if (response.status === 409) {
+                    try {
+                        const fresh = await this.fetchDisponibilidad(gerenteEmail, true);
+                        this.disponibilidadData = fresh;
+                        this.populateAgendarVendedores(fresh);
+                    } catch {
+                        /* ignore refresh errors */
+                    }
+                }
+                if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;
+                return;
+            }
+
+            const lead = data.leadExtraido || data.reunion || {};
+            const reunionId = data.reunion?.id || '';
+            const msg = [
+                'Reunión creada.',
+                lead.leadNombre ? ` Lead: ${lead.leadNombre}` : '',
+                lead.leadCorreo ? ` <${lead.leadCorreo}>` : '',
+                reunionId ? ` (#${reunionId})` : ''
+            ].join('');
+            this.setAgendarStatus(msg, 'success');
+            this.showStatus(msg, 'success');
+            this.disponibilidadCacheAt = 0;
+            if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;
+            setTimeout(() => this.closeAgendarModal(), 1800);
+        } catch (error) {
+            this.setAgendarStatus(error.message || 'Error de conexión', 'error');
+            if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;
+        }
     }
 
     /**
@@ -3458,6 +4272,24 @@ class CVAnalyzer {
                 this.handleConversationIncomingMessage(data);
             } catch (error) {
                 console.warn('incomingMessage SSE:', error);
+            }
+        });
+
+        this.eventSource.addEventListener('aiControlChanged', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (
+                    this.activeConversation &&
+                    this.activeConversation.sessionId === data.sessionId &&
+                    this.activeConversation.chatId === data.chatId
+                ) {
+                    this.activeConversationAiPaused = Boolean(data.aiPaused);
+                    this.activeConversationKnownContact = true;
+                    this.updateConversationThreadActions();
+                    this.updateActiveConversationHeaderBadges();
+                }
+            } catch (error) {
+                console.warn('aiControlChanged SSE:', error);
             }
         });
 

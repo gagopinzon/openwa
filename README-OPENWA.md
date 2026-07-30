@@ -37,7 +37,25 @@ WEBHOOK_SECRET=un-secreto-largo-aleatorio
 AUTO_REPLY_ENABLED=false
 AUTO_REPLY_MIN_DELAY_MS=3000
 AUTO_REPLY_MAX_DELAY_MS=8000
+
+# Agendar reuniones en Panel (API externa Msg)
+# Misma MSG_INTEGRATION_API_KEY que en panel.protalentconnections.com
+PANEL_BASE_URL=https://panel.protalentconnections.com
+MSG_INTEGRATION_API_KEY=clave_compartida_con_panel
+# Opcional: fallback. Lo normal es que cada usuario guarde su correo en la UI ("Tu correo en Panel")
+MSG_GERENTE_EMAIL=gerente@protalentconnections.com
 ```
+
+### Agendar reuniones desde CVs
+
+Con la integración al panel puedes, desde la tabla de CVs, pulsar **Agendar**:
+
+1. Guarda tu **correo de gerente** en la sección *Tu correo en Panel* (debe existir en panel.protalentconnections.com).
+2. Se consulta disponibilidad del equipo de ese gerente.
+3. Eliges vendedor + slot y pegas la liga Zoom/Meet/Teams.
+4. Msg envía `cvUrl` pública; el panel descarga el PDF, lo analiza con DeepSeek y crea la reunión.
+
+Requisitos: `MSG_INTEGRATION_API_KEY`, correo de gerente (perfil o `MSG_GERENTE_EMAIL`) y `WEBHOOK_PUBLIC_URL` alcanzable desde el servidor del panel.
 
 ### Configurar sesiones (sin editar .env cada vez)
 
@@ -68,6 +86,7 @@ Interfaz: http://localhost:3445
 2. En la web, configura las sesiones en **Sesiones WhatsApp** (agregar o importar conectadas).
 3. Pulsa **Verificar sesiones OpenWA**.
 4. Sube PDFs, genera mensajes con IA y envía (o usa `TEST_MODE=true` para simular).
+5. Opcional: con panel configurado, pulsa **Agendar** en un CV para crear la reunión en panel.protalentconnections.com.
 
 ## Auto-respuesta IA
 
