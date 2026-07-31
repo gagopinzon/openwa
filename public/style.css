@@ -1040,10 +1040,22 @@ footer p {
 .conversations-thread-actions {
     display: flex;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid #e2e8f0;
     background: #fff;
+}
+
+#conversationsAgendarBtn {
+    background: #0d9488;
+    border-color: #0d9488;
+    color: #fff;
+}
+
+#conversationsAgendarBtn:hover:not(:disabled) {
+    background: #0f766e;
+    border-color: #0f766e;
 }
 
 .conversations-thread-header .thread-session {

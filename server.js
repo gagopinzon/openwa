@@ -955,6 +955,78 @@ app.get('/api/panel/disponibilidad', async (req, res) => {
   }
 });
 
+// Subir un solo CV para agendar (p. ej. desde conversaciones) sin limpiar el lote actual
+app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'Sube un archivo PDF' });
+    }
+
+    const saved = cvFileStore.saveCvFile(req.file.buffer, req.file.originalname);
+    let cvData = {
+      nombre: 'Candidato',
+      telefono: String(req.body.telefono || '').trim() || 'No encontrado',
+      experiencia: '',
+      textoCompleto: '',
+      procesado: true
+    };
+
+    try {
+      const text = await extractTextFromPDF(req.file.buffer);
+      cvData = { ...extractCVData(text), procesado: true };
+      if (req.body.telefono) {
+        cvData.telefono = String(req.body.telefono).trim();
+      }
+      if (req.body.nombre && String(req.body.nombre).trim()) {
+        cvData.nombre = String(req.body.nombre).trim();
+      }
+    } catch (parseErr) {
+      console.warn('[panel/cv-upload] parse parcial:', parseErr.message);
+      if (req.body.nombre) cvData.nombre = String(req.body.nombre).trim();
+    }
+
+    const entry = {
+      ...cvData,
+      archivoOriginal: req.file.originalname,
+      cvId: saved.cvId,
+      cvFileName: saved.cvFileName,
+      saludo: '',
+      mensajeIA: '',
+      procesado: true,
+      fromConversation: true
+    };
+
+    // Actualizar si ya hay uno con mismo teléfono; si no, agregar
+    const norm = contactHistory.normalizePhone(entry.telefono);
+    if (norm) {
+      const idx = cvsData.findIndex(
+        (c) => contactHistory.normalizePhone(c.telefono) === norm && c.cvId
+      );
+      if (idx >= 0) {
+        cvsData[idx] = { ...cvsData[idx], ...entry };
+      } else {
+        cvsData.push(entry);
+      }
+    } else {
+      cvsData.push(entry);
+    }
+
+    res.json({
+      success: true,
+      cvId: saved.cvId,
+      cv: {
+        cvId: entry.cvId,
+        nombre: entry.nombre,
+        telefono: entry.telefono,
+        archivoOriginal: entry.archivoOriginal
+      }
+    });
+  } catch (error) {
+    console.error('[panel/cv-upload]', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Proxy autenticado → crear reunión en panel
 app.post('/api/panel/reuniones', async (req, res) => {
   try {
@@ -998,17 +1070,11 @@ app.post('/api/panel/reuniones', async (req, res) => {
       });
     }
 
-    const cv = cvsData.find((c) => c.cvId === cvId);
-    if (!cv || !cv.procesado) {
-      return res.status(404).json({
-        success: false,
-        error: 'CV no encontrado en la sesión actual. Vuelve a subir el PDF.'
-      });
-    }
+    const cv = cvsData.find((c) => c.cvId === cvId) || null;
     if (!cvFileStore.getCvFileMeta(cvId)) {
       return res.status(404).json({
         success: false,
-        error: 'Archivo del CV no está disponible en disco. Vuelve a subir el PDF.'
+        error: 'Archivo del CV no está disponible. Sube el PDF e inténtalo de nuevo.'
       });
     }
 
@@ -1033,7 +1099,9 @@ app.post('/api/panel/reuniones', async (req, res) => {
       horaFin,
       urlReunion: String(urlReunion).trim(),
       cvUrl,
-      titulo: titulo || `Sesión — ${cv.nombre || cv.archivoOriginal || 'candidato'}`,
+      titulo:
+        titulo ||
+        `Sesión — ${leadNombre || cv?.nombre || cv?.archivoOriginal || 'candidato'}`,
       leadCorreo,
       leadNombre,
       leadTelefono,

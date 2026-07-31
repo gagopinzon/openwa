@@ -110,6 +110,9 @@
                             Selecciona un chat
                         </div>
                         <div class="conversations-thread-actions" id="conversationsThreadActions" style="display: none;">
+                            <button type="button" id="conversationsAgendarBtn" class="btn btn-primary btn-sm">
+                                Agendar
+                            </button>
                             <button type="button" id="conversationsAiPauseBtn" class="btn btn-warning btn-sm">
                                 Pausar IA
                             </button>
@@ -372,6 +375,20 @@
             <div class="agendar-modal-body">
                 <p class="agendar-cv-label" id="agendarCvLabel"></p>
 
+                <div id="agendarCvSelectWrap" style="display: none;">
+                    <label class="agendar-field-label" for="agendarCvSelect">CV del lead (ya cargados)</label>
+                    <select id="agendarCvSelect" class="agendar-input">
+                        <option value="">Selecciona un CV…</option>
+                    </select>
+                    <p class="agendar-hint">Se reutiliza el PDF que subiste en <strong>Cargar CVs</strong>. Elige el lead correcto si el teléfono no coincidió solo.</p>
+                </div>
+
+                <div id="agendarCvUploadWrap" style="display: none;">
+                    <label class="agendar-field-label" for="agendarCvFile">Subir otro CV (PDF)</label>
+                    <input type="file" id="agendarCvFile" class="agendar-input" accept="application/pdf,.pdf" />
+                    <p class="agendar-hint" id="agendarCvUploadHint">Solo si el lead no está en la lista de CVs cargados.</p>
+                </div>
+
                 <label class="agendar-field-label" for="agendarGerenteEmail">Correo del gerente</label>
                 <input type="email" id="agendarGerenteEmail" class="agendar-input" placeholder="gerente@protalentconnections.com" />
 
@@ -403,7 +420,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=gerente-email-1"></script>
+    <script src="app.js?v=agendar-recycle-cv-1"></script>
     <script>
         (async function initAuthUi() {
             try {

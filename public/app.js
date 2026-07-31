@@ -28,6 +28,7 @@ class CVAnalyzer {
         this.applyPermissionUI();
         this.loadConfig().then(async () => {
             await this.loadSessions();
+            await this.refreshCvsFromServer({ silent: true });
             this.loadAutoReplyConfig();
             this.loadAutoReplyStatus();
             this.loadIncomingInbox();
@@ -282,6 +283,7 @@ class CVAnalyzer {
         this.conversationsThreadActions = document.getElementById('conversationsThreadActions');
         this.conversationsBlockBtn = document.getElementById('conversationsBlockBtn');
         this.conversationsAiPauseBtn = document.getElementById('conversationsAiPauseBtn');
+        this.conversationsAgendarBtn = document.getElementById('conversationsAgendarBtn');
         this.conversationsChats = [];
         this.activeConversation = null;
         this.activeConversationBlocked = false;
@@ -374,6 +376,9 @@ class CVAnalyzer {
         }
         if (this.conversationsAiPauseBtn) {
             this.conversationsAiPauseBtn.addEventListener('click', () => this.toggleAiPauseActiveConversation());
+        }
+        if (this.conversationsAgendarBtn) {
+            this.conversationsAgendarBtn.addEventListener('click', () => this.openAgendarFromConversation());
         }
         if (this.conversationsThreadMessages && !this._conversationActionsBound) {
             this._conversationActionsBound = true;
@@ -1019,6 +1024,12 @@ class CVAnalyzer {
                 : paused
                   ? 'Volver a dejar que la IA responda a este remitente'
                   : 'Detener la IA en este chat para contestar tú';
+        }
+        if (this.conversationsAgendarBtn) {
+            this.conversationsAgendarBtn.disabled = !canControl || isGroup;
+            this.conversationsAgendarBtn.title = isGroup
+                ? 'No se puede agendar desde un grupo'
+                : 'Agendar reunión en Panel con este contacto';
         }
     }
 
@@ -2777,6 +2788,15 @@ class CVAnalyzer {
         this.agendarHint = document.getElementById('agendarHint');
         this.agendarStatus = document.getElementById('agendarStatus');
         this.agendarConfirmBtn = document.getElementById('agendarConfirmBtn');
+        this.agendarCvSelectWrap = document.getElementById('agendarCvSelectWrap');
+        this.agendarCvSelect = document.getElementById('agendarCvSelect');
+        this.agendarCvUploadWrap = document.getElementById('agendarCvUploadWrap');
+        this.agendarCvFile = document.getElementById('agendarCvFile');
+        this.agendarCvUploadHint = document.getElementById('agendarCvUploadHint');
+        this.agendarCvId = null;
+        this.agendarLeadNombre = '';
+        this.agendarLeadTelefono = '';
+        this.agendarNeedsCvUpload = false;
 
         const close = () => this.closeAgendarModal();
         const closeBtn = document.getElementById('agendarModalClose');
@@ -2793,6 +2813,24 @@ class CVAnalyzer {
         }
         if (this.agendarConfirmBtn) {
             this.agendarConfirmBtn.addEventListener('click', () => this.confirmAgendarReunion());
+        }
+        if (this.agendarCvSelect) {
+            this.agendarCvSelect.addEventListener('change', () => this.onAgendarCvSelectChange());
+        }
+        if (this.agendarCvFile) {
+            this.agendarCvFile.addEventListener('change', () => {
+                const file = this.agendarCvFile.files && this.agendarCvFile.files[0];
+                if (file) {
+                    this.agendarCvId = null;
+                    this.agendarNeedsCvUpload = true;
+                    if (this.agendarCvSelect) this.agendarCvSelect.value = '';
+                    if (this.agendarCvLabel) {
+                        this.agendarCvLabel.textContent = `CV a subir: ${file.name}${
+                            this.agendarLeadNombre ? ` — ${this.agendarLeadNombre}` : ''
+                        }`;
+                    }
+                }
+            });
         }
     }
 
@@ -2814,21 +2852,106 @@ class CVAnalyzer {
             this.agendarModal.setAttribute('aria-hidden', 'true');
         }
         this.agendarCvIndex = null;
+        this.agendarCvId = null;
+        this.agendarLeadNombre = '';
+        this.agendarLeadTelefono = '';
+        this.agendarNeedsCvUpload = false;
         if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;
+        if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
+        if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
+        if (this.agendarCvFile) this.agendarCvFile.value = '';
+        if (this.agendarCvSelect) this.agendarCvSelect.innerHTML = '';
     }
 
-    async openAgendarModal(index) {
-        const cv = this.cvsData[index];
-        if (!cv || !cv.cvId) {
-            this.showStatus('Este CV no tiene archivo guardado. Vuelve a subirlo.', 'error');
+    async refreshCvsFromServer({ silent = false } = {}) {
+        try {
+            const response = await fetch('/cvs-status');
+            const data = await response.json();
+            if (data.success && Array.isArray(data.cvs)) {
+                this.cvsData = data.cvs;
+                if (this.cvsData.length > 0) {
+                    this.displayResults();
+                }
+                return this.cvsData;
+            }
+        } catch (error) {
+            if (!silent) console.warn('No se pudieron refrescar CVs:', error.message);
+        }
+        return this.cvsData || [];
+    }
+
+    getReusableCvs() {
+        return (this.cvsData || []).filter((cv) => cv && cv.procesado && cv.cvId);
+    }
+
+    phonesMatch(a, b) {
+        const na = this.normalizePhoneDigits(a);
+        const nb = this.normalizePhoneDigits(b);
+        if (!na || !nb) return false;
+        if (na === nb) return true;
+        if (na.endsWith(nb) || nb.endsWith(na)) return true;
+        const ta = na.slice(-10);
+        const tb = nb.slice(-10);
+        if (ta.length === 10 && ta === tb) return true;
+        const stripMx = (p) => {
+            if (p.startsWith('521') && p.length >= 13) return p.slice(3);
+            if (p.startsWith('52') && p.length >= 12) return p.slice(2);
+            return p;
+        };
+        const sa = stripMx(na);
+        const sb = stripMx(nb);
+        return sa === sb || sa.slice(-10) === sb.slice(-10);
+    }
+
+    populateAgendarCvSelect({ selectedCvId = '', preferredPhone = '' } = {}) {
+        if (!this.agendarCvSelect) return [];
+        const reusable = this.getReusableCvs();
+        const options = ['<option value="">Selecciona un CV cargado…</option>'];
+        let autoId = selectedCvId;
+        if (!autoId && preferredPhone) {
+            const matched = this.findCvByPhone(preferredPhone);
+            if (matched) autoId = matched.cvId;
+        }
+        reusable.forEach((cv) => {
+            const label = `${cv.nombre || 'Sin nombre'} · ${cv.telefono || 'sin tel'} · ${cv.archivoOriginal || cv.cvId}`;
+            const selected = cv.cvId === autoId ? ' selected' : '';
+            options.push(
+                `<option value="${this.escapeHtml(cv.cvId)}"${selected}>${this.escapeHtml(label)}</option>`
+            );
+        });
+        this.agendarCvSelect.innerHTML = options.join('');
+        if (this.agendarCvSelectWrap) {
+            this.agendarCvSelectWrap.style.display = reusable.length > 0 ? 'block' : 'none';
+        }
+        return reusable;
+    }
+
+    onAgendarCvSelectChange() {
+        const cvId = this.agendarCvSelect ? this.agendarCvSelect.value : '';
+        if (!cvId) {
+            this.agendarCvId = null;
             return;
         }
+        const cv = this.getReusableCvs().find((c) => c.cvId === cvId);
+        if (!cv) return;
+        this.agendarCvId = cv.cvId;
+        this.agendarNeedsCvUpload = false;
+        this.agendarLeadNombre = cv.nombre || this.agendarLeadNombre || '';
+        if (!this.agendarLeadTelefono) this.agendarLeadTelefono = cv.telefono || '';
+        if (this.agendarCvFile) this.agendarCvFile.value = '';
+        if (this.agendarCvLabel) {
+            this.agendarCvLabel.textContent = `CV reciclado: ${cv.nombre || cv.archivoOriginal} (${cv.archivoOriginal})`;
+        }
+        this.setAgendarStatus('Usando el CV ya cargado en leads. No hace falta subirlo de nuevo.', 'info');
+    }
+
+    canOpenAgendarModal() {
         if (!this.panelConfig.configured) {
             this.showStatus(
                 'Integración con panel no configurada. Define MSG_INTEGRATION_API_KEY en .env',
                 'error'
             );
-            return;
+            return false;
         }
         const gerentePreview =
             (this.currentUser && this.currentUser.gerenteEmail) ||
@@ -2839,20 +2962,83 @@ class CVAnalyzer {
                 'Guarda tu correo de gerente arriba (Tu correo en Panel) antes de agendar.',
                 'error'
             );
-            return;
+            return false;
         }
         if (!this.panelConfig.publicCvUrlConfigured) {
             this.showStatus(
                 'Configura WEBHOOK_PUBLIC_URL para que el panel pueda descargar el CV.',
                 'error'
             );
-            return;
+            return false;
+        }
+        return true;
+    }
+
+    normalizePhoneDigits(raw) {
+        return String(raw || '').replace(/\D/g, '');
+    }
+
+    findCvByPhone(phone) {
+        if (!phone) return null;
+        return this.getReusableCvs().find((cv) => this.phonesMatch(cv.telefono, phone)) || null;
+    }
+
+    phoneFromChatId(chatId) {
+        const local = String(chatId || '').replace(/@.*$/, '');
+        return this.normalizePhoneDigits(local);
+    }
+
+    async prepareAgendarModalShell({
+        label,
+        leadNombre,
+        leadTelefono,
+        cvId,
+        needsUpload,
+        showCvPicker = false,
+        preferredPhone = ''
+    }) {
+        this.agendarCvId = cvId || null;
+        this.agendarLeadNombre = leadNombre || '';
+        this.agendarLeadTelefono = leadTelefono || '';
+        this.agendarNeedsCvUpload = Boolean(needsUpload);
+
+        if (this.agendarCvLabel) {
+            this.agendarCvLabel.textContent = label || 'Agendar reunión';
         }
 
-        this.agendarCvIndex = index;
-        if (this.agendarCvLabel) {
-            this.agendarCvLabel.textContent = `CV: ${cv.nombre || cv.archivoOriginal} (${cv.archivoOriginal})`;
+        if (showCvPicker) {
+            const reusable = this.populateAgendarCvSelect({
+                selectedCvId: cvId || '',
+                preferredPhone: preferredPhone || leadTelefono || ''
+            });
+            if (reusable.length > 0) {
+                if (this.agendarCvSelect && this.agendarCvSelect.value) {
+                    this.onAgendarCvSelectChange();
+                    this.agendarNeedsCvUpload = false;
+                }
+                if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'block';
+                if (this.agendarCvUploadHint) {
+                    this.agendarCvUploadHint.textContent =
+                        'Opcional: solo si el lead no está en la lista de CVs cargados.';
+                }
+            } else {
+                if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
+                if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'block';
+                if (this.agendarCvUploadHint) {
+                    this.agendarCvUploadHint.textContent =
+                        'No hay CVs en la sesión. Sube el PDF o carga leads en “Cargar CVs”.';
+                }
+                this.agendarNeedsCvUpload = true;
+            }
+        } else {
+            if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
+            if (this.agendarCvUploadWrap) {
+                this.agendarCvUploadWrap.style.display = needsUpload ? 'block' : 'none';
+            }
         }
+
+        if (this.agendarCvFile) this.agendarCvFile.value = '';
+
         if (this.agendarGerenteEmail) {
             this.agendarGerenteEmail.value =
                 (this.currentUser && this.currentUser.gerenteEmail) ||
@@ -2861,7 +3047,7 @@ class CVAnalyzer {
         }
         if (this.agendarUrlReunion) this.agendarUrlReunion.value = '';
         if (this.agendarLeadCorreo) this.agendarLeadCorreo.value = '';
-        this.setAgendarStatus('');
+        if (!this.agendarCvId) this.setAgendarStatus('');
         if (this.agendarVendedor) {
             this.agendarVendedor.innerHTML = '<option value="">Cargando disponibilidad…</option>';
             this.agendarVendedor.disabled = true;
@@ -2886,6 +3072,102 @@ class CVAnalyzer {
                 this.agendarVendedor.innerHTML = '<option value="">Sin disponibilidad</option>';
             }
         }
+    }
+
+    async openAgendarModal(index) {
+        const cv = this.cvsData[index];
+        if (!cv || !cv.cvId) {
+            this.showStatus('Este CV no tiene archivo guardado. Vuelve a subirlo.', 'error');
+            return;
+        }
+        if (!this.canOpenAgendarModal()) return;
+
+        this.agendarCvIndex = index;
+        await this.prepareAgendarModalShell({
+            label: `CV: ${cv.nombre || cv.archivoOriginal} (${cv.archivoOriginal})`,
+            leadNombre: cv.nombre || '',
+            leadTelefono: cv.telefono || '',
+            cvId: cv.cvId,
+            needsUpload: false,
+            showCvPicker: false
+        });
+    }
+
+    async openAgendarFromConversation() {
+        const active = this.activeConversation;
+        if (!active || active.isGroup) {
+            this.showStatus('Abre un chat individual para agendar.', 'error');
+            return;
+        }
+        if (!this.canControlSession(active.sessionId)) {
+            this.showStatus('No tienes permiso de control en esta sesión.', 'error');
+            return;
+        }
+        if (!this.canOpenAgendarModal()) return;
+
+        await this.refreshCvsFromServer({ silent: true });
+
+        const phone = this.phoneFromChatId(active.chatId);
+        const name = String(active.name || '').trim() || 'Candidato';
+        const matched = this.findCvByPhone(phone);
+        const reusable = this.getReusableCvs();
+
+        this.agendarCvIndex = matched
+            ? (this.cvsData || []).findIndex((c) => c.cvId === matched.cvId)
+            : null;
+
+        const label = matched
+            ? `Chat: ${name} · CV detectado: ${matched.nombre || matched.archivoOriginal}`
+            : reusable.length > 0
+              ? `Chat: ${name}${phone ? ` · +${phone}` : ''} — elige el CV del lead`
+              : `Chat: ${name}${phone ? ` · +${phone}` : ''} — no hay CVs cargados`;
+
+        await this.prepareAgendarModalShell({
+            label,
+            leadNombre: (matched && matched.nombre) || name,
+            leadTelefono: phone ? `+${phone}` : (matched && matched.telefono) || '',
+            cvId: matched ? matched.cvId : null,
+            needsUpload: reusable.length === 0,
+            showCvPicker: true,
+            preferredPhone: phone
+        });
+    }
+
+    async ensureAgendarCvId() {
+        if (this.agendarCvSelect && this.agendarCvSelect.value) {
+            this.agendarCvId = this.agendarCvSelect.value;
+            this.agendarNeedsCvUpload = false;
+        }
+
+        if (this.agendarCvId) return this.agendarCvId;
+
+        const file = this.agendarCvFile && this.agendarCvFile.files && this.agendarCvFile.files[0];
+        if (!file) {
+            if (this.getReusableCvs().length > 0) {
+                throw new Error('Selecciona un CV de la lista de leads cargados.');
+            }
+            throw new Error('Selecciona el PDF del CV del candidato.');
+        }
+
+        const formData = new FormData();
+        formData.append('cv', file);
+        if (this.agendarLeadTelefono) formData.append('telefono', this.agendarLeadTelefono);
+        if (this.agendarLeadNombre) formData.append('nombre', this.agendarLeadNombre);
+
+        this.setAgendarStatus('Subiendo CV…', 'info');
+        const response = await fetch('/api/panel/cv-upload', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || 'No se pudo subir el CV');
+        }
+
+        this.agendarCvId = data.cvId;
+        this.agendarNeedsCvUpload = false;
+        await this.refreshCvsFromServer({ silent: true });
+        return this.agendarCvId;
     }
 
     async fetchDisponibilidad(gerenteEmail, force = false) {
@@ -2966,7 +3248,7 @@ class CVAnalyzer {
         }
 
         this.agendarSlot.innerHTML = slots
-            .map((s, i) => {
+            .map((s) => {
                 const label = `${s.fecha} ${s.horaInicio}–${s.horaFin}`;
                 const value = JSON.stringify({
                     fecha: s.fecha,
@@ -2980,13 +3262,6 @@ class CVAnalyzer {
     }
 
     async confirmAgendarReunion() {
-        const index = this.agendarCvIndex;
-        const cv = index != null ? this.cvsData[index] : null;
-        if (!cv || !cv.cvId) {
-            this.setAgendarStatus('CV inválido', 'error');
-            return;
-        }
-
         const vendedorId = this.agendarVendedor?.value;
         const slotRaw = this.agendarSlot?.value;
         const urlReunion = (this.agendarUrlReunion?.value || '').trim();
@@ -3015,24 +3290,26 @@ class CVAnalyzer {
         }
 
         if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = true;
-        this.setAgendarStatus('Creando reunión (el panel analiza el CV con DeepSeek)…', 'info');
 
         try {
-            // Refrescar disponibilidad justo antes de confirmar (TTL corto)
+            const cvId = await this.ensureAgendarCvId();
+            this.setAgendarStatus('Creando reunión (el panel analiza el CV con DeepSeek)…', 'info');
             this.disponibilidadCacheAt = 0;
 
             const response = await fetch('/api/panel/reuniones', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    cvId: cv.cvId,
+                    cvId,
                     vendedorId,
                     fecha: slot.fecha,
                     horaInicio: slot.horaInicio,
                     horaFin: slot.horaFin,
                     urlReunion,
                     gerenteEmail: gerenteEmail || undefined,
-                    leadCorreo: leadCorreo || undefined
+                    leadCorreo: leadCorreo || undefined,
+                    leadNombre: this.agendarLeadNombre || undefined,
+                    leadTelefono: this.agendarLeadTelefono || undefined
                 })
             });
             const data = await response.json();
