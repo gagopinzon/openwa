@@ -897,6 +897,135 @@ footer p {
     border-radius: 12px;
 }
 
+/* Calendario de disponibilidad del equipo */
+.disponibilidad-panel {
+    margin-top: 24px;
+    text-align: left;
+    padding: 16px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+}
+
+.disponibilidad-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 10px;
+}
+
+.disponibilidad-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.disponibilidad-range {
+    font-size: 13px;
+    font-weight: 600;
+    color: #334155;
+    min-width: 180px;
+    text-align: center;
+}
+
+.disponibilidad-status {
+    font-size: 12px;
+    color: #64748b;
+    margin: 0 0 10px;
+    min-height: 1.2em;
+}
+
+.disponibilidad-calendar {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 8px;
+    overflow-x: auto;
+}
+
+@media (max-width: 900px) {
+    .disponibilidad-calendar {
+        grid-template-columns: repeat(2, minmax(140px, 1fr));
+    }
+}
+
+.disp-day {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 8px;
+    min-height: 120px;
+}
+
+.disp-day-today {
+    border-color: #0d9488;
+    box-shadow: 0 0 0 1px rgba(13, 148, 136, 0.25);
+}
+
+.disp-day-header {
+    font-size: 12px;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.disp-day-sub {
+    display: block;
+    font-size: 11px;
+    font-weight: 500;
+    color: #64748b;
+}
+
+.disp-slots {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.disp-slot {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: 1px solid #ccfbf1;
+    background: #f0fdfa;
+    color: #115e59;
+    border-radius: 6px;
+    padding: 5px 6px;
+    font-size: 11px;
+    cursor: pointer;
+    line-height: 1.25;
+}
+
+.disp-slot:hover {
+    background: #99f6e4;
+    border-color: #5eead4;
+}
+
+.disp-slot-time {
+    font-weight: 700;
+    display: block;
+}
+
+.disp-slot-vendor {
+    color: #0f766e;
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.disp-day-empty {
+    font-size: 11px;
+    color: #94a3b8;
+    margin: 8px 0 0;
+}
+
 .conversations-toolbar {
     display: flex;
     flex-wrap: wrap;

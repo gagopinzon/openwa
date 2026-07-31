@@ -86,6 +86,27 @@
                 </p>
             </section>
 
+            <section class="disponibilidad-panel" id="disponibilidadPanel">
+                <div class="disponibilidad-header">
+                    <div>
+                        <h2 style="font-size: 1.1rem; margin-bottom: 4px;">Disponibilidad del equipo</h2>
+                        <p style="font-size: 13px; color: #64748b; margin: 0;">
+                            Horarios libres en Panel. Haz clic en un slot para agendar a un lead, o solo consulta la agenda.
+                        </p>
+                    </div>
+                    <div class="disponibilidad-toolbar">
+                        <button type="button" id="dispPrevWeekBtn" class="btn btn-secondary btn-sm" title="Semana anterior">←</button>
+                        <span id="disponibilidadRangeLabel" class="disponibilidad-range">—</span>
+                        <button type="button" id="dispNextWeekBtn" class="btn btn-secondary btn-sm" title="Semana siguiente">→</button>
+                        <button type="button" id="dispRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                    </div>
+                </div>
+                <p id="disponibilidadStatus" class="disponibilidad-status"></p>
+                <div id="disponibilidadCalendar" class="disponibilidad-calendar">
+                    <p class="auto-reply-empty">Cargando disponibilidad…</p>
+                </div>
+            </section>
+
             <section class="conversations-panel" id="conversationsPanel">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Conversaciones</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
@@ -420,7 +441,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=agendar-auto-cv-1"></script>
+    <script src="app.js?v=disp-calendar-1"></script>
     <script>
         (async function initAuthUi() {
             try {
