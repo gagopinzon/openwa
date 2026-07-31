@@ -82,8 +82,21 @@ const upload = multer({
   }
 });
 
-// Almacenar datos de CVs en memoria
-let cvsData = [];
+// Almacenar datos de CVs (persistidos en data/cvs-manifest.json + data/cv-files/)
+let cvsData = cvFileStore.loadCvsManifest();
+if (cvsData.length > 0) {
+  console.log(`[cvs] Restaurados ${cvsData.length} CV(s) desde disco`);
+}
+
+function persistCvsData() {
+  try {
+    const n = cvFileStore.saveCvsManifest(cvsData);
+    return n;
+  } catch (err) {
+    console.error('[cvs] Error persistiendo manifest:', err.message);
+    return 0;
+  }
+}
 const whatsappServices = new Map(); // Map<sessionId, WhatsAppService>
 
 /** @type {{ inProgress: boolean, current: number, total: number, nombre: string|null, error: string|null, completedAt: number|null }} */
@@ -703,7 +716,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
 
     // Limpiar datos y archivos anteriores
     cvsData = [];
-    cvFileStore.clearAllCvFiles();
+    cvFileStore.clearAllCvs();
 
     // Procesar cada archivo PDF
     for (let i = 0; i < req.files.length; i++) {
@@ -727,7 +740,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           cvFileName: saved.cvFileName,
           saludo: '',
           mensajeIA: '', // Se llenará después
-          procesado: true
+          procesado: true,
+          savedAt: new Date().toISOString()
         };
 
         cvsData.push(processedCV);
@@ -749,7 +763,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
       }
     }
 
-    console.log(`Procesamiento completado. ${cvsData.length} CVs procesados.`);
+    persistCvsData();
+    console.log(`Procesamiento completado. ${cvsData.length} CVs procesados (persistidos en disco).`);
 
     res.json({
       success: true,
@@ -824,6 +839,7 @@ app.post('/generate-messages', async (req, res) => {
           }
         });
 
+        persistCvsData();
         console.log(`Mensajes generados exitosamente para ${cvsWithMessages.length} CVs`);
 
         generationState.inProgress = false;
@@ -993,7 +1009,8 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
       saludo: '',
       mensajeIA: '',
       procesado: true,
-      fromConversation: true
+      fromConversation: true,
+      savedAt: new Date().toISOString()
     };
 
     // Actualizar si ya hay uno con mismo teléfono; si no, agregar
@@ -1010,6 +1027,8 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
     } else {
       cvsData.push(entry);
     }
+
+    persistCvsData();
 
     res.json({
       success: true,
@@ -1268,6 +1287,7 @@ app.post('/send-whatsapp', async (req, res) => {
           cvsData[index].mensajeIA = editedCv.mensajeIA;
         }
       });
+      persistCvsData();
     }
 
     if (cvsToProcess.length === 0) {
@@ -1615,8 +1635,8 @@ app.post('/close-whatsapp', async (req, res) => {
 // Ruta para limpiar datos
 app.post('/clear-data', (req, res) => {
   cvsData = [];
-  cvFileStore.clearAllCvFiles();
-  console.log('Datos de CVs limpiados');
+  cvFileStore.clearAllCvs();
+  console.log('Datos de CVs limpiados (disco + memoria)');
 
   res.json({
     success: true,

@@ -7,6 +7,7 @@ data/sessions.json
 data/users.json
 data/incoming-messages.json
 data/cv-files/
+data/cvs-manifest.json
 data/super-profile.json
 logs/
 *.log

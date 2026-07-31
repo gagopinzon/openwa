@@ -4,6 +4,7 @@ const crypto = require('crypto');
 
 const DATA_DIR = path.join(__dirname, 'data');
 const CV_FILES_DIR = path.join(DATA_DIR, 'cv-files');
+const MANIFEST_FILE = path.join(DATA_DIR, 'cvs-manifest.json');
 const TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 días
 
 function ensureCvFilesDir() {
@@ -143,11 +144,120 @@ function clearAllCvFiles() {
   }
 }
 
+/**
+ * Campos que se persisten (sin textoCompleto para no inflar el JSON).
+ * @param {object} cv
+ */
+function sanitizeCvForPersist(cv) {
+  if (!cv || typeof cv !== 'object') return null;
+  return {
+    nombre: cv.nombre || '',
+    telefono: cv.telefono || '',
+    experiencia: cv.experiencia || '',
+    archivoOriginal: cv.archivoOriginal || '',
+    cvId: cv.cvId || null,
+    cvFileName: cv.cvFileName || null,
+    saludo: cv.saludo || '',
+    mensajeIA: cv.mensajeIA || '',
+    procesado: Boolean(cv.procesado),
+    error: cv.error || undefined,
+    fromConversation: Boolean(cv.fromConversation) || undefined,
+    savedAt: cv.savedAt || new Date().toISOString()
+  };
+}
+
+/**
+ * Guarda el listado de leads/CVs en disco.
+ * @param {Array} cvs
+ */
+function saveCvsManifest(cvs) {
+  ensureCvFilesDir();
+  const list = Array.isArray(cvs)
+    ? cvs.map(sanitizeCvForPersist).filter((c) => c && c.cvId)
+    : [];
+  const payload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    cvs: list
+  };
+  const tmp = `${MANIFEST_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+  fs.renameSync(tmp, MANIFEST_FILE);
+  return list.length;
+}
+
+/**
+ * Carga leads persistidos. Omite entradas cuyo PDF ya no está en disco.
+ * @returns {Array}
+ */
+function loadCvsManifest() {
+  ensureCvFilesDir();
+  if (!fs.existsSync(MANIFEST_FILE)) return [];
+
+  try {
+    const raw = fs.readFileSync(MANIFEST_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    const list = Array.isArray(parsed?.cvs) ? parsed.cvs : [];
+    const restored = [];
+    let dropped = 0;
+
+    for (const cv of list) {
+      if (!cv || !cv.cvId) {
+        dropped += 1;
+        continue;
+      }
+      if (!getCvFileMeta(cv.cvId)) {
+        dropped += 1;
+        continue;
+      }
+      restored.push({
+        nombre: cv.nombre || 'Sin nombre',
+        telefono: cv.telefono || 'No encontrado',
+        experiencia: cv.experiencia || '',
+        textoCompleto: '',
+        archivoOriginal: cv.archivoOriginal || `${cv.cvId}.pdf`,
+        cvId: cv.cvId,
+        cvFileName: cv.cvFileName || null,
+        saludo: cv.saludo || '',
+        mensajeIA: cv.mensajeIA || '',
+        procesado: cv.procesado !== false,
+        error: cv.error,
+        fromConversation: Boolean(cv.fromConversation),
+        savedAt: cv.savedAt || null
+      });
+    }
+
+    if (dropped > 0) {
+      console.warn(
+        `[cvFileStore] Manifest: ${dropped} CV(s) omitidos (archivo faltante). Quedan ${restored.length}.`
+      );
+      saveCvsManifest(restored);
+    }
+
+    return restored;
+  } catch (err) {
+    console.error('[cvFileStore] Error leyendo cvs-manifest.json:', err.message);
+    return [];
+  }
+}
+
+function clearCvsManifest() {
+  ensureCvFilesDir();
+  try {
+    if (fs.existsSync(MANIFEST_FILE)) fs.unlinkSync(MANIFEST_FILE);
+  } catch (err) {
+    console.warn('[cvFileStore] No se pudo borrar manifest:', err.message);
+  }
+}
+
+/** Borra PDFs + manifiesto */
+function clearAllCvs() {
+  clearAllCvFiles();
+  clearCvsManifest();
+}
+
 function isPanelIntegrationConfigured() {
-  return Boolean(
-    String(process.env.MSG_INTEGRATION_API_KEY || '').trim() &&
-      String(process.env.MSG_GERENTE_EMAIL || '').trim()
-  );
+  return Boolean(String(process.env.MSG_INTEGRATION_API_KEY || '').trim());
 }
 
 module.exports = {
@@ -157,8 +267,14 @@ module.exports = {
   verifySignedToken,
   buildCvPublicUrl,
   clearAllCvFiles,
+  clearAllCvs,
+  clearCvsManifest,
+  saveCvsManifest,
+  loadCvsManifest,
+  sanitizeCvForPersist,
   isPublicUrlConfigured,
   isPanelIntegrationConfigured,
   publicBaseUrl,
-  CV_FILES_DIR
+  CV_FILES_DIR,
+  MANIFEST_FILE
 };
