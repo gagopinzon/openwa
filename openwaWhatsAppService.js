@@ -317,6 +317,8 @@ class OpenWAWhatsAppService {
           telefono: contact.telefono,
           saludo: contact.saludo,
           mensajeIA: contact.mensajeIA,
+          cvId: contact.cvId || null,
+          archivoOriginal: contact.archivoOriginal || null,
           success,
           timestamp: new Date().toISOString()
         };
@@ -370,6 +372,8 @@ class OpenWAWhatsAppService {
           telefono: contact.telefono,
           saludo: contact.saludo,
           mensajeIA: contact.mensajeIA,
+          cvId: contact.cvId || null,
+          archivoOriginal: contact.archivoOriginal || null,
           success: false,
           error: error.message,
           timestamp: new Date().toISOString()
@@ -457,6 +461,8 @@ async function sendSessionQueue(
         telefono: contact.telefono,
         saludo: contact.saludo,
         mensajeIA: contact.mensajeIA,
+        cvId: contact.cvId || null,
+        archivoOriginal: contact.archivoOriginal || null,
         sessionId: logicalSessionId,
         success,
         timestamp: new Date().toISOString()
@@ -512,6 +518,8 @@ async function sendSessionQueue(
         telefono: contact.telefono,
         saludo: contact.saludo,
         mensajeIA: contact.mensajeIA,
+        cvId: contact.cvId || null,
+        archivoOriginal: contact.archivoOriginal || null,
         sessionId: logicalSessionId,
         success: false,
         error: error.message,

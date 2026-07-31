@@ -2861,6 +2861,7 @@ class CVAnalyzer {
         if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
         if (this.agendarCvFile) this.agendarCvFile.value = '';
         if (this.agendarCvSelect) this.agendarCvSelect.innerHTML = '';
+        if (this.agendarCvSelect) this.agendarCvSelect.disabled = false;
     }
 
     async refreshCvsFromServer({ silent = false } = {}) {
@@ -2995,7 +2996,9 @@ class CVAnalyzer {
         cvId,
         needsUpload,
         showCvPicker = false,
-        preferredPhone = ''
+        preferredPhone = '',
+        lockMatchedCv = false,
+        matchSource = ''
     }) {
         this.agendarCvId = cvId || null;
         this.agendarLeadNombre = leadNombre || '';
@@ -3006,7 +3009,35 @@ class CVAnalyzer {
             this.agendarCvLabel.textContent = label || 'Agendar reunión';
         }
 
-        if (showCvPicker) {
+        if (lockMatchedCv && cvId) {
+            // CV del mismo número al que se envió el mensaje: no pedir elegir
+            const cv =
+                this.getReusableCvs().find((c) => c.cvId === cvId) || {
+                    cvId,
+                    nombre: leadNombre,
+                    telefono: leadTelefono,
+                    archivoOriginal: ''
+                };
+            if (this.agendarCvSelectWrap) {
+                this.agendarCvSelectWrap.style.display = 'block';
+            }
+            if (this.agendarCvSelect) {
+                const shown = `${cv.nombre || 'Lead'} · ${cv.telefono || leadTelefono || ''} · ${cv.archivoOriginal || cv.cvId}`;
+                this.agendarCvSelect.innerHTML = `<option value="${this.escapeHtml(cv.cvId)}" selected>${this.escapeHtml(shown)}</option>`;
+                this.agendarCvSelect.disabled = true;
+            }
+            if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
+            this.agendarNeedsCvUpload = false;
+            const via =
+                matchSource === 'historial'
+                    ? 'ligado al envío de WhatsApp'
+                    : 'coincidente con el teléfono del chat';
+            this.setAgendarStatus(
+                `CV asignado automáticamente (${via}). Es el mismo lead del mensaje.`,
+                'info'
+            );
+        } else if (showCvPicker) {
+            if (this.agendarCvSelect) this.agendarCvSelect.disabled = false;
             const reusable = this.populateAgendarCvSelect({
                 selectedCvId: cvId || '',
                 preferredPhone: preferredPhone || leadTelefono || ''
@@ -3031,6 +3062,7 @@ class CVAnalyzer {
                 this.agendarNeedsCvUpload = true;
             }
         } else {
+            if (this.agendarCvSelect) this.agendarCvSelect.disabled = false;
             if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
             if (this.agendarCvUploadWrap) {
                 this.agendarCvUploadWrap.style.display = needsUpload ? 'block' : 'none';
@@ -3047,7 +3079,7 @@ class CVAnalyzer {
         }
         if (this.agendarUrlReunion) this.agendarUrlReunion.value = '';
         if (this.agendarLeadCorreo) this.agendarLeadCorreo.value = '';
-        if (!this.agendarCvId) this.setAgendarStatus('');
+        if (!lockMatchedCv && !this.agendarCvId) this.setAgendarStatus('');
         if (this.agendarVendedor) {
             this.agendarVendedor.innerHTML = '<option value="">Cargando disponibilidad…</option>';
             this.agendarVendedor.disabled = true;
@@ -3109,15 +3141,38 @@ class CVAnalyzer {
 
         const phone = this.phoneFromChatId(active.chatId);
         const name = String(active.name || '').trim() || 'Candidato';
-        const matched = this.findCvByPhone(phone);
-        const reusable = this.getReusableCvs();
 
+        // Resolver en servidor: CV ligado al número del mensaje / historial
+        let matched = null;
+        let matchSource = '';
+        if (phone) {
+            try {
+                const response = await fetch(
+                    `/api/panel/cv-by-phone?phone=${encodeURIComponent(phone)}`
+                );
+                const data = await response.json();
+                if (data.success && data.found && data.cv && data.cv.cvId) {
+                    matched =
+                        this.getReusableCvs().find((c) => c.cvId === data.cv.cvId) ||
+                        data.cv;
+                    matchSource = data.matchSource || 'telefono';
+                }
+            } catch (err) {
+                console.warn('cv-by-phone:', err.message);
+            }
+        }
+        if (!matched) {
+            matched = this.findCvByPhone(phone);
+            if (matched) matchSource = 'telefono';
+        }
+
+        const reusable = this.getReusableCvs();
         this.agendarCvIndex = matched
             ? (this.cvsData || []).findIndex((c) => c.cvId === matched.cvId)
             : null;
 
         const label = matched
-            ? `Chat: ${name} · CV detectado: ${matched.nombre || matched.archivoOriginal}`
+            ? `Chat: ${name} · CV automático: ${matched.nombre || matched.archivoOriginal}`
             : reusable.length > 0
               ? `Chat: ${name}${phone ? ` · +${phone}` : ''} — elige el CV del lead`
               : `Chat: ${name}${phone ? ` · +${phone}` : ''} — no hay CVs cargados`;
@@ -3127,9 +3182,11 @@ class CVAnalyzer {
             leadNombre: (matched && matched.nombre) || name,
             leadTelefono: phone ? `+${phone}` : (matched && matched.telefono) || '',
             cvId: matched ? matched.cvId : null,
-            needsUpload: reusable.length === 0,
-            showCvPicker: true,
-            preferredPhone: phone
+            needsUpload: !matched && reusable.length === 0,
+            showCvPicker: !matched,
+            preferredPhone: phone,
+            lockMatchedCv: Boolean(matched),
+            matchSource
         });
     }
 

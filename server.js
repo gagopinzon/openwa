@@ -97,6 +97,34 @@ function persistCvsData() {
     return 0;
   }
 }
+
+/**
+ * Resuelve el CV del lead por teléfono (o cvId del historial).
+ * @param {string} phone
+ * @param {{ cvId?: string|null }} [hints]
+ */
+function findCvForPhone(phone, hints = {}) {
+  const reusable = cvsData.filter((c) => c && c.procesado && c.cvId);
+  if (hints.cvId) {
+    const byId = reusable.find((c) => c.cvId === hints.cvId);
+    if (byId) return byId;
+  }
+  if (!phone) return null;
+  return (
+    reusable.find((c) => contactHistory.phonesMatch(c.telefono, phone)) || null
+  );
+}
+
+function publicCvSummary(cv) {
+  if (!cv) return null;
+  return {
+    cvId: cv.cvId,
+    nombre: cv.nombre || '',
+    telefono: cv.telefono || '',
+    archivoOriginal: cv.archivoOriginal || '',
+    experiencia: String(cv.experiencia || '').slice(0, 200)
+  };
+}
 const whatsappServices = new Map(); // Map<sessionId, WhatsAppService>
 
 /** @type {{ inProgress: boolean, current: number, total: number, nombre: string|null, error: string|null, completedAt: number|null }} */
@@ -253,7 +281,9 @@ async function runWhatsAppSendJob({
         nombre: cv.nombre,
         telefono: cv.telefono,
         saludo: cv.saludo,
-        mensajeIA: cv.mensajeIA
+        mensajeIA: cv.mensajeIA,
+        cvId: cv.cvId || null,
+        archivoOriginal: cv.archivoOriginal || null
       }));
 
       const distribution = previewDistribution(
@@ -496,6 +526,8 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
       telefono: cv.telefono,
       saludo: cv.saludo,
       mensajeIA: cv.mensajeIA,
+      cvId: cv.cvId || null,
+      archivoOriginal: cv.archivoOriginal || null,
       success: success,
       timestamp: new Date().toISOString(),
       testMode: true
@@ -941,6 +973,44 @@ app.get('/api/public/cv/:cvId', (req, res) => {
   }
 });
 
+// Resolver CV del lead por teléfono (para agendar desde chat)
+app.get('/api/panel/cv-by-phone', async (req, res) => {
+  try {
+    const phone = contactHistory.normalizePhone(req.query.phone || req.query.telefono || '');
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'phone es obligatorio' });
+    }
+
+    let linkedCvId = null;
+    if (contactHistory.mongoUriConfigured()) {
+      const doc = await contactHistory.getContactByPhone(phone);
+      if (doc && doc.cvId) linkedCvId = doc.cvId;
+    }
+
+    const matched = findCvForPhone(phone, { cvId: linkedCvId });
+    if (!matched) {
+      return res.json({
+        success: true,
+        found: false,
+        telefono: phone,
+        linkedCvId,
+        cv: null
+      });
+    }
+
+    return res.json({
+      success: true,
+      found: true,
+      telefono: phone,
+      linkedCvId,
+      matchSource: linkedCvId && matched.cvId === linkedCvId ? 'historial' : 'telefono',
+      cv: publicCvSummary(matched)
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Proxy autenticado → panel disponibilidad
 app.get('/api/panel/disponibilidad', async (req, res) => {
   try {
@@ -1366,7 +1436,9 @@ app.post('/send-whatsapp', async (req, res) => {
                 normalizedPhone: contactHistory.normalizePhone(row.telefono),
                 name: row.nombre,
                 logicalSessionId,
-                openwaSessionId
+                openwaSessionId,
+                cvId: row.cvId || null,
+                archivoOriginal: row.archivoOriginal || null
               })
               .catch((err) => console.error('contactHistory:', err.message));
           }
@@ -1955,8 +2027,7 @@ app.get('/sending-status-all', (req, res) => {
 // --- Auto-respuesta IA (webhooks OpenWA) ---
 
 function getCvContextForPhone(phone) {
-  const norm = contactHistory.normalizePhone(phone);
-  const cv = cvsData.find((c) => contactHistory.normalizePhone(c.telefono) === norm);
+  const cv = findCvForPhone(phone);
   if (!cv) return null;
   const exp = String(cv.experiencia || '').slice(0, 500);
   return `Nombre: ${cv.nombre}\nExperiencia: ${exp}`;
@@ -2301,13 +2372,17 @@ app.get('/api/conversations/contact-status', async (req, res) => {
     const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
     let aiPaused = false;
     let knownContact = false;
+    let linkedCvId = null;
     if (phone) {
       const contactDoc = await contactHistory.getContactByPhone(phone);
       if (contactDoc) {
         knownContact = true;
         aiPaused = Boolean(contactDoc.aiPaused);
+        linkedCvId = contactDoc.cvId || null;
       }
     }
+
+    const matchedCv = publicCvSummary(findCvForPhone(phone, { cvId: linkedCvId }));
 
     try {
       const contact = await getContact(session.openwaSessionId, chatId);
@@ -2321,6 +2396,8 @@ app.get('/api/conversations/contact-status', async (req, res) => {
         name: contact.name,
         knownContact,
         aiPaused,
+        linkedCvId,
+        matchedCv,
         sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
         autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled)
       });
@@ -2334,6 +2411,8 @@ app.get('/api/conversations/contact-status', async (req, res) => {
         isBlocked: false,
         knownContact,
         aiPaused,
+        linkedCvId,
+        matchedCv,
         sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
         autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled),
         warning: err.message

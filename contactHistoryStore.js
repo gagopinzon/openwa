@@ -29,6 +29,28 @@ function normalizePhone(raw) {
   return String(raw).replace(/\D/g, '');
 }
 
+/**
+ * Compara teléfonos tolerando +52 / 521 / últimos 10 dígitos.
+ */
+function phonesMatch(a, b) {
+  const na = normalizePhone(a);
+  const nb = normalizePhone(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.endsWith(nb) || nb.endsWith(na)) return true;
+  const ta = na.slice(-10);
+  const tb = nb.slice(-10);
+  if (ta.length === 10 && ta === tb) return true;
+  const stripMx = (p) => {
+    if (p.startsWith('521') && p.length >= 13) return p.slice(3);
+    if (p.startsWith('52') && p.length >= 12) return p.slice(2);
+    return p;
+  };
+  const sa = stripMx(na);
+  const sb = stripMx(nb);
+  return sa === sb || sa.slice(-10) === sb.slice(-10);
+}
+
 function mongoUriConfigured() {
   return Boolean(process.env.MONGODB_URI && String(process.env.MONGODB_URI).trim());
 }
@@ -117,13 +139,22 @@ async function filterOutAlreadyContacted(cvsArray) {
 }
 
 /**
- * @param {{ normalizedPhone: string, name?: string, logicalSessionId?: string, openwaSessionId?: string }} params
+ * @param {{
+ *   normalizedPhone: string,
+ *   name?: string,
+ *   logicalSessionId?: string,
+ *   openwaSessionId?: string,
+ *   cvId?: string|null,
+ *   archivoOriginal?: string|null
+ * }} params
  */
 async function recordSuccessfulContact({
   normalizedPhone,
   name,
   logicalSessionId,
-  openwaSessionId
+  openwaSessionId,
+  cvId,
+  archivoOriginal
 }) {
   if (!normalizedPhone || !mongoUriConfigured()) return;
 
@@ -143,6 +174,8 @@ async function recordSuccessfulContact({
   if (logicalSessionId) sessionFields.logicalSessionId = String(logicalSessionId);
   if (openwaSessionId) sessionFields.openwaSessionId = String(openwaSessionId);
   if (logicalSessionId || openwaSessionId) sessionFields.lastOutboundAt = now;
+  if (cvId) sessionFields.cvId = String(cvId);
+  if (archivoOriginal) sessionFields.archivoOriginal = String(archivoOriginal);
 
   try {
     await coll.updateOne(
@@ -286,6 +319,7 @@ async function isContactAiPaused(normalizedPhone) {
 
 module.exports = {
   normalizePhone,
+  phonesMatch,
   mongoUriConfigured,
   filterOutAlreadyContacted,
   recordSuccessfulContact,
