@@ -230,6 +230,38 @@ async function isKnownContact(normalizedPhone) {
 }
 
 /**
+ * Busca contacto tolerando variaciones MX (52/521/últimos 10).
+ * @param {string} normalizedPhone
+ * @returns {Promise<object|null>}
+ */
+async function findContactByPhoneFuzzy(normalizedPhone) {
+  const exact = await getContactByPhone(normalizedPhone);
+  if (exact) return exact;
+  if (!normalizedPhone || !mongoUriConfigured()) return null;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch {
+    return null;
+  }
+  if (!coll) return null;
+
+  const last10 = normalizedPhone.slice(-10);
+  if (last10.length < 10) return null;
+
+  const candidates = await coll
+    .find({ normalizedPhone: { $regex: `${last10}$` } })
+    .limit(20)
+    .toArray();
+
+  for (const doc of candidates) {
+    if (phonesMatch(normalizedPhone, doc.normalizedPhone)) return doc;
+  }
+  return null;
+}
+
+/**
  * @param {string} normalizedPhone
  * @returns {Promise<{ logicalSessionId?: string, openwaSessionId?: string, name?: string }|null>}
  */
@@ -325,6 +357,7 @@ module.exports = {
   recordSuccessfulContact,
   getContactByPhone,
   isKnownContact,
+  findContactByPhoneFuzzy,
   getContactSession,
   assignContactSession,
   setContactAiPaused,

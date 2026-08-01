@@ -64,6 +64,32 @@ function extractPhoneFromChatId(chatId) {
   return String(chatId).replace(/@.*$/, '').replace(/\D/g, '');
 }
 
+/**
+ * Resuelve el teléfono real del mensaje entrante.
+ * OpenWA a veces manda `from` como `...@lid` (ID interno); en ese caso usa senderPhone / contact.
+ */
+function resolveIncomingPhone(msg) {
+  const chatId = String(msg?.from || msg?.chatId || msg?.sender || '');
+  const isLid = /@lid$/i.test(chatId);
+
+  const candidates = [
+    msg?.senderPhone,
+    msg?.contact?.phone,
+    msg?.contact?.phoneNumber,
+    msg?.contact?.number,
+    msg?.authorPhone,
+    !isLid ? extractPhoneFromChatId(chatId) : ''
+  ];
+
+  for (const raw of candidates) {
+    const normalized = contactHistory.normalizePhone(raw);
+    if (normalized && normalized.length >= 10) return normalized;
+  }
+
+  // Último recurso: dígitos del chatId (puede ser LID; isKnownContact fallará)
+  return contactHistory.normalizePhone(extractPhoneFromChatId(chatId));
+}
+
 function findLogicalSessionByOpenwaId(openwaSessionId) {
   const id = String(openwaSessionId || '').trim();
   return sessionsStore.getAllSessions().find((s) => s.openwaSessionId === id) || null;
@@ -98,7 +124,7 @@ function extractIncomingMessage(payload) {
   if (!body && !mediaType) return null;
 
   const chatId = msg.from || msg.chatId || msg.sender || '';
-  const normalizedPhone = contactHistory.normalizePhone(extractPhoneFromChatId(chatId));
+  const normalizedPhone = resolveIncomingPhone(msg);
   const logicalSession = findLogicalSessionByOpenwaId(openwaSessionId);
   const messageId = msg.id || msg.messageId || null;
 
@@ -106,7 +132,7 @@ function extractIncomingMessage(payload) {
     openwaSessionId: openwaSessionId || null,
     sessionId: logicalSession ? logicalSession.id : null,
     telefono: normalizedPhone || extractPhoneFromChatId(chatId) || '',
-    contactName: msg.notifyName || msg.senderName || msg.pushName || null,
+    contactName: msg.notifyName || msg.senderName || msg.pushName || msg.contact?.pushName || null,
     body: body || (mediaType ? `[${mediaType}]` : ''),
     messageId,
     chatId: chatId || null,
@@ -183,11 +209,31 @@ async function handleIncomingWebhook({
   if (!body) return { handled: false, reason: 'no_text_body' };
 
   const chatId = msg.from || msg.chatId || msg.sender;
-  const normalizedPhone = contactHistory.normalizePhone(extractPhoneFromChatId(chatId));
+  let normalizedPhone = resolveIncomingPhone(msg);
   if (!normalizedPhone) return { handled: false, reason: 'invalid_phone' };
 
-  const known = await contactHistory.isKnownContact(normalizedPhone);
-  if (!known) return { handled: false, reason: 'unknown_contact' };
+  if (/@lid$/i.test(String(chatId || '')) && normalizedPhone === extractPhoneFromChatId(chatId)) {
+    console.warn(
+      `[auto-reply] mensaje @lid sin senderPhone; no se puede cruzar con historial chatId=${chatId}`
+    );
+    return { handled: false, reason: 'lid_without_phone' };
+  }
+
+  let known = await contactHistory.isKnownContact(normalizedPhone);
+  if (!known) {
+    const matched = await contactHistory.findContactByPhoneFuzzy(normalizedPhone);
+    if (!matched) {
+      console.log(
+        `[auto-reply] unknown_contact phone=${normalizedPhone} chatId=${chatId || '?'}`
+      );
+      return { handled: false, reason: 'unknown_contact' };
+    }
+    console.log(
+      `[auto-reply] fuzzy match ${normalizedPhone} → ${matched.normalizedPhone}`
+    );
+    normalizedPhone = matched.normalizedPhone;
+    known = true;
+  }
 
   const dedupeKey =
     idempotencyKey ||

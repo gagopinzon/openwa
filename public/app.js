@@ -614,6 +614,7 @@ class CVAnalyzer {
             session_ai_disabled: 'IA off en esta línea',
             ai_paused_for_contact: 'IA pausada (humano)',
             unknown_contact: 'contacto desconocido',
+            lid_without_phone: 'WhatsApp LID sin teléfono',
             wrong_session_for_contact: 'sesión incorrecta',
             no_text_body: 'sin texto',
             is_group: 'grupo',
