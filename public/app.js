@@ -274,6 +274,9 @@ class CVAnalyzer {
         this.activateAutoReplyBtn = document.getElementById('activateAutoReplyBtn');
         this.deactivateAutoReplyBtn = document.getElementById('deactivateAutoReplyBtn');
         this.testAutoReplyBtn = document.getElementById('testAutoReplyBtn');
+        this.autoReplyWebhooksPill = document.getElementById('autoReplyWebhooksPill');
+        this._autoReplyWebhooksBusy = false;
+        this._lastAutoReplyStatus = null;
         this.autoReplyTestPhone = document.getElementById('autoReplyTestPhone');
         this.autoReplyTestMessage = document.getElementById('autoReplyTestMessage');
         this.autoReplyBasePrompt = document.getElementById('autoReplyBasePrompt');
@@ -435,36 +438,101 @@ class CVAnalyzer {
         item.classList.toggle('accordion-item-open', !isOpen);
     }
 
+    getWebhookActivationState(data) {
+        const sessions = Number(data.sessionsConfigured) || 0;
+        const active = Number(data.webhooksActive) || 0;
+        if (active <= 0) return { key: 'off', label: 'Webhooks: inactivos', detail: 'No hay webhooks registrados en OpenWA' };
+        if (sessions > 0 && active >= sessions) {
+            return {
+                key: 'on',
+                label: `Webhooks: activos (${active}/${sessions})`,
+                detail: 'OpenWA está enviando mensajes entrantes a esta app'
+            };
+        }
+        return {
+            key: 'partial',
+            label: `Webhooks: parcial (${active}/${sessions || '?'})`,
+            detail: 'Solo algunas sesiones tienen webhook; vuelve a Activar webhooks'
+        };
+    }
+
+    updateWebhookControlsUI(data, options = {}) {
+        const busy = Boolean(options.busy);
+        this._autoReplyWebhooksBusy = busy;
+        const state = data ? this.getWebhookActivationState(data) : { key: 'off', label: 'Webhooks: inactivos' };
+        const canActivate = Boolean(data && (data.canListen || data.canActivate));
+        const activeCount = Number(data?.webhooksActive) || 0;
+
+        if (this.autoReplyWebhooksPill) {
+            this.autoReplyWebhooksPill.textContent = busy
+                ? options.busyLabel || 'Webhooks: procesando…'
+                : state.label;
+            this.autoReplyWebhooksPill.className = `auto-reply-pill ${busy ? 'is-busy' : `is-${state.key}`}`;
+        }
+
+        if (this.activateAutoReplyBtn) {
+            this.activateAutoReplyBtn.disabled = busy || !canActivate;
+            this.activateAutoReplyBtn.textContent = busy && options.mode === 'activate'
+                ? 'Activando…'
+                : activeCount > 0
+                  ? 'Reactivar webhooks'
+                  : 'Activar webhooks';
+            this.activateAutoReplyBtn.classList.toggle('is-active-state', !busy && activeCount > 0);
+            this.activateAutoReplyBtn.title = canActivate
+                ? 'Registra en OpenWA la URL para recibir mensajes entrantes'
+                : 'Configura WEBHOOK_PUBLIC_URL y al menos una sesión';
+        }
+
+        if (this.deactivateAutoReplyBtn) {
+            this.deactivateAutoReplyBtn.disabled = busy || activeCount <= 0;
+            this.deactivateAutoReplyBtn.textContent = busy && options.mode === 'deactivate'
+                ? 'Desactivando…'
+                : 'Desactivar webhooks';
+            this.deactivateAutoReplyBtn.classList.toggle('is-active-state', !busy && activeCount <= 0);
+            this.deactivateAutoReplyBtn.title =
+                activeCount > 0
+                    ? 'Elimina los webhooks registrados en OpenWA'
+                    : 'No hay webhooks activos para desactivar';
+        }
+    }
+
     async loadAutoReplyStatus() {
         if (!this.autoReplyStatus) return;
         try {
             const response = await fetch('/api/auto-reply/status');
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'Error de estado');
+            this._lastAutoReplyStatus = data;
 
-            let html = '';
+            const state = this.getWebhookActivationState(data);
+            let html = `<span class="webhook-state-line">${this.escapeHtml(state.label)}</span>`;
+            html += `${this.escapeHtml(state.detail)}<br>`;
             if (!data.webhookConfigured) {
                 html += '<strong>WEBHOOK_PUBLIC_URL</strong> no configurado en el servidor. Sin esto no llegan mensajes a la bandeja.<br>';
             } else {
-                html += `Webhook: <code>${this.escapeHtml(data.webhookUrl)}</code><br>`;
+                html += `URL: <code>${this.escapeHtml(data.webhookUrl)}</code><br>`;
             }
             if (!data.mongodbConfigured) {
                 html += 'MongoDB no configurado: la bandeja sí funciona; la auto-respuesta IA no filtrará contactos.<br>';
             }
-            html += `Sesiones: ${data.sessionsConfigured} · Webhooks activos: ${data.webhooksActive}`;
+            html += `Sesiones: ${data.sessionsConfigured}`;
             if (typeof data.enabledSessionsCount === 'number') {
                 html += ` · Líneas IA: ${data.enabledSessionsCount}/${data.sessionsConfigured}`;
             }
             if (data.enabled) {
                 html += ' · <strong>Auto-respuesta ON</strong>';
+            } else {
+                html += ' · Auto-respuesta global OFF';
             }
 
+            const statusClass =
+                state.key === 'on' ? 'ok' : state.key === 'partial' ? 'ok' : 'warning';
             this.autoReplyStatus.innerHTML = html;
-            this.autoReplyStatus.className = `auto-reply-status ${data.canListen || data.canActivate ? 'ok' : 'warning'}`;
+            this.autoReplyStatus.className = `auto-reply-status ${
+                data.canListen || data.canActivate ? statusClass : 'warning'
+            }`;
 
-            if (this.activateAutoReplyBtn) {
-                this.activateAutoReplyBtn.disabled = !(data.canListen || data.canActivate);
-            }
+            this.updateWebhookControlsUI(data);
 
             if (this.autoReplyGlobalBadge) {
                 const on = Boolean(data.enabled);
@@ -476,6 +544,7 @@ class CVAnalyzer {
         } catch (error) {
             this.autoReplyStatus.innerHTML = `Error cargando estado: ${this.escapeHtml(error.message)}`;
             this.autoReplyStatus.className = 'auto-reply-status warning';
+            this.updateWebhookControlsUI(null);
         }
     }
 
@@ -1657,32 +1726,75 @@ class CVAnalyzer {
     }
 
     async activateAutoReply() {
+        this.updateWebhookControlsUI(this._lastAutoReplyStatus, {
+            busy: true,
+            mode: 'activate',
+            busyLabel: 'Webhooks: activando…'
+        });
         try {
             await this.saveAutoReplyConfig({ silent: true });
             const response = await fetch('/api/auto-reply/activate', { method: 'POST' });
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo activar');
-            const ok = (data.results || []).filter((r) => r.success).length;
-            const fail = (data.results || []).filter((r) => !r.success).length;
-            this.showStatus(`Webhooks activados: ${ok} OK${fail ? `, ${fail} fallo(s)` : ''}`, ok ? 'success' : 'warning');
+            const results = data.results || [];
+            const ok = results.filter((r) => r.success).length;
+            const fail = results.filter((r) => !r.success);
+            const failDetail = fail
+                .slice(0, 3)
+                .map((r) => `${r.logicalSessionId || r.openwaSessionId || '?'}: ${r.error || 'error'}`)
+                .join(' · ');
+            if (ok > 0 && fail.length === 0) {
+                this.showStatus(`Webhooks ACTIVOS: ${ok} sesión(es) registradas en OpenWA`, 'success');
+            } else if (ok > 0) {
+                this.showStatus(
+                    `Webhooks parcial: ${ok} OK, ${fail.length} fallo(s)${failDetail ? ` — ${failDetail}` : ''}`,
+                    'warning'
+                );
+            } else {
+                this.showStatus(
+                    `No se activó ningún webhook${failDetail ? `: ${failDetail}` : ''}`,
+                    'error'
+                );
+            }
             await this.loadAutoReplyStatus();
             await this.loadAutoReplyConfig();
             await this.loadIncomingInbox();
         } catch (error) {
             this.showStatus(error.message, 'error');
+            this.updateWebhookControlsUI(this._lastAutoReplyStatus);
+            await this.loadAutoReplyStatus();
         }
     }
 
     async deactivateAutoReply() {
+        this.updateWebhookControlsUI(this._lastAutoReplyStatus, {
+            busy: true,
+            mode: 'deactivate',
+            busyLabel: 'Webhooks: desactivando…'
+        });
         try {
             const response = await fetch('/api/auto-reply/deactivate', { method: 'POST' });
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo desactivar');
-            this.showStatus('Webhooks desactivados', 'success');
+            const results = data.results || [];
+            const ok = results.filter((r) => r.success).length;
+            const fail = results.filter((r) => !r.success).length;
+            if (ok > 0 && fail === 0) {
+                this.showStatus(`Webhooks DESACTIVADOS (${ok} eliminados en OpenWA)`, 'success');
+            } else if (results.length === 0) {
+                this.showStatus('No había webhooks registrados; estado: inactivos', 'success');
+            } else {
+                this.showStatus(
+                    `Desactivación parcial: ${ok} OK, ${fail} fallo(s). Revisa el estado abajo.`,
+                    'warning'
+                );
+            }
             await this.loadAutoReplyStatus();
             await this.loadAutoReplyConfig();
         } catch (error) {
             this.showStatus(error.message, 'error');
+            this.updateWebhookControlsUI(this._lastAutoReplyStatus);
+            await this.loadAutoReplyStatus();
         }
     }
 
