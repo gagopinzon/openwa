@@ -238,6 +238,7 @@ async function findContactByPhoneFuzzy(normalizedPhone) {
   const exact = await getContactByPhone(normalizedPhone);
   if (exact) return exact;
   if (!normalizedPhone || !mongoUriConfigured()) return null;
+  if (String(normalizedPhone).startsWith('lid_')) return null;
 
   let coll;
   try {
@@ -259,6 +260,85 @@ async function findContactByPhoneFuzzy(normalizedPhone) {
     if (phonesMatch(normalizedPhone, doc.normalizedPhone)) return doc;
   }
   return null;
+}
+
+/**
+ * @param {string} whatsappLid
+ * @returns {Promise<object|null>}
+ */
+async function findContactByLid(whatsappLid) {
+  const lid = String(whatsappLid || '').replace(/\D/g, '');
+  if (!lid || !mongoUriConfigured()) return null;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch {
+    return null;
+  }
+  if (!coll) return null;
+
+  const byField = await coll.findOne({ whatsappLid: lid });
+  if (byField) return byField;
+  return coll.findOne({ normalizedPhone: `lid_${lid}` });
+}
+
+/**
+ * Alta automática al recibir un mensaje (contacto nuevo o solo LID).
+ */
+async function enrollInboundContact({
+  normalizedPhone,
+  name,
+  logicalSessionId,
+  openwaSessionId,
+  chatId,
+  whatsappLid,
+  source = 'inbound_auto'
+}) {
+  if (!normalizedPhone || !mongoUriConfigured()) return null;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch (err) {
+    console.error('contactHistory enrollInboundContact:', err.message);
+    return null;
+  }
+  if (!coll) return null;
+
+  try {
+    await coll.createIndex({ whatsappLid: 1 }, { sparse: true });
+  } catch {
+    /* index may already exist */
+  }
+
+  const displayName =
+    name != null && String(name).trim() !== '' ? String(name).trim() : '(sin nombre)';
+  const now = new Date();
+  const $set = {
+    name: displayName,
+    source: String(source),
+    lastInboundAt: now
+  };
+  if (logicalSessionId) $set.logicalSessionId = String(logicalSessionId);
+  if (openwaSessionId) $set.openwaSessionId = String(openwaSessionId);
+  if (chatId) $set.chatId = String(chatId);
+  if (whatsappLid) $set.whatsappLid = String(whatsappLid).replace(/\D/g, '');
+
+  await coll.updateOne(
+    { normalizedPhone },
+    {
+      $set,
+      $setOnInsert: {
+        normalizedPhone,
+        contactedAt: now,
+        enrolledFromInbound: true
+      }
+    },
+    { upsert: true }
+  );
+
+  return getContactByPhone(normalizedPhone);
 }
 
 /**
@@ -358,6 +438,8 @@ module.exports = {
   getContactByPhone,
   isKnownContact,
   findContactByPhoneFuzzy,
+  findContactByLid,
+  enrollInboundContact,
   getContactSession,
   assignContactSession,
   setContactAiPaused,

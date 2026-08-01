@@ -9,12 +9,18 @@ const {
   createWebhook,
   deleteWebhook,
   getSessionStatus,
-  isConnectedStatus
+  isConnectedStatus,
+  getContact
 } = require('./openwaClient');
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const processedKeys = new Map();
 const chatLocks = new Map();
+
+function autoEnrollUnknownEnabled() {
+  const v = String(process.env.AUTO_REPLY_ENROLL_UNKNOWN || 'true').trim().toLowerCase();
+  return v !== 'false' && v !== '0' && v !== 'no';
+}
 
 function getMinDelayMs() {
   const v = parseInt(process.env.AUTO_REPLY_MIN_DELAY_MS || '3000', 10);
@@ -83,11 +89,96 @@ function resolveIncomingPhone(msg) {
 
   for (const raw of candidates) {
     const normalized = contactHistory.normalizePhone(raw);
-    if (normalized && normalized.length >= 10) return normalized;
+    if (normalized && normalized.length >= 10 && !normalized.startsWith('2000')) {
+      // Heurística: LIDs largos tipo 2000… no son teléfonos MX
+      return normalized;
+    }
+    if (normalized && normalized.length >= 10 && !isLid) return normalized;
   }
 
-  // Último recurso: dígitos del chatId (puede ser LID; isKnownContact fallará)
   return contactHistory.normalizePhone(extractPhoneFromChatId(chatId));
+}
+
+function isLikelyLidPhone(phone, chatId) {
+  const p = String(phone || '');
+  if (/@lid$/i.test(String(chatId || ''))) {
+    return p === extractPhoneFromChatId(chatId) || p.startsWith('lid_');
+  }
+  return false;
+}
+
+/**
+ * Intenta obtener teléfono real vía OpenWA; si solo hay LID, usa clave lid_*.
+ */
+async function resolveContactIdentity(openwaSessionId, chatId, msg) {
+  const lidDigits = /@lid$/i.test(String(chatId || ''))
+    ? extractPhoneFromChatId(chatId)
+    : '';
+
+  let phone = resolveIncomingPhone(msg);
+  if (phone && !isLikelyLidPhone(phone, chatId)) {
+    return {
+      normalizedPhone: phone,
+      chatId: String(chatId || ''),
+      whatsappLid: lidDigits || null,
+      resolvedFrom: 'payload'
+    };
+  }
+
+  if (openwaSessionId && chatId) {
+    try {
+      const contact = await getContact(openwaSessionId, chatId);
+      const candidates = [
+        contact.number,
+        contact.phoneNumber,
+        contact.phone,
+        contact.contact?.number,
+        contact.contact?.phoneNumber
+      ];
+      for (const raw of candidates) {
+        const normalized = contactHistory.normalizePhone(raw);
+        if (
+          normalized &&
+          normalized.length >= 10 &&
+          normalized !== lidDigits &&
+          !normalized.startsWith('2000')
+        ) {
+          return {
+            normalizedPhone: normalized,
+            chatId: String(chatId || ''),
+            whatsappLid: lidDigits || null,
+            resolvedFrom: 'openwa_contact',
+            name: contact.name || contact.pushName || null
+          };
+        }
+      }
+      console.log(
+        `[auto-reply] getContact sin teléfono usable chatId=${chatId} keys=${Object.keys(contact || {}).join(',')}`
+      );
+    } catch (err) {
+      console.warn(`[auto-reply] getContact falló chatId=${chatId}: ${err.message}`);
+    }
+  }
+
+  if (lidDigits) {
+    return {
+      normalizedPhone: `lid_${lidDigits}`,
+      chatId: String(chatId || ''),
+      whatsappLid: lidDigits,
+      resolvedFrom: 'lid_key'
+    };
+  }
+
+  if (phone) {
+    return {
+      normalizedPhone: phone,
+      chatId: String(chatId || ''),
+      whatsappLid: null,
+      resolvedFrom: 'fallback'
+    };
+  }
+
+  return null;
 }
 
 function findLogicalSessionByOpenwaId(openwaSessionId) {
@@ -209,29 +300,63 @@ async function handleIncomingWebhook({
   if (!body) return { handled: false, reason: 'no_text_body' };
 
   const chatId = msg.from || msg.chatId || msg.sender;
-  let normalizedPhone = resolveIncomingPhone(msg);
-  if (!normalizedPhone) return { handled: false, reason: 'invalid_phone' };
-
-  if (/@lid$/i.test(String(chatId || '')) && normalizedPhone === extractPhoneFromChatId(chatId)) {
-    console.warn(
-      `[auto-reply] mensaje @lid sin senderPhone; no se puede cruzar con historial chatId=${chatId}`
-    );
-    return { handled: false, reason: 'lid_without_phone' };
+  const identity = await resolveContactIdentity(openwaSessionId, chatId, msg);
+  if (!identity || !identity.normalizedPhone) {
+    return { handled: false, reason: 'invalid_phone' };
   }
 
+  let normalizedPhone = identity.normalizedPhone;
+  const contactName =
+    identity.name ||
+    msg.notifyName ||
+    msg.senderName ||
+    msg.pushName ||
+    msg.contact?.pushName ||
+    null;
+
   let known = await contactHistory.isKnownContact(normalizedPhone);
+  if (!known && identity.whatsappLid) {
+    const byLid = await contactHistory.findContactByLid(identity.whatsappLid);
+    if (byLid) {
+      normalizedPhone = byLid.normalizedPhone;
+      known = true;
+      console.log(
+        `[auto-reply] match por LID ${identity.whatsappLid} → ${normalizedPhone}`
+      );
+    }
+  }
   if (!known) {
     const matched = await contactHistory.findContactByPhoneFuzzy(normalizedPhone);
-    if (!matched) {
+    if (matched) {
       console.log(
-        `[auto-reply] unknown_contact phone=${normalizedPhone} chatId=${chatId || '?'}`
+        `[auto-reply] fuzzy match ${normalizedPhone} → ${matched.normalizedPhone}`
+      );
+      normalizedPhone = matched.normalizedPhone;
+      known = true;
+    }
+  }
+
+  if (!known) {
+    if (!autoEnrollUnknownEnabled()) {
+      console.log(
+        `[auto-reply] unknown_contact phone=${normalizedPhone} chatId=${chatId || '?'} (auto-enrol off)`
       );
       return { handled: false, reason: 'unknown_contact' };
     }
+
+    const logicalPreview = findLogicalSessionByOpenwaId(openwaSessionId);
+    await contactHistory.enrollInboundContact({
+      normalizedPhone,
+      name: contactName,
+      logicalSessionId: logicalPreview ? logicalPreview.id : null,
+      openwaSessionId,
+      chatId: identity.chatId || chatId,
+      whatsappLid: identity.whatsappLid,
+      source: identity.resolvedFrom === 'lid_key' ? 'inbound_lid' : 'inbound_auto'
+    });
     console.log(
-      `[auto-reply] fuzzy match ${normalizedPhone} → ${matched.normalizedPhone}`
+      `[auto-reply] auto-enrol phone=${normalizedPhone} via=${identity.resolvedFrom} chatId=${chatId || '?'}`
     );
-    normalizedPhone = matched.normalizedPhone;
     known = true;
   }
 
