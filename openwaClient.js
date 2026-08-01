@@ -108,8 +108,21 @@ async function openwaRequest(method, path, body, opts = {}) {
 
   const data = response.data || {};
   if (response.status < 200 || response.status >= 300) {
-    const message =
-      data.message || data.error || `OpenWA error ${response.status}`;
+    const details =
+      data.message ||
+      data.error ||
+      (Array.isArray(data.message) ? data.message.join('; ') : null) ||
+      (data.errors ? JSON.stringify(data.errors) : null);
+    let message = details || `OpenWA error ${response.status}`;
+    if (typeof message === 'object') {
+      message = JSON.stringify(message);
+    }
+    // Incluir body completo en 400 para depurar validaciones
+    if (response.status === 400) {
+      const raw = JSON.stringify(data).slice(0, 800);
+      message = `${message} | body=${raw}`;
+      console.warn(`[openwa] ${method} ${path} → 400 ${raw}`);
+    }
 
     if (allowRetry && isRateLimitError(response.status, message)) {
       const retryAfterHeader = response.headers && response.headers['retry-after'];
@@ -390,8 +403,10 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
 
 const INCOMING_WEBHOOK_FILTERS = {
   conditions: [
-    { field: 'fromMe', operator: 'equals', value: false },
-    { field: 'isGroup', operator: 'equals', value: false }
+    // OpenWA valida operators: is | isNot | contains | equals
+    // Para booleanos (fromMe/isGroup) su API exige `is`, no `equals` (equals → 400 Bad Request).
+    { field: 'fromMe', operator: 'is', value: false },
+    { field: 'isGroup', operator: 'is', value: false }
   ]
 };
 
