@@ -2071,6 +2071,16 @@ app.post('/api/webhooks/openwa', async (req, res) => {
         replyMessage: replyResult.replyMessage || null
       });
     }
+
+    if (replyResult?.handled) {
+      console.log(
+        `[auto-reply] replied phone=${replyResult.telefono || '?'} session=${replyResult.sessionId || replyResult.openwaSessionId}`
+      );
+    } else if (inboxRecord) {
+      console.log(
+        `[auto-reply] skip reason=${replyResult?.reason || 'unknown'} phone=${inboxRecord.telefono || '?'} session=${inboxRecord.sessionId || inboxRecord.openwaSessionId || '?'} body=${String(inboxRecord.body || '').slice(0, 80)}`
+      );
+    }
   } catch (err) {
     console.error('Webhook OpenWA error:', err.message);
   }
