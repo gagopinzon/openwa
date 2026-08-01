@@ -286,6 +286,20 @@ async function handleIncomingWebhook({
   }
 }
 
+function extractWebhookId(created) {
+  if (!created || typeof created !== 'object') return null;
+  const nested = created.data && typeof created.data === 'object' ? created.data : null;
+  const webhook = created.webhook && typeof created.webhook === 'object' ? created.webhook : null;
+  const raw =
+    created.id ||
+    created.webhookId ||
+    (nested && (nested.id || nested.webhookId)) ||
+    (webhook && (webhook.id || webhook.webhookId)) ||
+    null;
+  if (raw == null || raw === '') return null;
+  return String(raw);
+}
+
 async function activateWebhooks() {
   const webhookUrl = autoReplyStore.getWebhookUrl();
   if (!webhookUrl) {
@@ -300,11 +314,20 @@ async function activateWebhooks() {
     throw new Error('No hay sesiones configuradas');
   }
 
+  console.log(
+    `[auto-reply] activateWebhooks start url=${webhookUrl} sessions=${sessions.length} secret=${
+      secret ? 'yes' : 'no'
+    }`
+  );
+
   const results = [];
   for (const session of sessions) {
     const openwaSessionId = session.openwaSessionId;
     try {
       const status = await getSessionStatus(openwaSessionId);
+      console.log(
+        `[auto-reply] session ${session.id} openwa=${openwaSessionId} status=${status.status}`
+      );
       if (!isConnectedStatus(status.status)) {
         results.push({
           logicalSessionId: session.id,
@@ -320,8 +343,32 @@ async function activateWebhooks() {
         secret: secret || undefined
       });
 
-      const webhookId = created.id || created.webhookId;
+      const keys =
+        created && typeof created === 'object' ? Object.keys(created).join(',') : typeof created;
+      console.log(
+        `[auto-reply] createWebhook raw keys=[${keys}] preview=${JSON.stringify(created).slice(
+          0,
+          500
+        )}`
+      );
+
+      const webhookId = extractWebhookId(created);
+      if (!webhookId) {
+        console.warn(
+          `[auto-reply] OpenWA no devolvió id de webhook para ${session.id}; no se marca como activo`
+        );
+        results.push({
+          logicalSessionId: session.id,
+          openwaSessionId,
+          success: false,
+          error: 'OpenWA no devolvió id de webhook (revisa logs createWebhook raw)',
+          rawKeys: keys
+        });
+        continue;
+      }
+
       autoReplyStore.setWebhookId(session.id, webhookId);
+      console.log(`[auto-reply] saved webhookId ${webhookId} → ${session.id}`);
 
       results.push({
         logicalSessionId: session.id,
@@ -330,6 +377,9 @@ async function activateWebhooks() {
         success: true
       });
     } catch (err) {
+      console.error(
+        `[auto-reply] activate failed session=${session.id} openwa=${openwaSessionId}: ${err.message}`
+      );
       results.push({
         logicalSessionId: session.id,
         openwaSessionId,
@@ -339,8 +389,16 @@ async function activateWebhooks() {
     }
   }
 
+  const after = autoReplyStore.getConfig().webhookIdsBySession || {};
+  const ok = results.filter((r) => r.success).length;
+  console.log(
+    `[auto-reply] activateWebhooks done ok=${ok}/${results.length} persistedIds=${JSON.stringify(
+      after
+    )}`
+  );
+
   // Los webhooks alimentan la bandeja; la auto-respuesta se controla con el switch aparte.
-  return { webhookUrl, results };
+  return { webhookUrl, results, webhookIdsBySession: after };
 }
 
 async function deactivateWebhooks() {
@@ -348,18 +406,27 @@ async function deactivateWebhooks() {
   const webhookIds = cfg.webhookIdsBySession || {};
   const results = [];
 
+  console.log(
+    `[auto-reply] deactivateWebhooks start ids=${JSON.stringify(webhookIds)}`
+  );
+
   for (const [logicalSessionId, webhookId] of Object.entries(webhookIds)) {
     const session = sessionsStore.getSession(logicalSessionId);
     if (!session || !webhookId) continue;
     try {
       await deleteWebhook(session.openwaSessionId, webhookId);
+      console.log(`[auto-reply] deleted webhook ${webhookId} for ${logicalSessionId}`);
       results.push({ logicalSessionId, webhookId, success: true });
     } catch (err) {
+      console.error(
+        `[auto-reply] delete webhook failed ${logicalSessionId}/${webhookId}: ${err.message}`
+      );
       results.push({ logicalSessionId, webhookId, success: false, error: err.message });
     }
   }
 
   autoReplyStore.clearAllWebhookIds();
+  console.log('[auto-reply] deactivateWebhooks cleared local webhookIdsBySession');
   // No apaga la config de prompts; solo deja de recibir eventos de OpenWA.
   return results;
 }
@@ -376,7 +443,7 @@ function getStatus() {
       ? sessions.length
       : enabledSessionIds.filter((id) => sessions.some((s) => s.id === id)).length;
 
-  return {
+  const status = {
     enabled: cfg.enabled,
     enabledSessionIds,
     enabledSessionsCount,
@@ -391,6 +458,14 @@ function getStatus() {
     canActivate: canListen,
     canAutoReply: Boolean(canListen && contactHistory.mongoUriConfigured())
   };
+
+  console.log(
+    `[auto-reply] getStatus webhooksActive=${status.webhooksActive} enabled=${status.enabled} mongo=${status.mongodbConfigured} ids=${JSON.stringify(
+      status.webhookIdsBySession || {}
+    )}`
+  );
+
+  return status;
 }
 
 module.exports = {

@@ -1732,9 +1732,16 @@ class CVAnalyzer {
             busyLabel: 'Webhooks: activando…'
         });
         try {
+            console.log('[auto-reply-ui] activate: saving config then calling /activate');
             await this.saveAutoReplyConfig({ silent: true });
             const response = await fetch('/api/auto-reply/activate', { method: 'POST' });
             const data = await response.json();
+            console.log('[auto-reply-ui] activate response', {
+                httpStatus: response.status,
+                success: data.success,
+                results: data.results,
+                webhookIdsBySession: data.webhookIdsBySession
+            });
             if (!data.success) throw new Error(data.error || 'No se pudo activar');
             const results = data.results || [];
             const ok = results.filter((r) => r.success).length;
@@ -1743,8 +1750,12 @@ class CVAnalyzer {
                 .slice(0, 3)
                 .map((r) => `${r.logicalSessionId || r.openwaSessionId || '?'}: ${r.error || 'error'}`)
                 .join(' · ');
+            const persisted = Object.keys(data.webhookIdsBySession || {}).length;
             if (ok > 0 && fail.length === 0) {
-                this.showStatus(`Webhooks ACTIVOS: ${ok} sesión(es) registradas en OpenWA`, 'success');
+                this.showStatus(
+                    `Webhooks ACTIVOS: ${ok} sesión(es) · persistidos ${persisted}`,
+                    'success'
+                );
             } else if (ok > 0) {
                 this.showStatus(
                     `Webhooks parcial: ${ok} OK, ${fail.length} fallo(s)${failDetail ? ` — ${failDetail}` : ''}`,
@@ -1757,9 +1768,11 @@ class CVAnalyzer {
                 );
             }
             await this.loadAutoReplyStatus();
+            console.log('[auto-reply-ui] status after activate', this._lastAutoReplyStatus);
             await this.loadAutoReplyConfig();
             await this.loadIncomingInbox();
         } catch (error) {
+            console.error('[auto-reply-ui] activate error', error);
             this.showStatus(error.message, 'error');
             this.updateWebhookControlsUI(this._lastAutoReplyStatus);
             await this.loadAutoReplyStatus();

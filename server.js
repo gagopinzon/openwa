@@ -2739,6 +2739,7 @@ app.put('/api/auto-reply/config', requireSuper, (req, res) => {
 
 app.post('/api/auto-reply/activate', requireSuper, async (req, res) => {
   try {
+    console.log(`[auto-reply] POST /activate by ${req.user?.username || 'unknown'}`);
     const status = autoReplyService.getStatus();
     if (!status.canListen) {
       return res.status(400).json({
@@ -2748,17 +2749,24 @@ app.post('/api/auto-reply/activate', requireSuper, async (req, res) => {
       });
     }
     const result = await autoReplyService.activateWebhooks();
+    const ok = (result.results || []).filter((r) => r.success).length;
+    const fail = (result.results || []).filter((r) => !r.success).length;
+    console.log(`[auto-reply] POST /activate response ok=${ok} fail=${fail}`);
     res.json({ success: true, ...result });
   } catch (error) {
+    console.error(`[auto-reply] POST /activate error: ${error.message}`);
     res.status(400).json({ success: false, error: error.message });
   }
 });
 
 app.post('/api/auto-reply/deactivate', requireSuper, async (req, res) => {
   try {
+    console.log(`[auto-reply] POST /deactivate by ${req.user?.username || 'unknown'}`);
     const results = await autoReplyService.deactivateWebhooks();
+    console.log(`[auto-reply] POST /deactivate done count=${results.length}`);
     res.json({ success: true, results });
   } catch (error) {
+    console.error(`[auto-reply] POST /deactivate error: ${error.message}`);
     res.status(400).json({ success: false, error: error.message });
   }
 });

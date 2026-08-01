@@ -128,6 +128,7 @@ function isSessionEnabled(logicalSessionId, cfg = null) {
  */
 function updateConfig(patch) {
   const cfg = readConfig();
+  const webhooksBefore = { ...(cfg.webhookIdsBySession || {}) };
   if (patch.enabled !== undefined) cfg.enabled = Boolean(patch.enabled);
   if (patch.basePrompt !== undefined) cfg.basePrompt = String(patch.basePrompt).trim();
   if (patch.enabledSessionIds !== undefined) {
@@ -148,24 +149,40 @@ function updateConfig(patch) {
     }));
   }
   writeConfig(cfg);
+  const webhooksAfter = { ...(cfg.webhookIdsBySession || {}) };
+  console.log(
+    `[auto-reply-store] updateConfig keys=${Object.keys(patch || {}).join(',')} webhooksBefore=${JSON.stringify(
+      webhooksBefore
+    )} webhooksAfter=${JSON.stringify(webhooksAfter)}`
+  );
   return getPublicConfig();
 }
 
 function setWebhookId(logicalSessionId, webhookId) {
   const cfg = readConfig();
   if (!cfg.webhookIdsBySession) cfg.webhookIdsBySession = {};
+  const before = { ...cfg.webhookIdsBySession };
   if (webhookId) {
     cfg.webhookIdsBySession[logicalSessionId] = String(webhookId);
   } else {
     delete cfg.webhookIdsBySession[logicalSessionId];
   }
   writeConfig(cfg);
+  console.log(
+    `[auto-reply-store] setWebhookId ${logicalSessionId}=${webhookId || '(deleted)'} before=${JSON.stringify(
+      before
+    )} after=${JSON.stringify(cfg.webhookIdsBySession)}`
+  );
 }
 
 function clearAllWebhookIds() {
   const cfg = readConfig();
+  const before = { ...(cfg.webhookIdsBySession || {}) };
   cfg.webhookIdsBySession = {};
   writeConfig(cfg);
+  console.log(
+    `[auto-reply-store] clearAllWebhookIds before=${JSON.stringify(before)}`
+  );
 }
 
 function getWebhookUrl() {
