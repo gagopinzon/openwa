@@ -30,8 +30,11 @@ class CVAnalyzer {
         this.loadConfig().then(async () => {
             await this.loadSessions();
             await this.refreshCvsFromServer({ silent: true });
-            this.loadAutoReplyConfig();
-            this.loadAutoReplyStatus();
+            if (this.isSuperUser() || this.getControllableSessions().length > 0) {
+                this.loadAutoReplyStatus();
+                this.loadAutoReplyConfig();
+                this.applyAutoReplyRoleUI();
+            }
             this.loadIncomingInbox();
             this.connectToEvents();
             if (this.isSuperUser()) {
@@ -239,8 +242,10 @@ class CVAnalyzer {
             this.openWhatsAppBtn.style.display = hasControl ? '' : 'none';
         }
         if (this.autoReplyPanel) {
-            this.autoReplyPanel.style.display = isSuper ? '' : 'none';
+            const showAutoReply = isSuper || this.getControllableSessions().length > 0;
+            this.autoReplyPanel.style.display = showAutoReply ? '' : 'none';
         }
+        this.applyAutoReplyRoleUI();
 
         const uploadSection = document.querySelector('.upload-section');
         const resultsSection = document.getElementById('resultsSection');
@@ -249,6 +254,16 @@ class CVAnalyzer {
             if (resultsSection) resultsSection.style.display = 'none';
         } else if (uploadSection) {
             uploadSection.style.display = '';
+        }
+    }
+
+    applyAutoReplyRoleUI() {
+        const isSuper = this.isSuperUser();
+        document.querySelectorAll('.auto-reply-admin-only').forEach((el) => {
+            el.style.display = isSuper ? '' : 'none';
+        });
+        if (this.autoReplyUserHint) {
+            this.autoReplyUserHint.style.display = isSuper ? 'none' : '';
         }
     }
 
@@ -267,6 +282,8 @@ class CVAnalyzer {
         this.saveAutoReplyConfigBtn = document.getElementById('saveAutoReplyConfigBtn');
         this.autoReplyConversations = document.getElementById('autoReplyConversations');
         this.autoReplySessionsList = document.getElementById('autoReplySessionsList');
+        this.autoReplyGlobalBadge = document.getElementById('autoReplyGlobalBadge');
+        this.autoReplyUserHint = document.getElementById('autoReplyUserHint');
         this.autoReplyEnabledSessionIds = null; // null = todas
         this.incomingInboxList = document.getElementById('incomingInboxList');
         this.incomingInboxCount = document.getElementById('incomingInboxCount');
@@ -447,6 +464,14 @@ class CVAnalyzer {
 
             if (this.activateAutoReplyBtn) {
                 this.activateAutoReplyBtn.disabled = !(data.canListen || data.canActivate);
+            }
+
+            if (this.autoReplyGlobalBadge) {
+                const on = Boolean(data.enabled);
+                this.autoReplyGlobalBadge.textContent = on
+                    ? 'Auto-respuesta global: activa'
+                    : 'Auto-respuesta global: inactiva (solo el admin puede encenderla)';
+                this.autoReplyGlobalBadge.className = `auto-reply-status ${on ? 'ok' : 'warning'}`;
             }
         } catch (error) {
             this.autoReplyStatus.innerHTML = `Error cargando estado: ${this.escapeHtml(error.message)}`;
@@ -1452,10 +1477,14 @@ class CVAnalyzer {
 
     renderAutoReplySessions() {
         if (!this.autoReplySessionsList) return;
-        const sessions = this.configuredSessions || [];
+        const isSuper = this.isSuperUser();
+        const sessions = isSuper
+            ? this.configuredSessions || []
+            : this.getControllableSessions();
+
         if (!sessions.length) {
             this.autoReplySessionsList.innerHTML =
-                '<p class="auto-reply-empty">No hay sesiones configuradas.</p>';
+                '<p class="auto-reply-empty">No hay líneas disponibles.</p>';
             return;
         }
 
@@ -1468,11 +1497,50 @@ class CVAnalyzer {
                         this.autoReplyEnabledSessionIds.includes(session.id));
                 return `
                 <label class="auto-reply-session-item">
-                    <input type="checkbox" class="auto-reply-session-check" data-session-id="${this.escapeHtml(session.id)}" ${checked ? 'checked' : ''}>
+                    <input type="checkbox" class="auto-reply-session-check"
+                        data-session-id="${this.escapeHtml(session.id)}"
+                        ${checked ? 'checked' : ''}>
                     <span>${this.escapeHtml(session.label || session.id)}</span>
                 </label>`;
             })
             .join('');
+
+        this.autoReplySessionsList
+            .querySelectorAll('.auto-reply-session-check')
+            .forEach((el) => {
+                el.addEventListener('change', () => {
+                    const sessionId = el.dataset.sessionId;
+                    const enabled = el.checked;
+                    this.toggleSessionAi(sessionId, enabled, el);
+                });
+            });
+    }
+
+    async toggleSessionAi(sessionId, enabled, checkboxEl) {
+        try {
+            const response = await fetch('/api/auto-reply/sessions', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId, enabled })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo actualizar');
+            this.autoReplyEnabledSessionIds =
+                data.config.enabledSessionIds === null ||
+                data.config.enabledSessionIds === undefined
+                    ? null
+                    : data.config.enabledSessionIds;
+            this.showStatus(
+                enabled
+                    ? `IA activada en ${sessionId}`
+                    : `IA desactivada en ${sessionId}`,
+                'success'
+            );
+            await this.loadAutoReplyStatus();
+        } catch (error) {
+            if (checkboxEl) checkboxEl.checked = !enabled;
+            this.showStatus(error.message, 'error');
+        }
     }
 
     collectEnabledSessionIdsFromDom() {

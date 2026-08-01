@@ -188,11 +188,51 @@ function matchRule(rules, messageBody) {
   return null;
 }
 
+/**
+ * Activa/desactiva IA para una logicalSessionId.
+ * Si enabledSessionIds es null (todas), materializa a allSessionIds primero.
+ * @param {string} sessionId
+ * @param {boolean} enabled
+ * @param {string[]} allSessionIds — ids actuales de sessionsStore
+ */
+function setSessionEnabled(sessionId, enabled, allSessionIds) {
+  const id = String(sessionId || '').trim();
+  if (!id) throw new Error('sessionId es obligatorio');
+  if (typeof enabled !== 'boolean') throw new Error('enabled (boolean) es obligatorio');
+
+  const allIds = normalizeSessionIds(allSessionIds) || [];
+  if (!allIds.includes(id)) {
+    throw new Error(`Sesión desconocida: ${id}`);
+  }
+
+  const cfg = readConfig();
+  let ids =
+    cfg.enabledSessionIds === null || cfg.enabledSessionIds === undefined
+      ? [...allIds]
+      : normalizeSessionIds(cfg.enabledSessionIds) || [];
+
+  if (enabled) {
+    if (!ids.includes(id)) ids.push(id);
+  } else {
+    ids = ids.filter((x) => x !== id);
+  }
+
+  cfg.enabledSessionIds = ids;
+  writeConfig(cfg);
+
+  return {
+    config: getPublicConfig(),
+    sessionId: id,
+    sessionEnabled: ids.includes(id)
+  };
+}
+
 module.exports = {
   getConfig,
   getPublicConfig,
   updateConfig,
   isSessionEnabled,
+  setSessionEnabled,
   setWebhookId,
   clearAllWebhookIds,
   getWebhookUrl,

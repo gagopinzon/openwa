@@ -2683,6 +2683,46 @@ app.get('/api/auto-reply/config', (req, res) => {
   }
 });
 
+app.patch('/api/auto-reply/sessions', (req, res) => {
+  try {
+    const sessionId = String(req.body.sessionId || '').trim();
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'sessionId es obligatorio' });
+    }
+    if (typeof req.body.enabled !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'enabled (boolean) es obligatorio'
+      });
+    }
+
+    const session = sessionsStore.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        error: `Sesión no encontrada: ${sessionId}`
+      });
+    }
+    if (!forbidUnlessControlSessions([sessionId], req, res)) return;
+
+    const allSessionIds = sessionsStore.getAllSessions().map((s) => s.id);
+    const result = autoReplyStore.setSessionEnabled(
+      sessionId,
+      req.body.enabled,
+      allSessionIds
+    );
+
+    res.json({
+      success: true,
+      config: result.config,
+      sessionId: result.sessionId,
+      sessionEnabled: result.sessionEnabled
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 app.put('/api/auto-reply/config', requireSuper, (req, res) => {
   try {
     const config = autoReplyStore.updateConfig({
