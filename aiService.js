@@ -525,7 +525,8 @@ async function generateReplyMessage({
   matchedRule,
   senderName,
   conversationContext,
-  agendaContext
+  agendaContext,
+  allowGreeting = true
 }) {
   const sender = senderName || 'Pro Talent';
   const ruleHint = matchedRule
@@ -543,7 +544,8 @@ async function generateReplyMessage({
   if (!API_KEY || API_KEY.includes('test') || API_KEY.includes('tu_api_key')) {
     if (agendaContext) {
       const name = extractFirstName(contactName);
-      return `Claro, ${name}. Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál de estos horarios te acomoda mejor? ☺️`;
+      const hi = allowGreeting ? `Hola ${name}, ` : '';
+      return `${hi}te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál de estos horarios te acomoda mejor? ☺️`;
     }
     return generateBasicReply({
       contactName,
@@ -560,10 +562,15 @@ async function generateReplyMessage({
 - Donde tu playbook diga XXXX / XXXXXXX / "espacios disponibles", usa SOLO los rangos de HORARIOS REALES de arriba.
 - La sesión es de 15 minutos. Ofrece disponibilidad como rangos ("sábado de 8:30 a 12:30"), NO listes bloques de 30 minutos.
 - Pide una hora de inicio dentro del rango (ej. "¿te queda a las 10?"). No digas que el calendario usa slots de 30 min.
+- NUNCA ofrezcas horarios que ya pasaron; usa solo la lista inyectada (ya viene filtrada).
 - NUNCA inventes horas ni digas nombres de vendedores.
 - Si no hay huecos en esa lista, dilo y ofrece otro día; no inventes.`
     : `
 - Si no hay lista de horarios reales inyectada, NO inventes horas concretas; invita a proponer día o espera a un asesor.`;
+
+  const greetingInstructions = allowGreeting
+    ? `- Puedes abrir con un saludo breve (Hola / gusto saludarte) si encaja.`
+    : `- NO saludes de nuevo (nada de "Hola", "gusto saludarte", "buenos días/tardes/noches" al inicio). Esta conversación ya está activa; ve directo a la respuesta.`;
 
   const prompt = `${basePrompt || 'Eres un asistente de Pro Talent.'}
 
@@ -580,6 +587,7 @@ INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
 - Responde al mensaje del lead; no reenvíes el pitch frío completo.
 - Usa solo el primer nombre "${firstName}" si aplica.
 - Sé breve: los leads no quieren paredes de texto; resume el playbook.
+${greetingInstructions}
 ${agendaInstructions}
 
 Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.`;

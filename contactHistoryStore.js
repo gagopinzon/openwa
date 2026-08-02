@@ -174,6 +174,8 @@ async function recordSuccessfulContact({
   if (logicalSessionId) sessionFields.logicalSessionId = String(logicalSessionId);
   if (openwaSessionId) sessionFields.openwaSessionId = String(openwaSessionId);
   if (logicalSessionId || openwaSessionId) sessionFields.lastOutboundAt = now;
+  // El pitch en frío ya abre con "Hola…"; no saludar otra vez en la 1ª respuesta IA.
+  sessionFields.lastAiGreetingAt = now;
   if (cvId) sessionFields.cvId = String(cvId);
   if (archivoOriginal) sessionFields.archivoOriginal = String(archivoOriginal);
 
@@ -352,9 +354,37 @@ async function getContactSession(normalizedPhone) {
     logicalSessionId: doc.logicalSessionId || null,
     openwaSessionId: doc.openwaSessionId || null,
     name: doc.name || null,
+    cvId: doc.cvId || null,
     aiPaused: Boolean(doc.aiPaused),
-    aiPausedAt: doc.aiPausedAt || null
+    aiPausedAt: doc.aiPausedAt || null,
+    lastAiGreetingAt: doc.lastAiGreetingAt
+      ? new Date(doc.lastAiGreetingAt).toISOString()
+      : null
   };
+}
+
+/**
+ * Marca el momento del último saludo de la IA (para cooldown de saludos).
+ * @param {string} normalizedPhone
+ * @param {Date} [at]
+ */
+async function touchLastAiGreeting(normalizedPhone, at = new Date()) {
+  if (!normalizedPhone || !mongoUriConfigured()) return false;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch (err) {
+    console.error('contactHistory touchLastAiGreeting:', err.message);
+    return false;
+  }
+  if (!coll) return false;
+
+  const result = await coll.updateOne(
+    { normalizedPhone },
+    { $set: { lastAiGreetingAt: at instanceof Date ? at : new Date(at) } }
+  );
+  return result.matchedCount > 0;
 }
 
 /**
@@ -442,6 +472,7 @@ module.exports = {
   enrollInboundContact,
   getContactSession,
   assignContactSession,
+  touchLastAiGreeting,
   setContactAiPaused,
   isContactAiPaused
 };

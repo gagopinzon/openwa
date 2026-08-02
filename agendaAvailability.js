@@ -215,11 +215,67 @@ async function getAggregatedSlots(opts = {}) {
     /* store opcional en tests aislados */
   }
 
+  slots = filterFutureSlots(slots);
+
   return {
     slots,
     gerentesConsultados: merged.gerentesConsultados,
     erroresGerente: merged.erroresGerente
   };
+}
+
+const MEXICO_TZ = 'America/Mexico_City';
+
+/**
+ * Fecha y minutos actuales en CDMX.
+ * @param {Date} [now]
+ * @returns {{ ymd: string, minutes: number }}
+ */
+function getMexicoNowParts(now = new Date()) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: MEXICO_TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    })
+      .formatToParts(now)
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  );
+  let hour = Number(parts.hour);
+  if (hour === 24) hour = 0;
+  return {
+    ymd: `${parts.year}-${parts.month}-${parts.day}`,
+    minutes: hour * 60 + Number(parts.minute)
+  };
+}
+
+/**
+ * Quita slots cuya hora de inicio ya pasó (o está a menos de leadMinutes).
+ * @param {Array<object>} slots
+ * @param {Date} [now]
+ * @param {number} [leadMinutes] margen mínimo para poder ofrecer el slot
+ */
+function filterFutureSlots(slots, now = new Date(), leadMinutes = 15) {
+  const { ymd, minutes } = getMexicoNowParts(now);
+  const lead = Number.isFinite(leadMinutes) ? Math.max(0, leadMinutes) : 15;
+  const threshold = minutes + lead;
+
+  return (Array.isArray(slots) ? slots : []).filter((s) => {
+    const fecha = String(s.fecha || '').trim();
+    if (!fecha) return false;
+    if (fecha > ymd) return true;
+    if (fecha < ymd) return false;
+    const start = timeToMinutes(s.horaInicio);
+    if (!Number.isFinite(start)) return false;
+    // Si el margen cruza medianoche, no queda nada hoy
+    if (threshold >= 24 * 60) return false;
+    return start >= threshold;
+  });
 }
 
 /**
@@ -348,14 +404,23 @@ const SLOTS_CACHE_TTL_MS = 60 * 1000;
  * @param {{ fechaInicio?: string, fechaFin?: string, slotMinutos?: number }} opts
  */
 async function getAggregatedSlotsCached(opts = {}) {
-  const key = `${opts.fechaInicio || ''}|${opts.fechaFin || ''}|${opts.slotMinutos || ''}`;
+  const nowParts = getMexicoNowParts();
+  // Bucket de 15 min para no servir cache con horas ya vencidas
+  const bucket = Math.floor(nowParts.minutes / 15);
+  const key = `${opts.fechaInicio || ''}|${opts.fechaFin || ''}|${opts.slotMinutos || ''}|${nowParts.ymd}|${bucket}`;
   const hit = slotsCache.get(key);
   if (hit && Date.now() - hit.at < SLOTS_CACHE_TTL_MS) {
-    return hit.data;
+    return {
+      ...hit.data,
+      slots: filterFutureSlots(hit.data.slots || [])
+    };
   }
   const data = await getAggregatedSlots(opts);
   slotsCache.set(key, { at: Date.now(), data });
-  return data;
+  return {
+    ...data,
+    slots: filterFutureSlots(data.slots || [])
+  };
 }
 
 function clearSlotsCache() {
@@ -372,5 +437,7 @@ module.exports = {
   clearSlotsCache,
   publicSlots,
   collapseConsecutiveRanges,
-  formatSlotsForPrompt
+  formatSlotsForPrompt,
+  filterFutureSlots,
+  getMexicoNowParts
 };

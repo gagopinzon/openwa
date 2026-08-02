@@ -7,7 +7,9 @@ const {
   mergePanelDisponibilidad,
   publicSlots,
   collapseConsecutiveRanges,
-  formatSlotsForPrompt
+  formatSlotsForPrompt,
+  filterFutureSlots,
+  getMexicoNowParts
 } = require('../agendaAvailability');
 
 describe('agendaAvailability', () => {
@@ -115,5 +117,20 @@ describe('agendaAvailability', () => {
     assert.match(text, /disponible de 08:30 a 12:30/);
     assert.match(text, /15 minutos/);
     assert.doesNotMatch(text, /08:30–09:00/);
+  });
+
+  it('filterFutureSlots quita horas ya pasadas el mismo día', () => {
+    const now = new Date();
+    const { ymd, minutes } = getMexicoNowParts(now);
+    const slots = [
+      { fecha: ymd, horaInicio: '08:00', horaFin: '08:30' },
+      { fecha: ymd, horaInicio: '23:59', horaFin: '00:29' },
+      { fecha: '2099-01-01', horaInicio: '09:00', horaFin: '09:30' }
+    ];
+    const future = filterFutureSlots(slots, now, 15);
+    assert.ok(future.some((s) => s.fecha === '2099-01-01'));
+    if (minutes >= 8 * 60 + 15) {
+      assert.ok(!future.some((s) => s.fecha === ymd && s.horaInicio === '08:00'));
+    }
   });
 });

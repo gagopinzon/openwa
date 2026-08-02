@@ -26,6 +26,29 @@ function autoEnrollUnknownEnabled() {
   return v !== 'false' && v !== '0' && v !== 'no';
 }
 
+/**
+ * Horas antes de volver a permitir un saludo (Hola / gusto saludarte).
+ * Default 4. Env: AUTO_REPLY_GREETING_COOLDOWN_HOURS
+ */
+function getGreetingCooldownMs() {
+  const hours = parseFloat(
+    String(process.env.AUTO_REPLY_GREETING_COOLDOWN_HOURS || '4').trim()
+  );
+  const h = Number.isFinite(hours) && hours >= 0 ? hours : 4;
+  return h * 60 * 60 * 1000;
+}
+
+/**
+ * @param {string|Date|null|undefined} lastAiGreetingAt
+ * @param {Date} [now]
+ */
+function shouldAllowGreeting(lastAiGreetingAt, now = new Date()) {
+  if (!lastAiGreetingAt) return true;
+  const last = new Date(lastAiGreetingAt).getTime();
+  if (!Number.isFinite(last)) return true;
+  return now.getTime() - last >= getGreetingCooldownMs();
+}
+
 function getMinDelayMs() {
   const v = parseInt(process.env.AUTO_REPLY_MIN_DELAY_MS || '3000', 10);
   return Number.isFinite(v) && v >= 0 ? v : 3000;
@@ -498,20 +521,26 @@ async function handleIncomingWebhook({
     let agendaContext = null;
     if (!replyText && agendaIntent.shouldOfferSlots(body)) {
       try {
+        const today = agendaIntent.todayYmd();
         const range =
           agendaIntent.resolveDateRangeFromMessage(body) || {
-            fechaInicio: agendaIntent.todayYmd(),
-            fechaFin: agendaIntent.addDaysYmd(agendaIntent.todayYmd(), 2)
+            fechaInicio: today,
+            fechaFin: agendaIntent.addDaysYmd(today, 2)
           };
         let aggregated = await agendaAvailability.getAggregatedSlotsCached({
           fechaInicio: range.fechaInicio,
           fechaFin: range.fechaFin
         });
         let slots = aggregated.slots || [];
+        // Si pidió "hoy"/rango corto y ya no hay huecos futuros, pasar a próximos días
         if (!slots.length) {
+          const from =
+            range.fechaInicio <= today
+              ? agendaIntent.addDaysYmd(today, 1)
+              : range.fechaInicio;
           aggregated = await agendaAvailability.getAggregatedSlotsCached({
-            fechaInicio: agendaIntent.todayYmd(),
-            fechaFin: agendaIntent.addDaysYmd(agendaIntent.todayYmd(), 6)
+            fechaInicio: from,
+            fechaFin: agendaIntent.addDaysYmd(today, 6)
           });
           slots = aggregated.slots || [];
           agendaMeta = {
@@ -530,6 +559,11 @@ async function handleIncomingWebhook({
         if (slots.length) {
           agendaOfferStore.rememberOffer(normalizedPhone, slots);
           agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 3);
+          // Si el primer día ofrecido es mañana (hoy ya venció), déjalo explícito
+          const firstFecha = slots[0] && slots[0].fecha;
+          if (firstFecha && firstFecha > today) {
+            agendaContext = `Hoy (${today}) ya no hay horarios disponibles. Ofrece a partir de estos días:\n${agendaContext}`;
+          }
         } else {
           agendaContext =
             '(Sin horarios libres en los próximos días. No inventes horas; ofrece otro día o paso a humano.)';
@@ -546,6 +580,7 @@ async function handleIncomingWebhook({
     }
 
     if (!replyText) {
+      const allowGreeting = shouldAllowGreeting(contactSession?.lastAiGreetingAt);
       replyText = await generateReplyMessage({
         contactName: contactSession?.name || 'contacto',
         incomingBody: body,
@@ -553,8 +588,12 @@ async function handleIncomingWebhook({
         matchedRule,
         senderName,
         conversationContext: cvContext,
-        agendaContext
+        agendaContext,
+        allowGreeting
       });
+      if (allowGreeting) {
+        await contactHistory.touchLastAiGreeting(normalizedPhone);
+      }
     }
 
     let messageId = null;
