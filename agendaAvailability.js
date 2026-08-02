@@ -218,11 +218,69 @@ function publicSlots(slots, limit = 8) {
   }));
 }
 
+const DAY_UPPER = [
+  'DOMINGO',
+  'LUNES',
+  'MARTES',
+  'MIÉRCOLES',
+  'JUEVES',
+  'VIERNES',
+  'SÁBADO'
+];
+
+/**
+ * Texto para el prompt estilo playbook (VIERNES: • 10:00 …).
+ * @param {Array<object>} slots
+ * @param {number} [limit]
+ */
+function formatSlotsForPrompt(slots, limit = 8) {
+  const pub = publicSlots(slots, limit);
+  if (!pub.length) return '';
+
+  /** @type {Map<string, string[]>} */
+  const byDay = new Map();
+  for (const s of pub) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.fecha);
+    let dayKey = s.fecha;
+    if (m) {
+      const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+      const name = DAY_UPPER[dt.getDay()] || s.fecha;
+      dayKey = `${name} ${Number(m[3])} ${MONTH_SHORT[Number(m[2]) - 1] || ''}`.trim();
+    }
+    if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+    byDay.get(dayKey).push(`• ${s.horaInicio}–${s.horaFin}`);
+  }
+
+  return [...byDay.entries()]
+    .map(([day, hours]) => `${day}:\n${hours.join('\n')}`)
+    .join('\n');
+}
+
+/** Cache corta para no martillar el panel en cada mensaje. */
+const slotsCache = new Map();
+const SLOTS_CACHE_TTL_MS = 60 * 1000;
+
+/**
+ * @param {{ fechaInicio?: string, fechaFin?: string, slotMinutos?: number }} opts
+ */
+async function getAggregatedSlotsCached(opts = {}) {
+  const key = `${opts.fechaInicio || ''}|${opts.fechaFin || ''}|${opts.slotMinutos || ''}`;
+  const hit = slotsCache.get(key);
+  if (hit && Date.now() - hit.at < SLOTS_CACHE_TTL_MS) {
+    return hit.data;
+  }
+  const data = await getAggregatedSlots(opts);
+  slotsCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
 module.exports = {
   slotKey,
   formatSlotLabel,
   collectGerenteEmails,
   mergePanelDisponibilidad,
   getAggregatedSlots,
-  publicSlots
+  getAggregatedSlotsCached,
+  publicSlots,
+  formatSlotsForPrompt
 };

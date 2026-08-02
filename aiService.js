@@ -537,13 +537,13 @@ async function generateReplyMessage({
     : '';
 
   const agendaBlock = agendaContext
-    ? `\nDisponibilidad real (NO inventes otros horarios):\n${agendaContext}`
+    ? `\nHORARIOS REALES DISPONIBLES (sustituyen cualquier XXXX / XXXXXXX del playbook; NO inventes otros):\n${agendaContext}`
     : '';
 
   if (!API_KEY || API_KEY.includes('test') || API_KEY.includes('tu_api_key')) {
     if (agendaContext) {
       const name = extractFirstName(contactName);
-      return `¡Claro, ${name}! Estos horarios tenemos libres:\n${agendaContext}\n¿Cuál te acomoda?\n\nAtte:\n${sender}`;
+      return `Claro, ${name}. Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál de estos horarios te acomoda mejor? ☺️`;
     }
     return generateBasicReply({
       contactName,
@@ -557,11 +557,11 @@ async function generateReplyMessage({
 
   const agendaInstructions = agendaContext
     ? `
-- Si hay lista de horarios arriba, ofrécelos de forma breve (máx. 6) y pide que elija uno (día + hora).
-- NUNCA inventes horarios que no estén en esa lista.
-- NO digas nombres de vendedores ni “con quién” será la cita.
-- Si la lista dice que no hay huecos, dilo y ofrece reintentar otro día.`
-    : '';
+- Donde tu playbook diga XXXX / XXXXXXX / "espacios disponibles", pega SOLO los HORARIOS REALES de arriba (formato por día).
+- NUNCA inventes horas ni digas nombres de vendedores.
+- Si no hay huecos en esa lista, dilo y ofrece otro día; no inventes.`
+    : `
+- Si no hay lista de horarios reales inyectada, NO inventes horas concretas; invita a proponer día o espera a un asesor.`;
 
   const prompt = `${basePrompt || 'Eres un asistente de Pro Talent.'}
 
@@ -570,16 +570,18 @@ Mensaje que te escribió:
 "${incomingBody}"
 ${ruleHint}${contextBlock}${agendaBlock}
 
-INSTRUCCIONES:
-- Responde en español, tono conversacional y profesional.
-- Máximo 400 caracteres (sin contar la firma).
-- Responde directamente a su mensaje; no repitas el pitch inicial completo.
-- Usa solo el primer nombre "${firstName}" (con esa capitalización exacta) si aplica.${agendaInstructions}
-- Termina con:
-Atte:
-${sender}
+INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
+- Responde en español como Mónica (si el playbook lo indica): amable, breve, persuasiva para agendar.
+- Zona horaria: México (CDMX).
+- No firmes con "Atte:" ni con nombre de sesión; ya te presentaste.
+- Emojis: solo 💙 y ☺️ si el playbook los usa; no uses otros.
+- Responde al mensaje del lead; no reenvíes el pitch frío completo.
+- Usa solo el primer nombre "${firstName}" si aplica.
+- Sé breve: los leads no quieren paredes de texto; resume el playbook.
+${agendaInstructions}
 
-Genera SOLO el texto del mensaje de respuesta, sin explicaciones ni alternativas.`;
+Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.`;
+
   try {
     const response = await axios.post(
       DEEPSEEK_API_URL,
@@ -587,7 +589,7 @@ Genera SOLO el texto del mensaje de respuesta, sin explicaciones ni alternativas
         model: 'deepseek-chat',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.6,
-        max_tokens: 300
+        max_tokens: 450
       },
       {
         headers: {
@@ -607,9 +609,8 @@ Genera SOLO el texto del mensaje de respuesta, sin explicaciones ni alternativas
           break;
         }
       }
-      if (!message.includes('Atte:')) {
-        message += `\n\nAtte:\n${sender}`;
-      }
+      // Quitar firma Atte si el modelo la añade por costumbre
+      message = message.replace(/\n*\s*Atte:\s*\n?[\s\S]*$/i, '').trim();
       return message;
     }
     throw new Error('Respuesta inválida de DeepSeek');

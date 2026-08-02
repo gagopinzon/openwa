@@ -26,6 +26,9 @@ const WEEKDAY_NAMES = {
 const SCHEDULE_RE =
   /\b(agendar|agenda|cita|disponib|horario|horarios|mañana|manana|hoy|esta\s+semana|próxim|proxim|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|\d{1,2}:\d{2}|\d{1,2}\s*(am|pm)|a\s+las)\b/i;
 
+const REJECT_RE =
+  /\b(no\s+me\s+interesa|no\s+gracias|deja\s+de\s+escribir|bloquear|spam|no\s+molestar)\b/i;
+
 /**
  * @param {Date} [now]
  * @returns {string} YYYY-MM-DD en CDMX
@@ -67,6 +70,18 @@ function weekdayOfYmd(ymd) {
  */
 function looksLikeScheduleIntent(text) {
   return SCHEDULE_RE.test(String(text || ''));
+}
+
+/**
+ * En el playbook de Mónica casi siempre se cierran con horarios.
+ * Solo se omite en rechazos claros.
+ * @param {string} text
+ */
+function shouldOfferSlots(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (REJECT_RE.test(raw)) return false;
+  return true;
 }
 
 /**
@@ -205,6 +220,7 @@ module.exports = {
   todayYmd,
   addDaysYmd,
   looksLikeScheduleIntent,
+  shouldOfferSlots,
   resolveDateRangeFromMessage,
   extractTimesFromMessage,
   matchSlotFromMessage,

@@ -474,30 +474,30 @@ async function handleIncomingWebhook({
       }
     }
 
-    // Fase 1: ofrecer horarios
+    // Fase 1: en el playbook casi siempre se cierran con horarios (XXXX → slots reales)
     let agendaContext = null;
-    if (!replyText && agendaIntent.looksLikeScheduleIntent(body)) {
+    if (!replyText && agendaIntent.shouldOfferSlots(body)) {
       try {
         const range =
           agendaIntent.resolveDateRangeFromMessage(body) || {
             fechaInicio: agendaIntent.todayYmd(),
             fechaFin: agendaIntent.addDaysYmd(agendaIntent.todayYmd(), 2)
           };
-        const aggregated = await agendaAvailability.getAggregatedSlots({
+        let aggregated = await agendaAvailability.getAggregatedSlotsCached({
           fechaInicio: range.fechaInicio,
           fechaFin: range.fechaFin
         });
         let slots = aggregated.slots || [];
         if (!slots.length) {
-          const wider = await agendaAvailability.getAggregatedSlots({
+          aggregated = await agendaAvailability.getAggregatedSlotsCached({
             fechaInicio: agendaIntent.todayYmd(),
             fechaFin: agendaIntent.addDaysYmd(agendaIntent.todayYmd(), 6)
           });
-          slots = wider.slots || [];
+          slots = aggregated.slots || [];
           agendaMeta = {
             reason: 'slots_wider_range',
-            gerentesConsultados: wider.gerentesConsultados,
-            erroresGerente: wider.erroresGerente
+            gerentesConsultados: aggregated.gerentesConsultados,
+            erroresGerente: aggregated.erroresGerente
           };
         } else {
           agendaMeta = {
@@ -509,18 +509,15 @@ async function handleIncomingWebhook({
 
         if (slots.length) {
           agendaOfferStore.rememberOffer(normalizedPhone, slots);
-          const pub = agendaAvailability.publicSlots(slots, 8);
-          agendaContext = pub
-            .map((s, i) => `${i + 1}. ${s.label} (${s.fecha} ${s.horaInicio}–${s.horaFin})`)
-            .join('\n');
+          agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 8);
         } else {
           agendaContext =
-            'No hay horarios libres en los próximos días según la agenda del equipo. Pide al contacto otro día o que un humano le ayude.';
+            '(Sin horarios libres en los próximos días. No inventes horas; ofrece otro día o paso a humano.)';
         }
       } catch (error) {
         console.warn('[auto-reply] agenda slots error:', error.message);
         agendaContext =
-          'No se pudo consultar la agenda ahora. No inventes horarios; ofrece reintentar más tarde o paso a un asesor.';
+          '(No se pudo consultar la agenda. No inventes horarios; ofrece reintentar más tarde.)';
         agendaMeta = { reason: 'slots_error', error: error.message };
       }
     }
@@ -576,12 +573,12 @@ async function handleIncomingWebhook({
 function buildPendingCreatedReply(contactName, slot, senderName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot.label || `${slot.fecha} ${slot.horaInicio}`;
-  return `Perfecto, ${name}. Quedó anotado el ${when}. En breve te enviamos la liga de la sesión.\n\nAtte:\n${senderName || 'Pro Talent'}`;
+  return `Perfecto, ${name}. Quedó anotado el ${when}. En breve te enviamos la liga de la sesión. ☺️`;
 }
 
 function buildNoCvAgendaReply(contactName, senderName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
-  return `Gracias, ${name}. Para agendar necesito que un asesor valide tu CV primero; te contactamos enseguida.\n\nAtte:\n${senderName || 'Pro Talent'}`;
+  return `Gracias, ${name}. Para agendar necesito que un asesor valide tu CV primero; te contactamos enseguida. 💙`;
 }
 
 /**
@@ -589,7 +586,7 @@ function buildNoCvAgendaReply(contactName, senderName) {
  */
 function buildConfirmedMeetingReply({ contactName, fecha, horaInicio, urlReunion, senderName }) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
-  return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}. Liga: ${urlReunion}\n\n¡Nos vemos!\n\nAtte:\n${senderName || 'Pro Talent'}`;
+  return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}. Liga: ${urlReunion}\n\n¡Nos vemos! ☺️`;
 }
 
 function extractWebhookId(created) {
