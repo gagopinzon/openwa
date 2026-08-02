@@ -557,7 +557,9 @@ async function generateReplyMessage({
 
   const agendaInstructions = agendaContext
     ? `
-- Donde tu playbook diga XXXX / XXXXXXX / "espacios disponibles", pega SOLO los HORARIOS REALES de arriba (formato por día).
+- Donde tu playbook diga XXXX / XXXXXXX / "espacios disponibles", usa SOLO los rangos de HORARIOS REALES de arriba.
+- La sesión es de 15 minutos. Ofrece disponibilidad como rangos ("sábado de 8:30 a 12:30"), NO listes bloques de 30 minutos.
+- Pide una hora de inicio dentro del rango (ej. "¿te queda a las 10?"). No digas que el calendario usa slots de 30 min.
 - NUNCA inventes horas ni digas nombres de vendedores.
 - Si no hay huecos en esa lista, dilo y ofrece otro día; no inventes.`
     : `

@@ -442,34 +442,54 @@ async function handleIncomingWebhook({
             senderName
           );
           agendaMeta = { reason: 'no_cv_for_pending' };
-        } else {
-          const pending = agendaPendingStore.createPending({
-            telefono: normalizedPhone,
-            chatId: identity.chatId || chatId,
-            contactName: contactSession?.name || contactName,
-            cvId,
-            fecha: chosen.fecha,
-            horaInicio: chosen.horaInicio,
-            horaFin: chosen.horaFin,
-            label: chosen.label,
-            logicalSessionId,
-            openwaSessionId,
-            candidateVendors: chosen.candidates || []
-          });
+        } else if (
+          agendaPendingStore.isSlotHeld(
+            chosen.fecha,
+            chosen.horaInicio,
+            chosen.horaFin,
+            { exceptTelefono: normalizedPhone }
+          )
+        ) {
           agendaOfferStore.clearOffer(normalizedPhone);
-          agendaPendingId = pending.id;
-          replyText = buildPendingCreatedReply(
-            contactSession?.name || 'contacto',
-            chosen,
-            senderName
-          );
-          agendaMeta = { reason: 'pending_created', pendingId: pending.id };
-          if (broadcastEvent) {
-            broadcastEvent('agendaPending', pending);
+          agendaMeta = { reason: 'slot_taken_reoffer' };
+          // cae a Fase 1 para ofrecer otros horarios
+        } else {
+          try {
+            const pending = agendaPendingStore.createPending({
+              telefono: normalizedPhone,
+              chatId: identity.chatId || chatId,
+              contactName: contactSession?.name || contactName,
+              cvId,
+              fecha: chosen.fecha,
+              horaInicio: chosen.horaInicio,
+              horaFin: chosen.horaFin,
+              label: chosen.label,
+              logicalSessionId,
+              openwaSessionId,
+              candidateVendors: chosen.candidates || []
+            });
+            agendaOfferStore.clearOffer(normalizedPhone);
+            agendaPendingId = pending.id;
+            replyText = buildPendingCreatedReply(
+              contactSession?.name || 'contacto',
+              chosen,
+              senderName
+            );
+            agendaMeta = { reason: 'pending_created', pendingId: pending.id };
+            if (broadcastEvent) {
+              broadcastEvent('agendaPending', pending);
+            }
+            console.log(
+              `[auto-reply] agenda pending ${pending.id} phone=${normalizedPhone} ${chosen.fecha} ${chosen.horaInicio}`
+            );
+          } catch (error) {
+            if (error.code === 'slot_held' || error.status === 409) {
+              agendaOfferStore.clearOffer(normalizedPhone);
+              agendaMeta = { reason: 'slot_taken_reoffer', error: error.message };
+            } else {
+              throw error;
+            }
           }
-          console.log(
-            `[auto-reply] agenda pending ${pending.id} phone=${normalizedPhone} ${chosen.fecha} ${chosen.horaInicio}`
-          );
         }
       }
     }
@@ -509,10 +529,13 @@ async function handleIncomingWebhook({
 
         if (slots.length) {
           agendaOfferStore.rememberOffer(normalizedPhone, slots);
-          agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 8);
+          agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 3);
         } else {
           agendaContext =
             '(Sin horarios libres en los próximos días. No inventes horas; ofrece otro día o paso a humano.)';
+        }
+        if (agendaMeta && agendaMeta.reason === 'slot_taken_reoffer' && agendaContext) {
+          agendaContext = `El horario que eligió el lead ya quedó apartado por otra cita en espera. Ofrécele otras opciones.\n${agendaContext}`;
         }
       } catch (error) {
         console.warn('[auto-reply] agenda slots error:', error.message);

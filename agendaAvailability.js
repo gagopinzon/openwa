@@ -200,7 +200,26 @@ async function getAggregatedSlots(opts = {}) {
     })
   );
 
-  return mergePanelDisponibilidad(responses);
+  const merged = mergePanelDisponibilidad(responses);
+  let slots = merged.slots || [];
+
+  try {
+    const agendaPendingStore = require('./agendaPendingStore');
+    const held = agendaPendingStore.getHeldSlotKeys();
+    if (held && held.size) {
+      slots = slots.filter(
+        (s) => !held.has(slotKey(s.fecha, s.horaInicio, s.horaFin))
+      );
+    }
+  } catch {
+    /* store opcional en tests aislados */
+  }
+
+  return {
+    slots,
+    gerentesConsultados: merged.gerentesConsultados,
+    erroresGerente: merged.erroresGerente
+  };
 }
 
 /**
@@ -210,7 +229,8 @@ async function getAggregatedSlots(opts = {}) {
  */
 function publicSlots(slots, limit = 8) {
   const list = Array.isArray(slots) ? slots : [];
-  return list.slice(0, Math.max(0, Number(limit) || 8)).map((s) => ({
+  const n = limit == null || limit < 0 ? list.length : Math.max(0, Number(limit) || 8);
+  return list.slice(0, n).map((s) => ({
     fecha: s.fecha,
     horaInicio: s.horaInicio,
     horaFin: s.horaFin,
@@ -229,31 +249,95 @@ const DAY_UPPER = [
 ];
 
 /**
- * Texto para el prompt estilo playbook (VIERNES: • 10:00 …).
- * @param {Array<object>} slots
- * @param {number} [limit]
+ * @param {string} hhmm
+ * @returns {number}
  */
-function formatSlotsForPrompt(slots, limit = 8) {
-  const pub = publicSlots(slots, limit);
-  if (!pub.length) return '';
+function timeToMinutes(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
+  if (!m) return NaN;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
 
-  /** @type {Map<string, string[]>} */
-  const byDay = new Map();
-  for (const s of pub) {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.fecha);
-    let dayKey = s.fecha;
-    if (m) {
-      const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-      const name = DAY_UPPER[dt.getDay()] || s.fecha;
-      dayKey = `${name} ${Number(m[3])} ${MONTH_SHORT[Number(m[2]) - 1] || ''}`.trim();
+/**
+ * @param {number} mins
+ */
+function minutesToTime(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/**
+ * Une bloques consecutivos del mismo día en rangos [inicio, fin].
+ * @param {Array<{ horaInicio: string, horaFin: string }>} daySlots
+ * @returns {Array<{ horaInicio: string, horaFin: string }>}
+ */
+function collapseConsecutiveRanges(daySlots) {
+  const sorted = [...(daySlots || [])].sort((a, b) =>
+    String(a.horaInicio).localeCompare(String(b.horaInicio))
+  );
+  /** @type {Array<{ horaInicio: string, horaFin: string }>} */
+  const ranges = [];
+  for (const s of sorted) {
+    const start = timeToMinutes(s.horaInicio);
+    const end = timeToMinutes(s.horaFin);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    const last = ranges[ranges.length - 1];
+    if (last && timeToMinutes(last.horaFin) >= start) {
+      if (end > timeToMinutes(last.horaFin)) {
+        last.horaFin = minutesToTime(end);
+      }
+    } else {
+      ranges.push({
+        horaInicio: minutesToTime(start),
+        horaFin: minutesToTime(end)
+      });
     }
-    if (!byDay.has(dayKey)) byDay.set(dayKey, []);
-    byDay.get(dayKey).push(`• ${s.horaInicio}–${s.horaFin}`);
+  }
+  return ranges;
+}
+
+/**
+ * Texto breve para el prompt: rangos por día (no lista de bloques de 30 min).
+ * @param {Array<object>} slots
+ * @param {number} [maxDays] máx. días a mostrar
+ */
+function formatSlotsForPrompt(slots, maxDays = 3) {
+  const list = Array.isArray(slots) ? slots : [];
+  if (!list.length) return '';
+
+  /** @type {Map<string, { dayLabel: string, slots: object[] }>} */
+  const byFecha = new Map();
+  for (const s of list) {
+    const fecha = String(s.fecha || '').trim();
+    if (!fecha) continue;
+    if (!byFecha.has(fecha)) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fecha);
+      let dayLabel = fecha;
+      if (m) {
+        const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+        const name = DAY_UPPER[dt.getDay()] || fecha;
+        dayLabel = `${name} ${Number(m[3])} ${MONTH_SHORT[Number(m[2]) - 1] || ''}`.trim();
+      }
+      byFecha.set(fecha, { dayLabel, slots: [] });
+    }
+    byFecha.get(fecha).slots.push(s);
   }
 
-  return [...byDay.entries()]
-    .map(([day, hours]) => `${day}:\n${hours.join('\n')}`)
-    .join('\n');
+  const fechas = [...byFecha.keys()].sort().slice(0, Math.max(1, Number(maxDays) || 3));
+  const lines = [];
+  for (const fecha of fechas) {
+    const group = byFecha.get(fecha);
+    const ranges = collapseConsecutiveRanges(group.slots);
+    if (!ranges.length) continue;
+    const rangeText = ranges
+      .map((r) => `de ${r.horaInicio} a ${r.horaFin}`)
+      .join(', y ');
+    lines.push(`${group.dayLabel}: disponible ${rangeText}`);
+  }
+
+  if (!lines.length) return '';
+  return `${lines.join('\n')}\n(La sesión dura 15 minutos. Pide al lead una hora de inicio dentro de esos rangos, p.ej. "a las 10". No digas que los bloques son de 30 minutos.)`;
 }
 
 /** Cache corta para no martillar el panel en cada mensaje. */
@@ -274,6 +358,10 @@ async function getAggregatedSlotsCached(opts = {}) {
   return data;
 }
 
+function clearSlotsCache() {
+  slotsCache.clear();
+}
+
 module.exports = {
   slotKey,
   formatSlotLabel,
@@ -281,6 +369,8 @@ module.exports = {
   mergePanelDisponibilidad,
   getAggregatedSlots,
   getAggregatedSlotsCached,
+  clearSlotsCache,
   publicSlots,
+  collapseConsecutiveRanges,
   formatSlotsForPrompt
 };

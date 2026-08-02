@@ -5,7 +5,9 @@ const {
   formatSlotLabel,
   collectGerenteEmails,
   mergePanelDisponibilidad,
-  publicSlots
+  publicSlots,
+  collapseConsecutiveRanges,
+  formatSlotsForPrompt
 } = require('../agendaAvailability');
 
 describe('agendaAvailability', () => {
@@ -81,5 +83,37 @@ describe('agendaAvailability', () => {
     assert.equal(ten.candidates.length, 2);
     assert.equal(publicSlots(merged.slots, 1).length, 1);
     assert.equal(publicSlots(merged.slots, 1)[0].candidates, undefined);
+  });
+
+  it('collapseConsecutiveRanges une bloques seguidos', () => {
+    const ranges = collapseConsecutiveRanges([
+      { horaInicio: '08:30', horaFin: '09:00' },
+      { horaInicio: '09:00', horaFin: '09:30' },
+      { horaInicio: '09:30', horaFin: '10:00' },
+      { horaInicio: '11:00', horaFin: '11:30' }
+    ]);
+    assert.deepEqual(ranges, [
+      { horaInicio: '08:30', horaFin: '10:00' },
+      { horaInicio: '11:00', horaFin: '11:30' }
+    ]);
+  });
+
+  it('formatSlotsForPrompt habla en rangos de 15 min', () => {
+    const text = formatSlotsForPrompt(
+      [
+        { fecha: '2026-08-08', horaInicio: '08:30', horaFin: '09:00' },
+        { fecha: '2026-08-08', horaInicio: '09:00', horaFin: '09:30' },
+        { fecha: '2026-08-08', horaInicio: '09:30', horaFin: '10:00' },
+        { fecha: '2026-08-08', horaInicio: '10:00', horaFin: '10:30' },
+        { fecha: '2026-08-08', horaInicio: '10:30', horaFin: '11:00' },
+        { fecha: '2026-08-08', horaInicio: '11:00', horaFin: '11:30' },
+        { fecha: '2026-08-08', horaInicio: '11:30', horaFin: '12:00' },
+        { fecha: '2026-08-08', horaInicio: '12:00', horaFin: '12:30' }
+      ],
+      3
+    );
+    assert.match(text, /disponible de 08:30 a 12:30/);
+    assert.match(text, /15 minutos/);
+    assert.doesNotMatch(text, /08:30–09:00/);
   });
 });

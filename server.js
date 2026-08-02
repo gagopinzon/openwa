@@ -1129,7 +1129,12 @@ app.post('/api/agenda/pending', (req, res) => {
     broadcastEvent('agendaPending', item);
     return res.status(201).json({ success: true, item });
   } catch (error) {
-    return res.status(500).json({ success: false, error: error.message });
+    const status = error.status || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.message,
+      ...(error.code ? { code: error.code } : {})
+    });
   }
 });
 
