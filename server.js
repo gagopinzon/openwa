@@ -33,6 +33,8 @@ const incomingMessagesStore = require('./incomingMessagesStore');
 const usersStore = require('./usersStore');
 const cvFileStore = require('./cvFileStore');
 const panelMsgClient = require('./panelMsgClient');
+const agendaAvailability = require('./agendaAvailability');
+const agendaPendingStore = require('./agendaPendingStore');
 const {
   isAuthEnabled,
   authMiddleware,
@@ -1041,6 +1043,261 @@ app.get('/api/panel/disponibilidad', async (req, res) => {
   }
 });
 
+// Agenda IA: slots agregados de todos los gerentes
+app.get('/api/agenda/slots', async (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    if (!panelMsgClient.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error:
+          'Integración con panel no configurada. Define MSG_INTEGRATION_API_KEY en .env'
+      });
+    }
+    const includeCandidates = String(req.query.includeCandidates || '') === '1';
+    const aggregated = await agendaAvailability.getAggregatedSlots({
+      fechaInicio: req.query.fechaInicio,
+      fechaFin: req.query.fechaFin,
+      slotMinutos: req.query.slotMinutos ? Number(req.query.slotMinutos) : undefined
+    });
+    const limit = req.query.limit ? Number(req.query.limit) : 40;
+    const slots = includeCandidates
+      ? (aggregated.slots || []).slice(0, limit)
+      : agendaAvailability.publicSlots(aggregated.slots, limit);
+    return res.json({
+      success: true,
+      slots,
+      gerentesConsultados: aggregated.gerentesConsultados,
+      erroresGerente: aggregated.erroresGerente || []
+    });
+  } catch (error) {
+    const status = error.status || 502;
+    return res.status(status).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/agenda/pending', (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    const statusFilter = req.query.status
+      ? String(req.query.status).split(',').map((s) => s.trim()).filter(Boolean)
+      : [agendaPendingStore.STATUS.PENDING_LINK];
+    const items = agendaPendingStore.listPending({ status: statusFilter });
+    const user = req.user || getRequestUser(req);
+    const isSuper = user && (user.isSuper || user.role === 'super');
+    const filtered = isSuper
+      ? items
+      : items.filter((item) => {
+          if (!item.logicalSessionId) return true;
+          return canControlSession(user, item.logicalSessionId);
+        });
+    return res.json({ success: true, items: filtered });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agenda/pending', (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    const body = req.body || {};
+    const fecha = String(body.fecha || '').trim();
+    const horaInicio = String(body.horaInicio || '').trim();
+    const horaFin = String(body.horaFin || '').trim();
+    const telefono = String(body.telefono || '').trim();
+    const cvId = String(body.cvId || '').trim();
+    if (!fecha || !horaInicio || !horaFin || !telefono || !cvId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Faltan campos',
+        required: ['fecha', 'horaInicio', 'horaFin', 'telefono', 'cvId']
+      });
+    }
+    const item = agendaPendingStore.createPending({
+      telefono,
+      chatId: body.chatId || null,
+      contactName: body.contactName || null,
+      cvId,
+      fecha,
+      horaInicio,
+      horaFin,
+      label: body.label || null,
+      logicalSessionId: body.logicalSessionId || null,
+      openwaSessionId: body.openwaSessionId || null,
+      candidateVendors: body.candidateVendors || []
+    });
+    broadcastEvent('agendaPending', item);
+    return res.status(201).json({ success: true, item });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    const pending = agendaPendingStore.getById(req.params.id);
+    if (!pending) {
+      return res.status(404).json({ success: false, error: 'Cita pendiente no encontrada' });
+    }
+    if (pending.status !== agendaPendingStore.STATUS.PENDING_LINK) {
+      return res.status(409).json({
+        success: false,
+        error: `La cita ya está en estado ${pending.status}`
+      });
+    }
+
+    const user = req.user || getRequestUser(req);
+    if (
+      pending.logicalSessionId &&
+      !(user && (user.isSuper || user.role === 'super')) &&
+      !canControlSession(user, pending.logicalSessionId)
+    ) {
+      return res.status(403).json({ success: false, error: 'Sin control sobre esa línea' });
+    }
+
+    if (!panelMsgClient.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Integración con panel no configurada'
+      });
+    }
+    if (!cvFileStore.isPublicUrlConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'WEBHOOK_PUBLIC_URL no está configurada para cvUrl pública'
+      });
+    }
+
+    const body = req.body || {};
+    const vendedorId = String(body.vendedorId || '').trim();
+    const urlReunion = String(body.urlReunion || '').trim();
+    let gerenteEmail = String(body.gerenteEmail || '').trim().toLowerCase();
+
+    if (!vendedorId || !urlReunion) {
+      return res.status(400).json({
+        success: false,
+        error: 'vendedorId y urlReunion son obligatorios'
+      });
+    }
+
+    if (!gerenteEmail && Array.isArray(pending.candidateVendors)) {
+      const match = pending.candidateVendors.find((c) => c.vendedorId === vendedorId);
+      if (match) gerenteEmail = match.gerenteEmail;
+    }
+    if (!gerenteEmail) {
+      gerenteEmail =
+        (user && user.gerenteEmail) || panelMsgClient.defaultGerenteEmail() || '';
+    }
+    if (!gerenteEmail) {
+      return res.status(400).json({
+        success: false,
+        error: 'Falta gerenteEmail para crear la reunión en el panel'
+      });
+    }
+
+    const cvId = String(pending.cvId || '').trim();
+    if (!cvFileStore.getCvFileMeta(cvId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Archivo del CV no está disponible'
+      });
+    }
+    const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
+    const cv = cvsData.find((c) => c.cvId === cvId) || null;
+
+    const panelData = await panelMsgClient.crearReunion({
+      gerenteEmail,
+      vendedorId,
+      fecha: pending.fecha,
+      horaInicio: pending.horaInicio,
+      horaFin: pending.horaFin,
+      urlReunion,
+      cvUrl,
+      titulo: `Sesión — ${pending.contactName || cv?.nombre || 'candidato'}`,
+      leadNombre: pending.contactName || cv?.nombre,
+      leadTelefono: pending.telefono,
+      origen: 'msg_agenda_pending'
+    });
+
+    const panelReunionId =
+      (panelData && (panelData.id || panelData.reunionId || panelData.reunion?.id)) || null;
+
+    const confirmed = agendaPendingStore.confirmPending(pending.id, {
+      vendedorId,
+      urlReunion,
+      gerenteEmail,
+      panelReunionId
+    });
+
+    let whatsapp = { sent: false };
+    const openwaSessionId = pending.openwaSessionId;
+    const chatId =
+      pending.chatId ||
+      (pending.telefono ? formatPhoneToChatId(pending.telefono) : null);
+    if (openwaSessionId && chatId) {
+      const senderName = pending.logicalSessionId
+        ? sessionsStore.getSessionSenderName(pending.logicalSessionId)
+        : 'Pro Talent';
+      const text = autoReplyService.buildConfirmedMeetingReply({
+        contactName: pending.contactName,
+        fecha: pending.fecha,
+        horaInicio: pending.horaInicio,
+        urlReunion,
+        senderName
+      });
+      try {
+        const result = await sendTextMessage(openwaSessionId, chatId, text);
+        whatsapp = { sent: true, messageId: result.messageId || null };
+      } catch (waErr) {
+        whatsapp = { sent: false, error: waErr.message };
+        console.warn('[agenda] confirm WhatsApp failed:', waErr.message);
+      }
+    } else {
+      whatsapp = { sent: false, error: 'Sin openwaSessionId/chatId para notificar' };
+    }
+
+    broadcastEvent('agendaPendingConfirmed', confirmed);
+    return res.json({
+      success: true,
+      item: confirmed,
+      panel: panelData,
+      whatsapp
+    });
+  } catch (error) {
+    const status = error.status || 502;
+    return res.status(status).json({
+      success: false,
+      error: error.message,
+      ...(error.panelBody && typeof error.panelBody === 'object' ? { panel: error.panelBody } : {})
+    });
+  }
+});
+
+app.post('/api/agenda/pending/:id/cancel', (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    const pending = agendaPendingStore.getById(req.params.id);
+    if (!pending) {
+      return res.status(404).json({ success: false, error: 'Cita pendiente no encontrada' });
+    }
+    const user = req.user || getRequestUser(req);
+    if (
+      pending.logicalSessionId &&
+      !(user && (user.isSuper || user.role === 'super')) &&
+      !canControlSession(user, pending.logicalSessionId)
+    ) {
+      return res.status(403).json({ success: false, error: 'Sin control sobre esa línea' });
+    }
+    const item = agendaPendingStore.cancelPending(pending.id);
+    broadcastEvent('agendaPendingCancelled', item);
+    return res.json({ success: true, item });
+  } catch (error) {
+    const status = error.status || 500;
+    return res.status(status).json({ success: false, error: error.message });
+  }
+});
+
 // Subir un solo CV para agendar (p. ej. desde conversaciones) sin limpiar el lote actual
 app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
   try {
@@ -2033,6 +2290,29 @@ function getCvContextForPhone(phone) {
   return `Nombre: ${cv.nombre}\nExperiencia: ${exp}`;
 }
 
+function getLeadCvForPhone(phone) {
+  return findCvForPhone(phone) || null;
+}
+
+function userHasAnyControl(req) {
+  const user = req.user || getRequestUser(req);
+  if (!user) return false;
+  if (user.isSuper || user.role === 'super') return true;
+  const sessions = sessionsStore.getAllSessions();
+  return filterSessionsForUser(user, sessions, 'control').length > 0;
+}
+
+function forbidUnlessAnyControl(req, res) {
+  if (!userHasAnyControl(req)) {
+    res.status(403).json({
+      success: false,
+      error: 'Se requiere permiso de control en al menos una línea'
+    });
+    return false;
+  }
+  return true;
+}
+
 app.post('/api/webhooks/openwa', async (req, res) => {
   res.status(200).json({ received: true });
 
@@ -2061,6 +2341,7 @@ app.post('/api/webhooks/openwa', async (req, res) => {
       idempotencyKey,
       broadcastEvent,
       getCvContext: getCvContextForPhone,
+      getLeadCv: getLeadCvForPhone,
       testMode: TEST_MODE
     });
 
@@ -2833,6 +3114,7 @@ app.post('/api/auto-reply/test', requireSuper, async (req, res) => {
       idempotencyKey: `test_${Date.now()}`,
       broadcastEvent,
       getCvContext: getCvContextForPhone,
+      getLeadCv: getLeadCvForPhone,
       testMode: true
     });
 

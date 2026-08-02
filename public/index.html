@@ -86,6 +86,25 @@
                 </p>
             </section>
 
+            <section class="agenda-pending-panel" id="agendaPendingPanel" style="display: none;">
+                <div class="agenda-pending-header">
+                    <div>
+                        <h2 style="font-size: 1.1rem; margin-bottom: 4px;">
+                            Citas por confirmar
+                            <span id="agendaPendingCount" class="agenda-pending-count">0</span>
+                        </h2>
+                        <p style="font-size: 13px; color: #64748b; margin: 0;">
+                            El lead eligió horario con la IA. Asigna vendedor, pega la liga Zoom/Meet y confirma para crear la reunión y avisar por WhatsApp.
+                        </p>
+                    </div>
+                    <button type="button" id="agendaPendingRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                </div>
+                <p id="agendaPendingStatus" class="disponibilidad-status"></p>
+                <div id="agendaPendingList" class="agenda-pending-list">
+                    <p class="auto-reply-empty">No hay citas pendientes.</p>
+                </div>
+            </section>
+
             <section class="disponibilidad-panel" id="disponibilidadPanel">
                 <div class="disponibilidad-header">
                     <div>

@@ -24,6 +24,7 @@ class CVAnalyzer {
         this.initPanelProfile();
         this.initAgendarModal();
         this.initDisponibilidadCalendar();
+        this.initAgendaPendingPanel();
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
@@ -244,6 +245,10 @@ class CVAnalyzer {
         if (this.autoReplyPanel) {
             const showAutoReply = isSuper || this.getControllableSessions().length > 0;
             this.autoReplyPanel.style.display = showAutoReply ? '' : 'none';
+        }
+        if (this.agendaPendingPanel) {
+            this.agendaPendingPanel.style.display = hasControl ? '' : 'none';
+            if (hasControl) this.loadAgendaPending();
         }
         this.applyAutoReplyRoleUI();
 
@@ -3540,6 +3545,164 @@ class CVAnalyzer {
         }
     }
 
+    initAgendaPendingPanel() {
+        this.agendaPendingPanel = document.getElementById('agendaPendingPanel');
+        this.agendaPendingList = document.getElementById('agendaPendingList');
+        this.agendaPendingStatus = document.getElementById('agendaPendingStatus');
+        this.agendaPendingCount = document.getElementById('agendaPendingCount');
+        this.agendaPendingItems = [];
+        const refresh = document.getElementById('agendaPendingRefreshBtn');
+        if (refresh) {
+            refresh.addEventListener('click', () => this.loadAgendaPending());
+        }
+        if (this.agendaPendingList) {
+            this.agendaPendingList.addEventListener('click', (e) => {
+                const confirmBtn = e.target.closest('[data-agenda-confirm]');
+                const cancelBtn = e.target.closest('[data-agenda-cancel]');
+                if (confirmBtn) {
+                    this.confirmAgendaPending(confirmBtn.getAttribute('data-agenda-confirm'));
+                } else if (cancelBtn) {
+                    this.cancelAgendaPending(cancelBtn.getAttribute('data-agenda-cancel'));
+                }
+            });
+        }
+    }
+
+    setAgendaPendingStatus(msg) {
+        if (this.agendaPendingStatus) this.agendaPendingStatus.textContent = msg || '';
+    }
+
+    async loadAgendaPending() {
+        if (!this.agendaPendingList) return;
+        if (!(this.isSuperUser() || this.getControllableSessions().length > 0)) return;
+        this.setAgendaPendingStatus('Cargando…');
+        try {
+            const response = await fetch('/api/agenda/pending');
+            const data = await response.json();
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || `Error ${response.status}`);
+            }
+            this.agendaPendingItems = Array.isArray(data.items) ? data.items : [];
+            this.renderAgendaPending();
+            this.setAgendaPendingStatus(
+                this.agendaPendingItems.length
+                    ? `${this.agendaPendingItems.length} pendiente(s)`
+                    : 'Sin pendientes'
+            );
+        } catch (error) {
+            this.setAgendaPendingStatus(error.message);
+            if (this.agendaPendingList) {
+                this.agendaPendingList.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;
+            }
+        }
+    }
+
+    renderAgendaPending() {
+        if (!this.agendaPendingList) return;
+        if (this.agendaPendingCount) {
+            this.agendaPendingCount.textContent = String(this.agendaPendingItems.length);
+        }
+        if (!this.agendaPendingItems.length) {
+            this.agendaPendingList.innerHTML =
+                '<p class="auto-reply-empty">No hay citas pendientes.</p>';
+            return;
+        }
+
+        this.agendaPendingList.innerHTML = this.agendaPendingItems
+            .map((item) => {
+                const vendors = Array.isArray(item.candidateVendors) ? item.candidateVendors : [];
+                const options =
+                    vendors.length > 0
+                        ? vendors
+                              .map((v) => {
+                                  const label = v.nombre
+                                      ? `${v.nombre} (${v.gerenteEmail || ''})`
+                                      : `${v.vendedorId} · ${v.gerenteEmail || ''}`;
+                                  return `<option value="${this.escapeHtml(v.vendedorId)}" data-gerente="${this.escapeHtml(v.gerenteEmail || '')}">${this.escapeHtml(label)}</option>`;
+                              })
+                              .join('')
+                        : '<option value="">(sin candidatos — escribe id abajo)</option>';
+                const when =
+                    item.label ||
+                    `${item.fecha || ''} ${item.horaInicio || ''}–${item.horaFin || ''}`;
+                const sessionLabel = item.logicalSessionId
+                    ? this.getSessionLabel(item.logicalSessionId) || item.logicalSessionId
+                    : '—';
+                return `
+                <div class="agenda-pending-card" data-pending-id="${this.escapeHtml(item.id)}">
+                    <div class="agenda-pending-card-top">
+                        <div class="agenda-pending-meta">
+                            <strong>${this.escapeHtml(item.contactName || item.telefono || 'Lead')}</strong>
+                            · ${this.escapeHtml(item.telefono || '')}<br>
+                            ${this.escapeHtml(when)} · línea ${this.escapeHtml(sessionLabel)}
+                            ${item.cvId ? ` · CV ${this.escapeHtml(String(item.cvId).slice(0, 8))}…` : ''}
+                        </div>
+                    </div>
+                    <div class="agenda-pending-form">
+                        <select class="form-select agenda-pending-vendor" data-id="${this.escapeHtml(item.id)}">
+                            <option value="">Vendedor…</option>
+                            ${options}
+                        </select>
+                        <input type="url" class="form-select agenda-pending-url" data-id="${this.escapeHtml(item.id)}" placeholder="https://zoom.us/… o Meet">
+                        <button type="button" class="btn btn-primary btn-sm" data-agenda-confirm="${this.escapeHtml(item.id)}">Confirmar</button>
+                        <button type="button" class="btn btn-danger btn-sm" data-agenda-cancel="${this.escapeHtml(item.id)}">Cancelar</button>
+                    </div>
+                </div>`;
+            })
+            .join('');
+    }
+
+    async confirmAgendaPending(id) {
+        const card = this.agendaPendingList?.querySelector(`[data-pending-id="${id}"]`);
+        if (!card) return;
+        const select = card.querySelector('.agenda-pending-vendor');
+        const urlInput = card.querySelector('.agenda-pending-url');
+        const vendedorId = select ? select.value.trim() : '';
+        const urlReunion = urlInput ? urlInput.value.trim() : '';
+        const gerenteEmail =
+            select && select.selectedOptions[0]
+                ? select.selectedOptions[0].getAttribute('data-gerente') || ''
+                : '';
+        if (!vendedorId || !urlReunion) {
+            this.setAgendaPendingStatus('Elige vendedor y pega la liga');
+            return;
+        }
+        this.setAgendaPendingStatus('Confirmando…');
+        try {
+            const response = await fetch(`/api/agenda/pending/${encodeURIComponent(id)}/confirm`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ vendedorId, urlReunion, gerenteEmail: gerenteEmail || undefined })
+            });
+            const data = await response.json();
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || `Error ${response.status}`);
+            }
+            const wa = data.whatsapp && data.whatsapp.sent ? 'WhatsApp enviado' : 'reunión OK (revisa WhatsApp)';
+            this.setAgendaPendingStatus(`Confirmada · ${wa}`);
+            await this.loadAgendaPending();
+        } catch (error) {
+            this.setAgendaPendingStatus(error.message);
+        }
+    }
+
+    async cancelAgendaPending(id) {
+        if (!confirm('¿Cancelar esta cita pendiente?')) return;
+        try {
+            const response = await fetch(`/api/agenda/pending/${encodeURIComponent(id)}/cancel`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await response.json();
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || `Error ${response.status}`);
+            }
+            await this.loadAgendaPending();
+        } catch (error) {
+            this.setAgendaPendingStatus(error.message);
+        }
+    }
+
     formatYmd(date) {
         const y = date.getFullYear();
         const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -5082,6 +5245,17 @@ class CVAnalyzer {
             } catch (error) {
                 console.warn('incomingReply SSE:', error);
             }
+        });
+
+        this.eventSource.addEventListener('agendaPending', () => {
+            this.loadAgendaPending();
+            this.playNotificationSound();
+        });
+        this.eventSource.addEventListener('agendaPendingConfirmed', () => {
+            this.loadAgendaPending();
+        });
+        this.eventSource.addEventListener('agendaPendingCancelled', () => {
+            this.loadAgendaPending();
         });
 
         this.eventSource.addEventListener('incomingMessage', (event) => {

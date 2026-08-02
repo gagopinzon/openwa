@@ -524,7 +524,8 @@ async function generateReplyMessage({
   basePrompt,
   matchedRule,
   senderName,
-  conversationContext
+  conversationContext,
+  agendaContext
 }) {
   const sender = senderName || 'Pro Talent';
   const ruleHint = matchedRule
@@ -535,7 +536,15 @@ async function generateReplyMessage({
     ? `\nContexto del candidato (CV):\n${conversationContext}`
     : '';
 
+  const agendaBlock = agendaContext
+    ? `\nDisponibilidad real (NO inventes otros horarios):\n${agendaContext}`
+    : '';
+
   if (!API_KEY || API_KEY.includes('test') || API_KEY.includes('tu_api_key')) {
+    if (agendaContext) {
+      const name = extractFirstName(contactName);
+      return `¡Claro, ${name}! Estos horarios tenemos libres:\n${agendaContext}\n¿Cuál te acomoda?\n\nAtte:\n${sender}`;
+    }
     return generateBasicReply({
       contactName,
       incomingBody,
@@ -546,24 +555,31 @@ async function generateReplyMessage({
 
   const firstName = extractFirstName(contactName);
 
+  const agendaInstructions = agendaContext
+    ? `
+- Si hay lista de horarios arriba, ofrécelos de forma breve (máx. 6) y pide que elija uno (día + hora).
+- NUNCA inventes horarios que no estén en esa lista.
+- NO digas nombres de vendedores ni “con quién” será la cita.
+- Si la lista dice que no hay huecos, dilo y ofrece reintentar otro día.`
+    : '';
+
   const prompt = `${basePrompt || 'Eres un asistente de Pro Talent.'}
 
 Nombre del contacto: ${firstName}
 Mensaje que te escribió:
 "${incomingBody}"
-${ruleHint}${contextBlock}
+${ruleHint}${contextBlock}${agendaBlock}
 
 INSTRUCCIONES:
 - Responde en español, tono conversacional y profesional.
 - Máximo 400 caracteres (sin contar la firma).
 - Responde directamente a su mensaje; no repitas el pitch inicial completo.
-- Usa solo el primer nombre "${firstName}" (con esa capitalización exacta) si aplica.
+- Usa solo el primer nombre "${firstName}" (con esa capitalización exacta) si aplica.${agendaInstructions}
 - Termina con:
 Atte:
 ${sender}
 
 Genera SOLO el texto del mensaje de respuesta, sin explicaciones ni alternativas.`;
-
   try {
     const response = await axios.post(
       DEEPSEEK_API_URL,

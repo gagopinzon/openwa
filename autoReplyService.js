@@ -4,6 +4,10 @@ const autoReplyStore = require('./autoReplyStore');
 const sessionsStore = require('./sessionsStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
 const { generateReplyMessage } = require('./aiService');
+const agendaAvailability = require('./agendaAvailability');
+const agendaIntent = require('./agendaIntent');
+const agendaOfferStore = require('./agendaOfferStore');
+const agendaPendingStore = require('./agendaPendingStore');
 const {
   sendTextMessage,
   createWebhook,
@@ -264,6 +268,7 @@ function captureIncomingMessage({ payload, broadcastEvent = null, idempotencyKey
  * @param {string} [params.idempotencyKey]
  * @param {Function|null} params.broadcastEvent
  * @param {Function|null} params.getCvContext
+ * @param {Function|null} params.getLeadCv
  * @param {boolean} [params.testMode]
  */
 async function handleIncomingWebhook({
@@ -271,6 +276,7 @@ async function handleIncomingWebhook({
   idempotencyKey,
   broadcastEvent,
   getCvContext,
+  getLeadCv,
   testMode = false
 }) {
   const cfg = autoReplyStore.getConfig();
@@ -412,16 +418,124 @@ async function handleIncomingWebhook({
       cvContext = getCvContext(normalizedPhone);
     }
 
+    const leadCv =
+      typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone) : null;
+    const cvId =
+      (leadCv && leadCv.cvId) ||
+      (contactSession && contactSession.cvId) ||
+      null;
+
     await new Promise((resolve) => setTimeout(resolve, randomDelayMs()));
 
-    const replyText = await generateReplyMessage({
-      contactName: contactSession?.name || 'contacto',
-      incomingBody: body,
-      basePrompt: cfg.basePrompt,
-      matchedRule,
-      senderName,
-      conversationContext: cvContext
-    });
+    let replyText = null;
+    let agendaPendingId = null;
+    let agendaMeta = null;
+
+    // Fase 2: el lead elige un horario previamente ofrecido
+    const priorOffer = agendaOfferStore.getOffer(normalizedPhone);
+    if (priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
+      const chosen = agendaIntent.matchSlotFromMessage(body, priorOffer.slots);
+      if (chosen) {
+        if (!cvId) {
+          replyText = buildNoCvAgendaReply(
+            contactSession?.name || 'contacto',
+            senderName
+          );
+          agendaMeta = { reason: 'no_cv_for_pending' };
+        } else {
+          const pending = agendaPendingStore.createPending({
+            telefono: normalizedPhone,
+            chatId: identity.chatId || chatId,
+            contactName: contactSession?.name || contactName,
+            cvId,
+            fecha: chosen.fecha,
+            horaInicio: chosen.horaInicio,
+            horaFin: chosen.horaFin,
+            label: chosen.label,
+            logicalSessionId,
+            openwaSessionId,
+            candidateVendors: chosen.candidates || []
+          });
+          agendaOfferStore.clearOffer(normalizedPhone);
+          agendaPendingId = pending.id;
+          replyText = buildPendingCreatedReply(
+            contactSession?.name || 'contacto',
+            chosen,
+            senderName
+          );
+          agendaMeta = { reason: 'pending_created', pendingId: pending.id };
+          if (broadcastEvent) {
+            broadcastEvent('agendaPending', pending);
+          }
+          console.log(
+            `[auto-reply] agenda pending ${pending.id} phone=${normalizedPhone} ${chosen.fecha} ${chosen.horaInicio}`
+          );
+        }
+      }
+    }
+
+    // Fase 1: ofrecer horarios
+    let agendaContext = null;
+    if (!replyText && agendaIntent.looksLikeScheduleIntent(body)) {
+      try {
+        const range =
+          agendaIntent.resolveDateRangeFromMessage(body) || {
+            fechaInicio: agendaIntent.todayYmd(),
+            fechaFin: agendaIntent.addDaysYmd(agendaIntent.todayYmd(), 2)
+          };
+        const aggregated = await agendaAvailability.getAggregatedSlots({
+          fechaInicio: range.fechaInicio,
+          fechaFin: range.fechaFin
+        });
+        let slots = aggregated.slots || [];
+        if (!slots.length) {
+          const wider = await agendaAvailability.getAggregatedSlots({
+            fechaInicio: agendaIntent.todayYmd(),
+            fechaFin: agendaIntent.addDaysYmd(agendaIntent.todayYmd(), 6)
+          });
+          slots = wider.slots || [];
+          agendaMeta = {
+            reason: 'slots_wider_range',
+            gerentesConsultados: wider.gerentesConsultados,
+            erroresGerente: wider.erroresGerente
+          };
+        } else {
+          agendaMeta = {
+            reason: 'slots_offered',
+            gerentesConsultados: aggregated.gerentesConsultados,
+            erroresGerente: aggregated.erroresGerente
+          };
+        }
+
+        if (slots.length) {
+          agendaOfferStore.rememberOffer(normalizedPhone, slots);
+          const pub = agendaAvailability.publicSlots(slots, 8);
+          agendaContext = pub
+            .map((s, i) => `${i + 1}. ${s.label} (${s.fecha} ${s.horaInicio}–${s.horaFin})`)
+            .join('\n');
+        } else {
+          agendaContext =
+            'No hay horarios libres en los próximos días según la agenda del equipo. Pide al contacto otro día o que un humano le ayude.';
+        }
+      } catch (error) {
+        console.warn('[auto-reply] agenda slots error:', error.message);
+        agendaContext =
+          'No se pudo consultar la agenda ahora. No inventes horarios; ofrece reintentar más tarde o paso a un asesor.';
+        agendaMeta = { reason: 'slots_error', error: error.message };
+      }
+    }
+
+    if (!replyText) {
+      replyText = await generateReplyMessage({
+        contactName: contactSession?.name || 'contacto',
+        incomingBody: body,
+        basePrompt: cfg.basePrompt,
+        matchedRule,
+        senderName,
+        conversationContext: cvContext,
+        agendaContext
+      });
+    }
 
     let messageId = null;
     if (!testMode) {
@@ -440,6 +554,8 @@ async function handleIncomingWebhook({
       matchedRuleLabel: matchedRule ? matchedRule.label : null,
       messageId,
       testMode,
+      agendaPendingId,
+      agendaMeta,
       timestamp: new Date().toISOString()
     };
 
@@ -455,6 +571,25 @@ async function handleIncomingWebhook({
   } finally {
     chatLocks.delete(lockKey);
   }
+}
+
+function buildPendingCreatedReply(contactName, slot, senderName) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot.label || `${slot.fecha} ${slot.horaInicio}`;
+  return `Perfecto, ${name}. Quedó anotado el ${when}. En breve te enviamos la liga de la sesión.\n\nAtte:\n${senderName || 'Pro Talent'}`;
+}
+
+function buildNoCvAgendaReply(contactName, senderName) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  return `Gracias, ${name}. Para agendar necesito que un asesor valide tu CV primero; te contactamos enseguida.\n\nAtte:\n${senderName || 'Pro Talent'}`;
+}
+
+/**
+ * Mensaje WhatsApp tras confirmar cita en panel.
+ */
+function buildConfirmedMeetingReply({ contactName, fecha, horaInicio, urlReunion, senderName }) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}. Liga: ${urlReunion}\n\n¡Nos vemos!\n\nAtte:\n${senderName || 'Pro Talent'}`;
 }
 
 function extractWebhookId(created) {
@@ -647,5 +782,6 @@ module.exports = {
   deactivateWebhooks,
   getStatus,
   verifySignature,
-  findLogicalSessionByOpenwaId
+  findLogicalSessionByOpenwaId,
+  buildConfirmedMeetingReply
 };

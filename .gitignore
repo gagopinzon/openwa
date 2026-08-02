@@ -9,6 +9,9 @@ data/incoming-messages.json
 data/cv-files/
 data/cvs-manifest.json
 data/super-profile.json
+data/agenda-offers.json
+data/agenda-pending.json
+data/auto-reply-config.json
 logs/
 *.log
 *.zip
