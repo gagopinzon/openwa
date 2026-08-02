@@ -22,6 +22,7 @@ const {
   sendTextMessage,
   editMessage,
   deleteMessage,
+  deleteChat,
   getContact,
   blockContact,
   unblockContact
@@ -35,6 +36,7 @@ const cvFileStore = require('./cvFileStore');
 const panelMsgClient = require('./panelMsgClient');
 const agendaAvailability = require('./agendaAvailability');
 const agendaPendingStore = require('./agendaPendingStore');
+const agendaOfferStore = require('./agendaOfferStore');
 const {
   isAuthEnabled,
   authMiddleware,
@@ -2893,6 +2895,65 @@ app.post('/api/conversations/delete-message', async (req, res) => {
     res.json({ success: true, sessionId: session.id, chatId, messageId });
   } catch (error) {
     console.error('[conversations] delete error:', error.message);
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/delete-chat', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+
+    const chatId = String(req.body.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+
+    const result = await deleteChat(session.openwaSessionId, chatId);
+    invalidateOpenWACache({
+      openwaSessionId: session.openwaSessionId,
+      chatId
+    });
+
+    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    let aiPaused = null;
+    let inboxRemoved = 0;
+
+    if (phone) {
+      agendaOfferStore.clearOffer(phone);
+      const inbox = incomingMessagesStore.removeByChatOrPhone({ chatId, telefono: phone });
+      inboxRemoved = inbox.removed || 0;
+
+      // Evita que la IA siga contestando tras limpiar el hilo
+      if (contactHistory.mongoUriConfigured() && req.body.pauseAi !== false) {
+        try {
+          const pauseResult = await contactHistory.setContactAiPaused(phone, true);
+          if (pauseResult.ok) aiPaused = true;
+        } catch (err) {
+          console.warn('[conversations] delete-chat aiPaused:', err.message);
+        }
+      }
+    } else {
+      const inbox = incomingMessagesStore.removeByChatOrPhone({ chatId });
+      inboxRemoved = inbox.removed || 0;
+    }
+
+    res.json({
+      success: true,
+      sessionId: session.id,
+      chatId,
+      aiPaused,
+      inboxRemoved,
+      message: result.message
+    });
+  } catch (error) {
+    console.error('[conversations] delete-chat error:', error.message);
     res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
   }
 });

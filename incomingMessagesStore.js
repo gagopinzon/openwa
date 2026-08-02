@@ -102,6 +102,32 @@ function clear() {
 }
 
 /**
+ * Quita mensajes del inbox local ligados a un chat o teléfono.
+ * @param {{ chatId?: string, telefono?: string }} opts
+ * @returns {{ removed: number }}
+ */
+function removeByChatOrPhone(opts = {}) {
+  const chatId = String(opts.chatId || '').trim();
+  const telefono = String(opts.telefono || '').replace(/\D/g, '');
+  if (!chatId && !telefono) return { removed: 0 };
+
+  const messages = load();
+  const before = messages.length;
+  const kept = messages.filter((m) => {
+    if (chatId && String(m.chatId || '') === chatId) return false;
+    if (telefono) {
+      const phone = String(m.telefono || '').replace(/\D/g, '');
+      if (phone && phone === telefono) return false;
+    }
+    return true;
+  });
+  if (kept.length === before) return { removed: 0 };
+  cache = kept;
+  persist();
+  return { removed: before - kept.length };
+}
+
+/**
  * @param {string} id
  * @param {object} patch
  */
@@ -118,6 +144,7 @@ module.exports = {
   add,
   list,
   clear,
+  removeByChatOrPhone,
   update,
   MAX_MESSAGES
 };

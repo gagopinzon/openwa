@@ -218,6 +218,29 @@ async function sendTextMessage(openwaSessionId, chatId, text) {
 }
 
 /**
+ * Indicador de presencia en un chat (escribiendo / grabando / pausado).
+ * WhatsApp suele apagar "typing" ~25s; hay que reenviarlo si se simula más tiempo.
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {'typing'|'recording'|'paused'} state
+ */
+async function sendChatState(openwaSessionId, chatId, state) {
+  const id = String(chatId || '').trim();
+  const presence = String(state || '').trim();
+  if (!id) throw new Error('chatId es obligatorio');
+  if (!['typing', 'recording', 'paused'].includes(presence)) {
+    throw new Error('state debe ser typing, recording o paused');
+  }
+
+  const data = await openwaRequest(
+    'POST',
+    `/sessions/${openwaSessionId}/chats/typing`,
+    { chatId: id, state: presence }
+  );
+  return { success: true, raw: data };
+}
+
+/**
  * Edita un mensaje propio.
  * @param {string} openwaSessionId
  * @param {{ chatId: string, messageId: string, body: string }} input
@@ -264,6 +287,30 @@ async function deleteMessage(openwaSessionId, input) {
     }
   );
   return { success: true, raw: data };
+}
+
+/**
+ * Borra un chat completo de la lista de WhatsApp (historial local del teléfono).
+ * @param {string} openwaSessionId
+ * @param {string} chatId - JID, ej. 521...@c.us
+ */
+async function deleteChat(openwaSessionId, chatId) {
+  const id = String(chatId || '').trim();
+  if (!id) throw new Error('chatId es obligatorio');
+  if (!/^[^\s@]+@[^\s@]+$/.test(id)) {
+    throw new Error('chatId inválido (se espera localpart@host)');
+  }
+
+  const data = await openwaRequest(
+    'POST',
+    `/sessions/${openwaSessionId}/chats/delete`,
+    { chatId: id }
+  );
+  return {
+    success: true,
+    message: data.message || 'Chat eliminado',
+    raw: data
+  };
 }
 
 /**
@@ -453,8 +500,10 @@ module.exports = {
   formatPhoneToChatId,
   getSessionStatus,
   sendTextMessage,
+  sendChatState,
   editMessage,
   deleteMessage,
+  deleteChat,
   getContact,
   blockContact,
   unblockContact,

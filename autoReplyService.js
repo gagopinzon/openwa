@@ -3,13 +3,14 @@ const contactHistory = require('./contactHistoryStore');
 const autoReplyStore = require('./autoReplyStore');
 const sessionsStore = require('./sessionsStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
-const { generateReplyMessage } = require('./aiService');
+const { generateReplyMessage, splitSpeechParts } = require('./aiService');
 const agendaAvailability = require('./agendaAvailability');
 const agendaIntent = require('./agendaIntent');
 const agendaOfferStore = require('./agendaOfferStore');
 const agendaPendingStore = require('./agendaPendingStore');
 const {
   sendTextMessage,
+  sendChatState,
   createWebhook,
   deleteWebhook,
   getSessionStatus,
@@ -20,6 +21,8 @@ const {
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const processedKeys = new Map();
 const chatLocks = new Map();
+/** WhatsApp apaga el indicador ~25s; refrescar antes. */
+const TYPING_REFRESH_MS = 20000;
 
 function autoEnrollUnknownEnabled() {
   const v = String(process.env.AUTO_REPLY_ENROLL_UNKNOWN || 'true').trim().toLowerCase();
@@ -55,15 +58,96 @@ function getMinDelayMs() {
 }
 
 function getMaxDelayMs() {
-  const v = parseInt(process.env.AUTO_REPLY_MAX_DELAY_MS || '8000', 10);
+  const v = parseInt(process.env.AUTO_REPLY_MAX_DELAY_MS || '35000', 10);
   const min = getMinDelayMs();
-  return Number.isFinite(v) && v >= min ? v : Math.max(min, 8000);
+  return Number.isFinite(v) && v >= min ? v : Math.max(min, 35000);
 }
 
-function randomDelayMs() {
-  const min = getMinDelayMs();
-  const max = getMaxDelayMs();
-  return min + Math.floor(Math.random() * (max - min + 1));
+function getTypingMsPerChar() {
+  const v = parseFloat(process.env.AUTO_REPLY_TYPING_MS_PER_CHAR || '200');
+  return Number.isFinite(v) && v > 0 ? v : 200;
+}
+
+function getTypingBaseMs() {
+  const v = parseInt(process.env.AUTO_REPLY_TYPING_BASE_MS || '2500', 10);
+  return Number.isFinite(v) && v >= 0 ? v : 2500;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/**
+ * Tiempo de "escribiendo…" según longitud del mensaje.
+ * ~200ms/char → un párrafo de ~150 caracteres ≈ 30s (+ base).
+ * Respeta AUTO_REPLY_MIN/MAX_DELAY_MS.
+ * @param {string} text
+ * @returns {number}
+ */
+function typingDurationMsForText(text) {
+  const body = String(text || '');
+  const chars = body.length;
+  const raw = getTypingBaseMs() + chars * getTypingMsPerChar();
+  const jitter = 0.85 + Math.random() * 0.3; // ±15%
+  const withJitter = Math.round(raw * jitter);
+  return Math.min(getMaxDelayMs(), Math.max(getMinDelayMs(), withJitter));
+}
+
+/**
+ * Parte la respuesta en mensajes (un párrafo = un mensaje).
+ * Máximo maxParts; el resto se fusiona en el último.
+ * @param {string} text
+ * @param {number} [maxParts]
+ * @returns {string[]}
+ */
+function splitReplyIntoMessages(text, maxParts = 5) {
+  const limit = Math.min(Math.max(parseInt(maxParts, 10) || 5, 1), 8);
+  const parts = splitSpeechParts(text);
+  if (!parts.length) return [];
+  if (parts.length <= limit) return parts;
+  const head = parts.slice(0, limit - 1);
+  const tail = parts.slice(limit - 1).join('\n\n');
+  return [...head, tail];
+}
+
+function interMessageGapMs() {
+  return 700 + Math.floor(Math.random() * 1100); // 0.7–1.8s entre burbujas
+}
+
+/**
+ * Mantiene el indicador "escribiendo…" durante durationMs (refresco periódico).
+ * Fallos de presencia no abortan el envío.
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {number} durationMs
+ * @param {{ testMode?: boolean }} [opts]
+ */
+async function simulateHumanTyping(openwaSessionId, chatId, durationMs, opts = {}) {
+  const total = Math.max(0, Number(durationMs) || 0);
+  if (total <= 0 || opts.testMode) return;
+
+  const sendTyping = async (state) => {
+    try {
+      await sendChatState(openwaSessionId, chatId, state);
+    } catch (err) {
+      console.warn(`[auto-reply] typing ${state}:`, err.message);
+    }
+  };
+
+  const deadline = Date.now() + total;
+  await sendTyping('typing');
+
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const chunk = Math.min(TYPING_REFRESH_MS, remaining);
+    await sleep(chunk);
+    if (Date.now() < deadline) {
+      await sendTyping('typing');
+    }
+  }
+
+  await sendTyping('paused');
 }
 
 function cleanupIdempotencyKeys() {
@@ -448,7 +532,15 @@ async function handleIncomingWebhook({
       (contactSession && contactSession.cvId) ||
       null;
 
-    await new Promise((resolve) => setTimeout(resolve, randomDelayMs()));
+    // Empieza "escribiendo…" mientras se arma la respuesta (más natural).
+    const typingStartedAt = Date.now();
+    if (!testMode) {
+      try {
+        await sendChatState(openwaSessionId, chatId, 'typing');
+      } catch (err) {
+        console.warn('[auto-reply] typing start:', err.message);
+      }
+    }
 
     let replyText = null;
     let agendaPendingId = null;
@@ -596,11 +688,45 @@ async function handleIncomingWebhook({
       }
     }
 
-    let messageId = null;
-    if (!testMode) {
-      const result = await sendTextMessage(openwaSessionId, chatId, replyText);
-      messageId = result.messageId;
+    if (!replyText) {
+      return { handled: false, reason: 'empty_reply' };
     }
+
+    const messageParts = splitReplyIntoMessages(replyText);
+    if (!messageParts.length) {
+      return { handled: false, reason: 'empty_reply' };
+    }
+
+    const messageIds = [];
+    let totalTypingMs = 0;
+
+    for (let i = 0; i < messageParts.length; i++) {
+      const part = messageParts[i];
+      const targetTypingMs = typingDurationMsForText(part);
+      totalTypingMs += targetTypingMs;
+
+      let waitMs = targetTypingMs;
+      if (i === 0) {
+        waitMs = Math.max(0, targetTypingMs - (Date.now() - typingStartedAt));
+      } else if (!testMode) {
+        await sleep(interMessageGapMs());
+      }
+
+      if (!testMode) {
+        console.log(
+          `[auto-reply] msg ${i + 1}/${messageParts.length} typing ~${Math.round(waitMs / 1000)}s ` +
+            `chars=${part.length} → ${normalizedPhone}`
+        );
+      }
+      await simulateHumanTyping(openwaSessionId, chatId, waitMs, { testMode });
+
+      if (!testMode) {
+        const result = await sendTextMessage(openwaSessionId, chatId, part);
+        if (result.messageId) messageIds.push(result.messageId);
+      }
+    }
+
+    const messageId = messageIds.length ? messageIds[messageIds.length - 1] : null;
 
     const eventData = {
       sessionId: logicalSessionId,
@@ -608,11 +734,14 @@ async function handleIncomingWebhook({
       contactName: contactSession?.name || normalizedPhone,
       telefono: normalizedPhone,
       incomingMessage: body,
-      replyMessage: replyText,
+      replyMessage: messageParts.join('\n\n'),
+      replyParts: messageParts,
       matchedRuleId: matchedRule ? matchedRule.id : null,
       matchedRuleLabel: matchedRule ? matchedRule.label : null,
       messageId,
+      messageIds,
       testMode,
+      typingMs: totalTypingMs,
       agendaPendingId,
       agendaMeta,
       timestamp: new Date().toISOString()
@@ -842,5 +971,8 @@ module.exports = {
   getStatus,
   verifySignature,
   findLogicalSessionByOpenwaId,
-  buildConfirmedMeetingReply
+  buildConfirmedMeetingReply,
+  typingDurationMsForText,
+  splitReplyIntoMessages,
+  simulateHumanTyping
 };

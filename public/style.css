@@ -1267,6 +1267,17 @@ footer p {
     border-color: #0f766e;
 }
 
+#conversationsDeleteChatBtn {
+    color: #991b1b;
+    border-color: #fecaca;
+    background: #fff;
+}
+
+#conversationsDeleteChatBtn:hover:not(:disabled) {
+    background: #fef2f2;
+    border-color: #f87171;
+}
+
 .conversations-thread-header .thread-session {
     display: block;
     margin-top: 4px;

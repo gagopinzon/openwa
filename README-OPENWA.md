@@ -36,7 +36,9 @@ WEBHOOK_PUBLIC_URL=https://tu-dominio.com
 WEBHOOK_SECRET=un-secreto-largo-aleatorio
 AUTO_REPLY_ENABLED=false
 AUTO_REPLY_MIN_DELAY_MS=3000
-AUTO_REPLY_MAX_DELAY_MS=8000
+AUTO_REPLY_MAX_DELAY_MS=35000
+AUTO_REPLY_TYPING_BASE_MS=2500
+AUTO_REPLY_TYPING_MS_PER_CHAR=200
 
 # Agendar reuniones en Panel (API externa Msg)
 # Misma MSG_INTEGRATION_API_KEY que en panel.protalentconnections.com

@@ -587,6 +587,7 @@ INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
 - Responde al mensaje del lead; no reenvíes el pitch frío completo.
 - Usa solo el primer nombre "${firstName}" si aplica.
 - Sé breve: los leads no quieren paredes de texto; resume el playbook.
+- Ideal: un solo párrafo corto. Si necesitas 2–3 ideas, sepáralas con una línea en blanco entre párrafos (así se envían como mensajes distintos).
 ${greetingInstructions}
 ${agendaInstructions}
 
@@ -641,6 +642,7 @@ module.exports = {
   generateReplyMessage,
   buildGreeting,
   buildOutboundMessageParts,
+  splitSpeechParts,
   extractFirstName,
   parseSaludoAndMessage
 };

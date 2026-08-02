@@ -310,6 +310,7 @@ class CVAnalyzer {
         this.conversationsReplyBtn = document.getElementById('conversationsReplyBtn');
         this.conversationsThreadActions = document.getElementById('conversationsThreadActions');
         this.conversationsBlockBtn = document.getElementById('conversationsBlockBtn');
+        this.conversationsDeleteChatBtn = document.getElementById('conversationsDeleteChatBtn');
         this.conversationsAiPauseBtn = document.getElementById('conversationsAiPauseBtn');
         this.conversationsAgendarBtn = document.getElementById('conversationsAgendarBtn');
         this.conversationsChats = [];
@@ -401,6 +402,9 @@ class CVAnalyzer {
         }
         if (this.conversationsBlockBtn) {
             this.conversationsBlockBtn.addEventListener('click', () => this.toggleBlockActiveConversation());
+        }
+        if (this.conversationsDeleteChatBtn) {
+            this.conversationsDeleteChatBtn.addEventListener('click', () => this.deleteActiveConversationChat());
         }
         if (this.conversationsAiPauseBtn) {
             this.conversationsAiPauseBtn.addEventListener('click', () => this.toggleAiPauseActiveConversation());
@@ -1102,8 +1106,7 @@ class CVAnalyzer {
         const isGroup = Boolean(this.activeConversation && this.activeConversation.isGroup);
 
         if (this.conversationsThreadActions) {
-            this.conversationsThreadActions.style.display =
-                canControl && !isGroup ? 'flex' : 'none';
+            this.conversationsThreadActions.style.display = canControl ? 'flex' : 'none';
         }
         if (this.conversationsBlockBtn) {
             this.conversationsBlockBtn.textContent = this.activeConversationBlocked
@@ -1113,6 +1116,12 @@ class CVAnalyzer {
                 ? 'btn btn-secondary btn-sm'
                 : 'btn btn-danger btn-sm';
             this.conversationsBlockBtn.disabled = !canControl || isGroup;
+            this.conversationsBlockBtn.style.display = isGroup ? 'none' : '';
+        }
+        if (this.conversationsDeleteChatBtn) {
+            this.conversationsDeleteChatBtn.disabled = !canControl;
+            this.conversationsDeleteChatBtn.title =
+                'Elimina el chat en WhatsApp y limpia el historial local (también pausa la IA)';
         }
         if (this.conversationsAiPauseBtn) {
             const known = this.activeConversationKnownContact;
@@ -1122,6 +1131,7 @@ class CVAnalyzer {
                 ? 'btn btn-success btn-sm'
                 : 'btn btn-warning btn-sm';
             this.conversationsAiPauseBtn.disabled = !canControl || isGroup || !known;
+            this.conversationsAiPauseBtn.style.display = isGroup ? 'none' : '';
             this.conversationsAiPauseBtn.title = !known
                 ? 'Solo contactos del historial (mensaje masivo) tienen auto-respuesta IA'
                 : paused
@@ -1130,6 +1140,7 @@ class CVAnalyzer {
         }
         if (this.conversationsAgendarBtn) {
             this.conversationsAgendarBtn.disabled = !canControl || isGroup;
+            this.conversationsAgendarBtn.style.display = isGroup ? 'none' : '';
             this.conversationsAgendarBtn.title = isGroup
                 ? 'No se puede agendar desde un grupo'
                 : 'Agendar reunión en Panel con este contacto';
@@ -1283,6 +1294,65 @@ class CVAnalyzer {
                 willBlock ? `Contacto bloqueado: ${label}` : `Contacto desbloqueado: ${label}`,
                 'success'
             );
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async deleteActiveConversationChat() {
+        const active = this.activeConversation;
+        if (!active) return;
+        if (!this.canControlSession(active.sessionId)) {
+            this.showStatus('No tienes permiso de control en esta sesión', 'error');
+            return;
+        }
+
+        const label = active.name || active.chatId;
+        if (
+            !confirm(
+                `¿Borrar toda la conversación con "${label}"?\n\nSe elimina el chat en WhatsApp, se limpia el historial local y se pausa la IA para este contacto.`
+            )
+        ) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/conversations/delete-chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId
+                })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo borrar el chat');
+
+            this.conversationsChats = (this.conversationsChats || []).filter(
+                (c) => !(c.sessionId === active.sessionId && c.chatId === active.chatId)
+            );
+            this.activeConversation = null;
+            this.activeConversationBlocked = false;
+            this.activeConversationAiPaused = false;
+            this.activeConversationKnownContact = false;
+            this.setConversationsReplyEnabled(false);
+            if (this.conversationsThreadHeader) {
+                this.conversationsThreadHeader.textContent = 'Selecciona un chat';
+            }
+            if (this.conversationsThreadMessages) {
+                this.conversationsThreadMessages.innerHTML =
+                    '<p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>';
+                delete this.conversationsThreadMessages.dataset.lastMessagesHtml;
+            }
+            this.updateConversationThreadActions();
+            this.renderConversationsChatList();
+            this.updateConversationsStatus();
+            if (typeof this.loadIncomingInbox === 'function') {
+                this.loadIncomingInbox().catch(() => {});
+            }
+
+            const pausedNote = data.aiPaused === true ? ' IA pausada.' : '';
+            this.showStatus(`Conversación borrada: ${label}.${pausedNote}`, 'success');
         } catch (error) {
             this.showStatus(`Error: ${error.message}`, 'error');
         }
