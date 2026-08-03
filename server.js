@@ -37,6 +37,7 @@ const panelMsgClient = require('./panelMsgClient');
 const agendaAvailability = require('./agendaAvailability');
 const agendaPendingStore = require('./agendaPendingStore');
 const agendaOfferStore = require('./agendaOfferStore');
+const sendQueueStore = require('./sendQueueStore');
 const {
   isAuthEnabled,
   authMiddleware,
@@ -55,6 +56,72 @@ const {
 
 const app = express();
 const PORT = process.env.PORT || 3445;
+const MAX_SEND_QUEUE_TIMEOUT_MS = 2_147_483_647;
+const SEND_QUEUE_RETRY_MS = 10_000;
+let sendQueueTimer = null;
+let sendQueueTimerBatchId = null;
+
+function clearSendQueueTimer() {
+  if (sendQueueTimer) {
+    clearTimeout(sendQueueTimer);
+  }
+  sendQueueTimer = null;
+  sendQueueTimerBatchId = null;
+}
+
+function armSendQueueTimer(retryDelayMs = null) {
+  clearSendQueueTimer();
+  const batch = sendQueueStore.getBatch();
+  if (!batch || batch.status !== sendQueueStore.STATUS.SCHEDULED || !batch.scheduledAt) {
+    return;
+  }
+  const when = Date.parse(batch.scheduledAt);
+  if (!Number.isFinite(when)) return;
+  const remaining = Math.max(0, when - Date.now());
+  const delay =
+    retryDelayMs == null
+      ? Math.min(remaining, MAX_SEND_QUEUE_TIMEOUT_MS)
+      : Math.min(Math.max(0, retryDelayMs), MAX_SEND_QUEUE_TIMEOUT_MS);
+  sendQueueTimerBatchId = batch.id;
+  sendQueueTimer = setTimeout(async () => {
+    const armedBatchId = sendQueueTimerBatchId;
+    sendQueueTimer = null;
+    sendQueueTimerBatchId = null;
+
+    const current = sendQueueStore.getBatch();
+    if (
+      !current ||
+      current.id !== armedBatchId ||
+      current.status !== sendQueueStore.STATUS.SCHEDULED
+    ) {
+      return;
+    }
+
+    const currentWhen = Date.parse(current.scheduledAt);
+    if (Number.isFinite(currentWhen) && currentWhen > Date.now()) {
+      armSendQueueTimer();
+      return;
+    }
+
+    try {
+      await dispatchQueuedBatch(null);
+    } catch (err) {
+      console.error('send-queue timer dispatch:', err.message);
+      const pending = sendQueueStore.getBatch();
+      if (
+        err.status === 409 &&
+        pending &&
+        pending.id === armedBatchId &&
+        pending.status === sendQueueStore.STATUS.SCHEDULED
+      ) {
+        armSendQueueTimer(SEND_QUEUE_RETRY_MS);
+      }
+    }
+  }, delay);
+  console.log(
+    `🗓️ Cola programada ${batch.id} en ${Math.round(remaining / 1000)}s (${batch.scheduledAt})`
+  );
+}
 
 // Middleware
 app.use(
@@ -358,6 +425,7 @@ async function runWhatsAppSendJob({
     broadcastEvent('sendError', { error: error.message });
   } finally {
     lastSendJob.inProgress = false;
+    markSendQueueJobFinished();
   }
 }
 
@@ -367,6 +435,170 @@ function getConfiguredSessionIds() {
 
 // Configuración de modo de prueba
 const TEST_MODE = process.env.TEST_MODE === 'true';
+
+function createMongoRecordHook() {
+  return !TEST_MODE && contactHistory.mongoUriConfigured()
+    ? (row) => {
+        if (!row.success) return;
+        const logicalSessionId = row.sessionId || null;
+        let openwaSessionId = null;
+        if (logicalSessionId) {
+          try {
+            openwaSessionId = sessionsStore.resolveOpenWASessionId(logicalSessionId);
+          } catch {
+            openwaSessionId = null;
+          }
+        }
+        contactHistory
+          .recordSuccessfulContact({
+            normalizedPhone: contactHistory.normalizePhone(row.telefono),
+            name: row.nombre,
+            logicalSessionId,
+            openwaSessionId,
+            cvId: row.cvId || null,
+            archivoOriginal: row.archivoOriginal || null
+          })
+          .catch((err) => console.error('contactHistory:', err.message));
+      }
+    : null;
+}
+
+function markSendQueueJobFinished() {
+  const batch = sendQueueStore.getBatch();
+  if (!batch || batch.status !== sendQueueStore.STATUS.SENDING) return;
+  try {
+    sendQueueStore.markSent(batch.id);
+    broadcastEvent('sendQueueFinished', { batchId: batch.id, status: 'sent' });
+  } catch (err) {
+    console.error('send-queue markSent:', err.message);
+  }
+}
+
+function canControlSendQueueBatch(user, batch) {
+  const sessionIds = Array.isArray(batch?.selectedSessions)
+    ? batch.selectedSessions
+    : [];
+  return sessionIds.length === 0 || sessionIds.every((id) => canControlSession(user, id));
+}
+
+async function prepareCvsForSend(cvsFromClient) {
+  let cvsToProcess = cvsData;
+  if (cvsFromClient && Array.isArray(cvsFromClient)) {
+    console.log('📝 Recibiendo CVs editados del cliente...');
+    cvsToProcess = cvsFromClient;
+    cvsToProcess.forEach((editedCv) => {
+      const index = cvsData.findIndex(
+        (cv) => cv.archivoOriginal === editedCv.archivoOriginal
+      );
+      if (index !== -1) {
+        if (editedCv.saludo != null) cvsData[index].saludo = editedCv.saludo;
+        cvsData[index].mensajeIA = editedCv.mensajeIA;
+      }
+    });
+    persistCvsData();
+  }
+
+  if (cvsToProcess.length === 0) {
+    return {
+      error: 'No hay CVs procesados. Sube archivos PDF primero.',
+      status: 400
+    };
+  }
+
+  const cvsToSend = cvsToProcess.filter(
+    (cv) =>
+      cv.procesado &&
+      cv.mensajeIA &&
+      cv.mensajeIA.trim() !== '' &&
+      cv.telefono !== 'No encontrado'
+  );
+
+  if (cvsToSend.length === 0) {
+    return {
+      error: 'No hay CVs con mensajes de IA generados y números de teléfono válidos',
+      status: 400
+    };
+  }
+
+  const seenPhones = new Set();
+  const uniqueCvsToSend = [];
+  const duplicates = [];
+
+  for (const cv of cvsToSend) {
+    const phoneKey = cv.telefono.trim().toLowerCase();
+    if (!seenPhones.has(phoneKey)) {
+      seenPhones.add(phoneKey);
+      uniqueCvsToSend.push(cv);
+    } else {
+      duplicates.push(cv);
+    }
+  }
+
+  if (duplicates.length > 0) {
+    console.log(
+      `⚠️ Se encontraron ${duplicates.length} CVs duplicados (mismo teléfono). Se enviará solo un mensaje por número.`
+    );
+    duplicates.forEach((dup) => {
+      console.log(
+        `  - Duplicado: ${dup.nombre} (${dup.telefono}) - Archivo: ${dup.archivoOriginal}`
+      );
+    });
+  }
+
+  let skippedAlreadyContacted = [];
+  let finalCvsToSend = uniqueCvsToSend;
+
+  if (contactHistory.mongoUriConfigured()) {
+    try {
+      const filtered = await contactHistory.filterOutAlreadyContacted(uniqueCvsToSend);
+      finalCvsToSend = filtered.toSend;
+      skippedAlreadyContacted = filtered.skippedAlreadyContacted;
+    } catch (err) {
+      console.warn('⚠️ contactHistory: filtro omitido:', err.message);
+    }
+    if (skippedAlreadyContacted.length > 0) {
+      console.log(
+        `📇 ${skippedAlreadyContacted.length} contacto(s) ya en historial; no se reenvían.`
+      );
+    }
+  }
+
+  return { finalCvsToSend, skippedAlreadyContacted, duplicates };
+}
+
+async function dispatchQueuedBatch(_user) {
+  if (!sendQueueStore.canDispatch()) {
+    const err = new Error('No hay lote pendiente para enviar');
+    err.status = 409;
+    throw err;
+  }
+  if (isAnySendingInProgress()) {
+    const err = new Error('Ya hay un envío de mensajes en curso');
+    err.status = 409;
+    throw err;
+  }
+
+  clearSendQueueTimer();
+  const batch = sendQueueStore.markSending();
+  const mongoRecordHook = createMongoRecordHook();
+  const sessionIds = TEST_MODE
+    ? batch.selectedSessions?.length
+      ? batch.selectedSessions
+      : ['default']
+    : batch.selectedSessions;
+
+  broadcastEvent('sendQueueStarted', { batchId: batch.id, total: batch.total });
+  runWhatsAppSendJob({
+    finalCvsToSend: batch.cvs,
+    sessionIds,
+    sessionWeights: batch.sessionWeights,
+    skippedAlreadyContacted: [],
+    mongoRecordHook,
+    testMode: TEST_MODE
+  });
+
+  return batch;
+}
 
 // Control de envíos en producción (por sesión)
 class SessionState {
@@ -1605,120 +1837,126 @@ app.post('/api/sessions/import-connected', requireSuper, async (req, res) => {
   }
 });
 
+app.get('/api/send-queue', (req, res) => {
+  const state = sendQueueStore.getPublicState();
+  if (state.batch && !canControlSendQueueBatch(req.user, state.batch)) {
+    return res.json({
+      success: true,
+      batch: null,
+      canEnqueue: state.canEnqueue,
+      canDispatch: false,
+      buttonBurned: state.buttonBurned
+    });
+  }
+  res.json({ success: true, ...state });
+});
+
+app.post('/api/send-queue', async (req, res) => {
+  try {
+    if (!sendQueueStore.canEnqueue()) {
+      return res.status(409).json({ error: 'Ya hay un lote en cola o enviándose' });
+    }
+    const selectedSessions =
+      Array.isArray(req.body?.selectedSessions) && req.body.selectedSessions.length > 0
+        ? req.body.selectedSessions.map(String)
+        : filterSessionsForUser(
+            req.user,
+            sessionsStore.getAllSessions(),
+            'control'
+          ).map((s) => s.id);
+    if (!TEST_MODE && (!selectedSessions || selectedSessions.length < 1)) {
+      return res.status(400).json({ error: 'No hay sesiones configuradas' });
+    }
+    if (!forbidUnlessControlSessions(selectedSessions || [], req, res)) return;
+
+    const prepared = await prepareCvsForSend(req.body?.cvs);
+    if (prepared.error) {
+      return res.status(prepared.status || 400).json({ error: prepared.error });
+    }
+    if (!prepared.finalCvsToSend.length) {
+      return res.status(400).json({
+        error: 'No hay CVs con mensajes listos y teléfonos válidos'
+      });
+    }
+
+    const batch = sendQueueStore.enqueue({
+      cvs: prepared.finalCvsToSend,
+      selectedSessions,
+      sessionWeights: req.body?.sessionWeights || null,
+      scheduledAt: req.body?.scheduledAt || null
+    });
+    if (batch.status === sendQueueStore.STATUS.SCHEDULED) armSendQueueTimer();
+    else clearSendQueueTimer();
+
+    broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+    res.status(201).json({ success: true, ...sendQueueStore.getPublicState() });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/send-queue/dispatch', async (req, res) => {
+  try {
+    const batch = sendQueueStore.getBatch();
+    if (batch?.selectedSessions?.length) {
+      if (!forbidUnlessControlSessions(batch.selectedSessions, req, res)) return;
+    }
+    const started = await dispatchQueuedBatch(req.user);
+    res.status(202).json({
+      success: true,
+      started: true,
+      batch: started,
+      ...sendQueueStore.getPublicState()
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/send-queue/cancel', (req, res) => {
+  try {
+    const current = sendQueueStore.getBatch();
+    if (current?.selectedSessions?.length) {
+      if (!forbidUnlessControlSessions(current.selectedSessions, req, res)) return;
+    }
+    clearSendQueueTimer();
+    const batch = sendQueueStore.cancel();
+    broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+    res.json({ success: true, batch, ...sendQueueStore.getPublicState() });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/send-queue/clear', (req, res) => {
+  try {
+    const batch = sendQueueStore.getBatch();
+    if (batch?.selectedSessions?.length) {
+      if (!forbidUnlessControlSessions(batch.selectedSessions, req, res)) return;
+    }
+    if (batch?.status === sendQueueStore.STATUS.SENDING || isAnySendingInProgress()) {
+      return res.status(409).json({
+        error: 'No se puede limpiar la cola durante un envío'
+      });
+    }
+    sendQueueStore.clearBatch();
+    clearSendQueueTimer();
+    const state = sendQueueStore.getPublicState();
+    broadcastEvent('sendQueueUpdated', state);
+    res.json({ success: true, ...state });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 // Ruta para enviar mensajes por WhatsApp
 app.post('/send-whatsapp', async (req, res) => {
   try {
-    // Si el cliente envía CVs editados, usar esos; si no, usar los del servidor
-    let cvsToProcess = cvsData;
-    if (req.body && req.body.cvs && Array.isArray(req.body.cvs)) {
-      console.log('📝 Recibiendo CVs editados del cliente...');
-      cvsToProcess = req.body.cvs;
-      // Actualizar también cvsData en el servidor con los mensajes editados
-      cvsToProcess.forEach(editedCv => {
-        const index = cvsData.findIndex(cv => cv.archivoOriginal === editedCv.archivoOriginal);
-        if (index !== -1) {
-          if (editedCv.saludo != null) cvsData[index].saludo = editedCv.saludo;
-          cvsData[index].mensajeIA = editedCv.mensajeIA;
-        }
-      });
-      persistCvsData();
-    }
-
-    if (cvsToProcess.length === 0) {
-      return res.status(400).json({
-        error: 'No hay CVs procesados. Sube archivos PDF primero.'
-      });
-    }
-
-    // Filtrar CVs que tienen mensaje de IA generado
-    const cvsToSend = cvsToProcess.filter(cv =>
-      cv.procesado &&
-      cv.mensajeIA &&
-      cv.mensajeIA.trim() !== '' &&
-      cv.telefono !== 'No encontrado'
-    );
-
-    if (cvsToSend.length === 0) {
-      return res.status(400).json({
-        error: 'No hay CVs con mensajes de IA generados y números de teléfono válidos'
-      });
-    }
-
-    // Deduplicar por teléfono - mantener solo el primer CV de cada número
-    const seenPhones = new Set();
-    const uniqueCvsToSend = [];
-    const duplicates = [];
-
-    for (const cv of cvsToSend) {
-      const phoneKey = cv.telefono.trim().toLowerCase();
-      if (!seenPhones.has(phoneKey)) {
-        seenPhones.add(phoneKey);
-        uniqueCvsToSend.push(cv);
-      } else {
-        duplicates.push(cv);
-      }
-    }
-
-    if (duplicates.length > 0) {
-      console.log(`⚠️ Se encontraron ${duplicates.length} CVs duplicados (mismo teléfono). Se enviará solo un mensaje por número.`);
-      duplicates.forEach(dup => {
-        console.log(`  - Duplicado: ${dup.nombre} (${dup.telefono}) - Archivo: ${dup.archivoOriginal}`);
-      });
-    }
-
-    let skippedAlreadyContacted = [];
-    let finalCvsToSend = uniqueCvsToSend;
-
-    if (contactHistory.mongoUriConfigured()) {
-      try {
-        const filtered = await contactHistory.filterOutAlreadyContacted(uniqueCvsToSend);
-        finalCvsToSend = filtered.toSend;
-        skippedAlreadyContacted = filtered.skippedAlreadyContacted;
-      } catch (err) {
-        console.warn('⚠️ contactHistory: filtro omitido:', err.message);
-      }
-      if (skippedAlreadyContacted.length > 0) {
-        console.log(`📇 ${skippedAlreadyContacted.length} contacto(s) ya en historial; no se reenvían.`);
-      }
-    }
-
-    const mongoRecordHook =
-      !TEST_MODE && contactHistory.mongoUriConfigured()
-        ? (row) => {
-            if (!row.success) return;
-            const logicalSessionId = row.sessionId || null;
-            let openwaSessionId = null;
-            if (logicalSessionId) {
-              try {
-                openwaSessionId = sessionsStore.resolveOpenWASessionId(logicalSessionId);
-              } catch {
-                openwaSessionId = null;
-              }
-            }
-            contactHistory
-              .recordSuccessfulContact({
-                normalizedPhone: contactHistory.normalizePhone(row.telefono),
-                name: row.nombre,
-                logicalSessionId,
-                openwaSessionId,
-                cvId: row.cvId || null,
-                archivoOriginal: row.archivoOriginal || null
-              })
-              .catch((err) => console.error('contactHistory:', err.message));
-          }
-        : null;
-
-    if (finalCvsToSend.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message:
-          skippedAlreadyContacted.length > 0
-            ? 'Todos los destinatarios ya habían sido contactados antes.'
-            : 'No hay destinatarios para enviar.',
-        skippedAlreadyContacted,
-        allSkippedOrEmpty: true,
-        results: [],
-        testMode: TEST_MODE
+    const queuedBatch = sendQueueStore.getBatch();
+    if (queuedBatch && sendQueueStore.isActive(queuedBatch)) {
+      return res.status(409).json({
+        error: 'Hay un lote en cola o enviándose. Cancélalo o espera.',
+        batch: canControlSendQueueBatch(req.user, queuedBatch) ? queuedBatch : null
       });
     }
 
@@ -1759,6 +1997,27 @@ app.post('/send-whatsapp', async (req, res) => {
       ? (selectedSessions && selectedSessions.length > 0 ? selectedSessions : ['default'])
       : selectedSessions;
 
+    const prepared = await prepareCvsForSend(req.body?.cvs);
+    if (prepared.error) {
+      return res.status(prepared.status || 400).json({ error: prepared.error });
+    }
+    const { finalCvsToSend, skippedAlreadyContacted, duplicates } = prepared;
+    const mongoRecordHook = createMongoRecordHook();
+
+    if (finalCvsToSend.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message:
+          skippedAlreadyContacted.length > 0
+            ? 'Todos los destinatarios ya habían sido contactados antes.'
+            : 'No hay destinatarios para enviar.',
+        skippedAlreadyContacted,
+        allSkippedOrEmpty: true,
+        results: [],
+        testMode: TEST_MODE
+      });
+    }
+
     console.log(`Iniciando envío de ${finalCvsToSend.length} mensajes por WhatsApp (${duplicates.length} duplicados eliminados)...`);
     console.log(`Modo de prueba: ${TEST_MODE ? 'ACTIVADO (simulando envíos)' : 'DESACTIVADO (enviando real)'}`);
 
@@ -1766,6 +2025,20 @@ app.post('/send-whatsapp', async (req, res) => {
       req.body.sessionWeights && typeof req.body.sessionWeights === 'object'
         ? req.body.sessionWeights
         : null;
+
+    try {
+      sendQueueStore.beginDirectSend({
+        cvs: finalCvsToSend,
+        selectedSessions: sessionIds,
+        sessionWeights,
+        scheduledAt: null
+      });
+    } catch (error) {
+      if (error.status) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      throw error;
+    }
 
     res.status(202).json({
       success: true,
@@ -3273,6 +3546,7 @@ process.on('SIGTERM', async () => {
 
 // Iniciar servidor
 sessionsStore.migrateFromEnvIfEmpty();
+armSendQueueTimer();
 
 app.listen(PORT, () => {
   console.log(`🚀 Servidor iniciado en http://localhost:${PORT}`);

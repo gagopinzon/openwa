@@ -323,6 +323,30 @@
                 </button>
             </div>
 
+            <div class="queue-controls">
+                <label for="scheduleAtInput">Programar para (opcional):</label>
+                <input type="datetime-local" id="scheduleAtInput">
+                <button id="enqueueBtn" class="btn btn-secondary" disabled>
+                    Encolar lote
+                </button>
+            </div>
+
+            <section class="send-queue-panel" id="sendQueuePanel" style="display: none;">
+                <div class="send-queue-header">
+                    <strong>Cola de envío</strong>
+                    <span id="sendQueueStatus" class="send-queue-status"></span>
+                </div>
+                <p id="sendQueueMeta" class="send-queue-meta"></p>
+                <div class="send-queue-actions">
+                    <button type="button" id="dispatchQueueBtn" class="btn btn-success btn-sm">
+                        Enviar ahora
+                    </button>
+                    <button type="button" id="cancelQueueBtn" class="btn btn-danger btn-sm">
+                        Cancelar cola
+                    </button>
+                </div>
+            </section>
+
             <!-- Enviar mensajes con sesiones seleccionadas -->
             <div class="sending-options" style="margin-bottom: 15px; text-align: center;">
                 <p style="font-weight: 600; color: #0369a1; margin-bottom: 10px;">Enviar mensajes con sesiones:</p>

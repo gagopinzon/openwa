@@ -198,6 +198,78 @@ section h2 {
     background: #dc2626;
 }
 
+.btn-sm {
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    margin: 0;
+}
+
+.queue-controls {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 12px 0;
+}
+
+.queue-controls label {
+    font-size: 13px;
+    color: #64748b;
+}
+
+.queue-controls input {
+    min-height: 38px;
+    padding: 6px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    color: #334155;
+    background: #fff;
+}
+
+.queue-controls .btn {
+    margin: 0;
+}
+
+.send-queue-panel {
+    margin: 12px auto 16px;
+    max-width: 640px;
+    padding: 12px 16px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #f8fafc;
+    text-align: left;
+}
+
+.send-queue-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.send-queue-status {
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #334155;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: capitalize;
+}
+
+.send-queue-meta {
+    margin: 8px 0;
+    color: #475569;
+    font-size: 13px;
+}
+
+.send-queue-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 .btn-warning {
     background: #f59e0b;
     color: white;

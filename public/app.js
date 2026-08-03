@@ -31,6 +31,7 @@ class CVAnalyzer {
         this.loadConfig().then(async () => {
             await this.loadSessions();
             await this.refreshCvsFromServer({ silent: true });
+            await this.refreshSendQueue();
             if (this.isSuperUser() || this.getControllableSessions().length > 0) {
                 this.loadAutoReplyStatus();
                 this.loadAutoReplyConfig();
@@ -69,6 +70,15 @@ class CVAnalyzer {
         this.importConnectedBtn = document.getElementById('importConnectedBtn');
         this.refreshOpenwaListBtn = document.getElementById('refreshOpenwaListBtn');
         this.clearDataBtn = document.getElementById('clearDataBtn');
+        this.enqueueBtn = document.getElementById('enqueueBtn');
+        this.scheduleAtInput = document.getElementById('scheduleAtInput');
+        this.sendQueuePanel = document.getElementById('sendQueuePanel');
+        this.sendQueueStatus = document.getElementById('sendQueueStatus');
+        this.sendQueueMeta = document.getElementById('sendQueueMeta');
+        this.dispatchQueueBtn = document.getElementById('dispatchQueueBtn');
+        this.cancelQueueBtn = document.getElementById('cancelQueueBtn');
+        this.queueState = null;
+        this.sendProgressTrackingPromise = null;
         this.cvsTableBody = document.getElementById('cvsTableBody');
         this.statusMessage = document.getElementById('statusMessage');
         this.progressSection = document.getElementById('progressSection');
@@ -105,6 +115,9 @@ class CVAnalyzer {
         this.sendWhatsAppBtn.addEventListener('click', this.sendWhatsApp.bind(this));
         this.openWhatsAppBtn.addEventListener('click', this.openWhatsApp.bind(this));
         this.clearDataBtn.addEventListener('click', this.clearData.bind(this));
+        this.enqueueBtn?.addEventListener('click', this.enqueueBatch.bind(this));
+        this.dispatchQueueBtn?.addEventListener('click', this.dispatchQueue.bind(this));
+        this.cancelQueueBtn?.addEventListener('click', this.cancelQueue.bind(this));
         if (this.addSessionBtn) {
             this.addSessionBtn.addEventListener('click', this.addSession.bind(this));
         }
@@ -4337,10 +4350,206 @@ class CVAnalyzer {
             this.progressText.textContent = `${doneTotal} / ${doneTotal}`;
             this.showStatus(`Se generaron mensajes de IA para ${doneTotal} CVs`, 'success');
             this.sendWhatsAppBtn.disabled = false;
+            await this.refreshSendQueue();
             this.maybeReseedSessionCounts();
             this.updateSessionWeightUI();
             this.progressSection.style.display = 'none';
             return;
+        }
+    }
+
+    async refreshSendQueue() {
+        try {
+            const response = await fetch('/api/send-queue');
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'No se pudo consultar la cola');
+            }
+            this.queueState = data;
+            this.applyQueueUi(data);
+            return data;
+        } catch (error) {
+            console.warn('No se pudo refrescar la cola de envío:', error.message);
+            return null;
+        }
+    }
+
+    applyQueueUi(data = {}) {
+        if (!this.sendQueuePanel || !this.enqueueBtn || !this.sendWhatsAppBtn) return;
+
+        const batch = data.batch;
+        const terminal = batch && ['sent', 'cancelled'].includes(batch.status);
+        const active = batch && ['queued', 'scheduled', 'sending'].includes(batch.status);
+
+        if (!batch) {
+            this.sendQueuePanel.style.display = 'none';
+        } else {
+            this.sendQueuePanel.style.display = 'block';
+            this.sendQueueStatus.textContent = batch.status;
+
+            if (terminal) {
+                this.sendQueueMeta.textContent =
+                    batch.status === 'sent'
+                        ? `Lote ${batch.id.slice(0, 8)}… enviado (${batch.total} mensajes)`
+                        : 'Lote cancelado';
+            } else {
+                const scheduled = batch.scheduledAt
+                    ? ` · programado ${new Date(batch.scheduledAt).toLocaleString()}`
+                    : '';
+                this.sendQueueMeta.textContent = `${batch.total} mensajes${scheduled}`;
+            }
+
+            const showActions = Boolean(data.canDispatch && !terminal);
+            this.dispatchQueueBtn.style.display = showActions ? '' : 'none';
+            this.cancelQueueBtn.style.display = showActions ? '' : 'none';
+        }
+
+        const hasReady = this.getReadyMessagesCount() > 0;
+        this.enqueueBtn.disabled = !hasReady || !data.canEnqueue;
+
+        if (data.buttonBurned || active) {
+            this.sendWhatsAppBtn.disabled = true;
+            if (batch?.status === 'sending') {
+                this.sendWhatsAppBtn.textContent = 'Enviando…';
+            } else if (batch?.status === 'sent') {
+                this.sendWhatsAppBtn.textContent = 'Enviado';
+            } else {
+                this.sendWhatsAppBtn.textContent = 'En cola…';
+            }
+        } else {
+            this.sendWhatsAppBtn.disabled = !hasReady;
+            this.sendWhatsAppBtn.textContent = 'Enviar por WhatsApp';
+        }
+    }
+
+    async enqueueBatch() {
+        const selectedSessions = this.getSelectedSessionIds();
+        if (selectedSessions.length === 0) {
+            this.showStatus('Marca al menos una sesión para encolar mensajes', 'error');
+            return;
+        }
+
+        const weightValidation = this.validateSessionWeights();
+        if (!weightValidation.ok) {
+            this.showStatus(weightValidation.message, 'error');
+            return;
+        }
+
+        const scheduledLocal = this.scheduleAtInput.value;
+        const scheduledAt = scheduledLocal ? new Date(scheduledLocal).toISOString() : null;
+        this.enqueueBtn.disabled = true;
+
+        try {
+            const response = await fetch('/api/send-queue', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    cvs: this.cvsData,
+                    selectedSessions,
+                    sessionWeights:
+                        selectedSessions.length > 1 ? this.getSelectedSessionWeights() : undefined,
+                    scheduledAt
+                })
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                this.showStatus(data.error || 'Error al encolar', 'error');
+                await this.refreshSendQueue();
+                return;
+            }
+
+            this.queueState = data;
+            this.applyQueueUi(data);
+            this.showStatus(
+                scheduledAt ? 'Lote programado' : 'Lote encolado (sin enviar)',
+                'success'
+            );
+        } catch (error) {
+            console.error('Error encolando lote:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+            await this.refreshSendQueue();
+        }
+    }
+
+    trackSendProgress(total) {
+        if (!this.sendProgressTrackingPromise) {
+            this.sendProgressTrackingPromise = this.waitForSendComplete(total).finally(async () => {
+                this.sendProgressTrackingPromise = null;
+                await this.refreshSendQueue();
+            });
+        }
+        return this.sendProgressTrackingPromise;
+    }
+
+    startQueuedSendProgress(batch) {
+        if (!batch) return Promise.resolve();
+        if (this.sendProgressTrackingPromise) return this.sendProgressTrackingPromise;
+
+        const selectedSessions = Array.isArray(batch.selectedSessions)
+            ? batch.selectedSessions
+            : [];
+        this.sendWhatsAppBtn.disabled = true;
+        this.generateMessagesBtn.disabled = true;
+        this.showSendingControls();
+        this.activeSendingSessionIds = [...selectedSessions];
+        this.activeControlSessionId =
+            selectedSessions.length > 1 ? '__roundrobin__' : selectedSessions[0];
+        this.initSessionSendingPanel(selectedSessions);
+        this.showProgress(batch.total || this.getReadyMessagesCount());
+        return this.trackSendProgress(batch.total || this.getReadyMessagesCount());
+    }
+
+    async dispatchQueue() {
+        this.dispatchQueueBtn.disabled = true;
+        this.cancelQueueBtn.disabled = true;
+        this.sendJobCompleted = null;
+
+        try {
+            const response = await fetch('/api/send-queue/dispatch', { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok) {
+                this.showStatus(data.error || 'No se pudo enviar', 'error');
+                await this.refreshSendQueue();
+                return;
+            }
+
+            this.queueState = data;
+            this.applyQueueUi(data);
+            this.showStatus('Iniciando envío de la cola...', 'info');
+            await this.startQueuedSendProgress(data.batch);
+        } catch (error) {
+            console.error('Error despachando cola:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+            await this.refreshSendQueue();
+        } finally {
+            this.dispatchQueueBtn.disabled = false;
+            this.cancelQueueBtn.disabled = false;
+        }
+    }
+
+    async cancelQueue() {
+        this.dispatchQueueBtn.disabled = true;
+        this.cancelQueueBtn.disabled = true;
+
+        try {
+            const response = await fetch('/api/send-queue/cancel', { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok) {
+                this.showStatus(data.error || 'No se pudo cancelar', 'error');
+                await this.refreshSendQueue();
+                return;
+            }
+
+            this.queueState = data;
+            this.applyQueueUi(data);
+            this.showStatus('Cola cancelada', 'success');
+        } catch (error) {
+            console.error('Error cancelando cola:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+            await this.refreshSendQueue();
+        } finally {
+            this.dispatchQueueBtn.disabled = false;
+            this.cancelQueueBtn.disabled = false;
         }
     }
 
@@ -4408,6 +4617,7 @@ class CVAnalyzer {
 
         this.initSessionSendingPanel(selectedSessions);
         this.showProgress(cvsToSend.length);
+        this.sendJobCompleted = null;
 
         try {
             const response = await fetch('/send-whatsapp', {
@@ -4426,8 +4636,18 @@ class CVAnalyzer {
             const result = await response.json();
 
             if (response.status === 409) {
+                if (!result.sendJob) {
+                    this.generateMessagesBtn.disabled = false;
+                    this.hideSendingControls();
+                    this.hideSessionSendingPanel();
+                    this.progressSection.style.display = 'none';
+                    await this.refreshSendQueue();
+                    this.showStatus(result.error || 'Hay un lote activo en la cola', 'info');
+                    return;
+                }
+
                 this.showStatus('Ya hay un envío en curso. Mostrando progreso...', 'info');
-                await this.waitForSendComplete(result.sendJob?.total || cvsToSend.length);
+                await this.trackSendProgress(result.sendJob.total || cvsToSend.length);
                 return;
             }
 
@@ -4459,7 +4679,7 @@ class CVAnalyzer {
                         'info'
                     );
                 }
-                await this.waitForSendComplete(result.total);
+                await this.trackSendProgress(result.total);
                 return;
             }
 
@@ -4812,6 +5032,14 @@ class CVAnalyzer {
     async clearData() {
         if (confirm('¿Estás seguro de limpiar todos los datos?')) {
             try {
+                const queueResponse = await fetch('/api/send-queue/clear', {
+                    method: 'POST'
+                });
+                const queueResult = await queueResponse.json();
+                if (!queueResponse.ok) {
+                    throw new Error(queueResult.error || 'No se pudo limpiar la cola');
+                }
+
                 const response = await fetch('/clear-data', {
                     method: 'POST',
                     headers: {
@@ -4829,6 +5057,9 @@ class CVAnalyzer {
                     this.progressSection.style.display = 'none';
                     this.generateMessagesBtn.disabled = true;
                     this.sendWhatsAppBtn.disabled = true;
+                    this.sendWhatsAppBtn.textContent = 'Enviar por WhatsApp';
+                    this.queueState = queueResult;
+                    this.applyQueueUi(queueResult);
                     this.fileInput.value = '';
                     this.hideSendingControls();
                     this.hideMessagePreview();
@@ -4838,7 +5069,7 @@ class CVAnalyzer {
                 }
             } catch (error) {
                 console.error('Error clearing data:', error);
-                this.showStatus('Error limpiando datos', 'error');
+                this.showStatus(`Error limpiando datos: ${error.message}`, 'error');
             }
         }
     }
@@ -5294,6 +5525,23 @@ class CVAnalyzer {
             } catch (error) {
                 console.warn('Error cargando resultado de envío:', error);
             }
+        });
+
+        this.eventSource.addEventListener('sendQueueUpdated', async () => {
+            await this.refreshSendQueue();
+        });
+
+        this.eventSource.addEventListener('sendQueueStarted', async () => {
+            const data = await this.refreshSendQueue();
+            if (data?.batch?.status === 'sending') {
+                this.startQueuedSendProgress(data.batch).catch((error) => {
+                    console.warn('Error siguiendo progreso de cola:', error);
+                });
+            }
+        });
+
+        this.eventSource.addEventListener('sendQueueFinished', async () => {
+            await this.refreshSendQueue();
         });
 
         this.eventSource.addEventListener('sendError', (event) => {
