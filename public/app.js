@@ -4659,12 +4659,35 @@ class CVAnalyzer {
             this.progressFill.style.width = '100%';
             this.progressText.textContent = `${doneTotal} / ${doneTotal}`;
             this.showStatus(`Se generaron mensajes de IA para ${doneTotal} CVs`, 'success');
-            this.sendWhatsAppBtn.disabled = false;
+            // Mensajes nuevos: limpiar lote sent/cancelled para desbloquear «Enviar ahora»
+            await this.clearIdleSendQueue();
             await this.refreshSendQueue();
             this.maybeReseedSessionCounts();
             this.updateSessionWeightUI();
             this.progressSection.style.display = 'none';
             return;
+        }
+    }
+
+    /**
+     * Tras generar mensajes nuevos, el lote anterior en `sent`/`cancelled`
+     * deja buttonBurned=true y bloquea «Enviar ahora». Lo limpiamos si no hay envío activo.
+     */
+    async clearIdleSendQueue() {
+        try {
+            const response = await fetch('/api/send-queue');
+            const data = await response.json();
+            if (!response.ok) return;
+            const status = data.batch?.status;
+            if (status !== 'sent' && status !== 'cancelled') return;
+
+            const clearRes = await fetch('/api/send-queue/clear', { method: 'POST' });
+            if (!clearRes.ok) {
+                const err = await clearRes.json().catch(() => ({}));
+                console.warn('No se pudo limpiar cola idle:', err.error || clearRes.status);
+            }
+        } catch (error) {
+            console.warn('clearIdleSendQueue:', error.message);
         }
     }
 
