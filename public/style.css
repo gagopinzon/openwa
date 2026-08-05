@@ -231,6 +231,14 @@ section h2 {
     margin: 0;
 }
 
+.queue-controls-hint {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 12px;
+    color: #64748b;
+    text-align: center;
+}
+
 .send-queue-panel {
     margin: 12px auto 16px;
     max-width: 640px;
@@ -255,7 +263,6 @@ section h2 {
     color: #334155;
     font-size: 12px;
     font-weight: 600;
-    text-transform: capitalize;
 }
 
 .send-queue-meta {
@@ -767,17 +774,22 @@ section h2 {
 }
 
 .session-weight-toolbar {
-    display: flex;
+    display: none;
     justify-content: center;
     align-items: center;
     gap: 12px;
     margin-top: 10px;
 }
 
+#toggleWeightAdjustBtn,
 #distributeWeightsEquallyBtn {
     display: none;
     padding: 6px 12px;
     font-size: 12px;
+}
+
+.session-checkboxes:not(.weight-adjust-open) .session-weight-wrap {
+    display: none !important;
 }
 
 .session-weight-sum {
@@ -1829,7 +1841,80 @@ footer p {
     font-style: italic;
 }
 
-/* Usuarios y permisos */
+/* Usuarios y permisos — vista por líneas */
+.line-users-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.line-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #f8fafc;
+    padding: 14px;
+}
+
+.line-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.line-card-meta,
+.user-card-meta {
+    font-size: 12px;
+    color: #64748b;
+    font-weight: 500;
+    margin-left: 8px;
+}
+
+.line-users-assigned {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.line-user-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.line-user-name {
+    font-size: 13px;
+    color: #334155;
+    min-width: 120px;
+    flex: 1;
+}
+
+.line-user-access,
+.line-add-user,
+.line-add-access {
+    min-width: 120px;
+    padding: 6px 8px;
+}
+
+.line-user-add {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed #e2e8f0;
+}
+
+.line-users-empty {
+    font-size: 12px;
+    color: #64748b;
+    margin: 0;
+}
+
 .users-panel .users-list {
     display: flex;
     flex-direction: column;
@@ -1849,32 +1934,6 @@ footer p {
     align-items: center;
     gap: 12px;
     margin-bottom: 10px;
-}
-
-.user-card-perms,
-.users-permissions {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.user-perm-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
-
-.user-perm-label {
-    font-size: 13px;
-    color: #334155;
-    min-width: 140px;
-}
-
-.user-perm-select {
-    min-width: 160px;
-    padding: 6px 8px;
 }
 
 .user-card-actions {

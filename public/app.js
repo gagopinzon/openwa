@@ -62,6 +62,9 @@ class CVAnalyzer {
         this.sessionWeightPreview = document.getElementById('sessionWeightPreview');
         this.sessionWeightSum = document.getElementById('sessionWeightSum');
         this.distributeWeightsEquallyBtn = document.getElementById('distributeWeightsEquallyBtn');
+        this.toggleWeightAdjustBtn = document.getElementById('toggleWeightAdjustBtn');
+        this.sessionWeightToolbar = document.getElementById('sessionWeightToolbar');
+        this.weightAdjustOpen = false;
         this.sessionsList = document.getElementById('sessionsList');
         this.sessionsEmptyHint = document.getElementById('sessionsEmptyHint');
         this.openwaSessionPicker = document.getElementById('openwaSessionPicker');
@@ -72,6 +75,9 @@ class CVAnalyzer {
         this.clearDataBtn = document.getElementById('clearDataBtn');
         this.enqueueBtn = document.getElementById('enqueueBtn');
         this.scheduleAtInput = document.getElementById('scheduleAtInput');
+        this.schedulePanel = document.getElementById('schedulePanel');
+        this.toggleScheduleBtn = document.getElementById('toggleScheduleBtn');
+        this.schedulePanelOpen = false;
         this.sendQueuePanel = document.getElementById('sendQueuePanel');
         this.sendQueueStatus = document.getElementById('sendQueueStatus');
         this.sendQueueMeta = document.getElementById('sendQueueMeta');
@@ -118,6 +124,9 @@ class CVAnalyzer {
         this.enqueueBtn?.addEventListener('click', this.enqueueBatch.bind(this));
         this.dispatchQueueBtn?.addEventListener('click', this.dispatchQueue.bind(this));
         this.cancelQueueBtn?.addEventListener('click', this.cancelQueue.bind(this));
+        if (this.toggleScheduleBtn) {
+            this.toggleScheduleBtn.addEventListener('click', () => this.toggleSchedulePanel());
+        }
         if (this.addSessionBtn) {
             this.addSessionBtn.addEventListener('click', this.addSession.bind(this));
         }
@@ -129,6 +138,9 @@ class CVAnalyzer {
         }
         if (this.distributeWeightsEquallyBtn) {
             this.distributeWeightsEquallyBtn.addEventListener('click', () => this.distributeSessionWeightsEqually());
+        }
+        if (this.toggleWeightAdjustBtn) {
+            this.toggleWeightAdjustBtn.addEventListener('click', () => this.toggleWeightAdjust());
         }
         if (this.abortAllSessionsBtn) {
             this.abortAllSessionsBtn.addEventListener('click', () => this.abortSending('__roundrobin__'));
@@ -144,12 +156,12 @@ class CVAnalyzer {
 
     initUsersElements() {
         this.usersPanel = document.getElementById('usersPanel');
+        this.lineUsersList = document.getElementById('lineUsersList');
         this.usersList = document.getElementById('usersList');
         this.createUserForm = document.getElementById('createUserForm');
         this.newUserUsername = document.getElementById('newUserUsername');
         this.newUserPassword = document.getElementById('newUserPassword');
         this.newUserGerenteEmail = document.getElementById('newUserGerenteEmail');
-        this.newUserPermissions = document.getElementById('newUserPermissions');
         this.usersFormStatus = document.getElementById('usersFormStatus');
         this.sessionsAddForm = document.querySelector('.sessions-add-form');
         this.autoReplyPanel = document.getElementById('autoReplyPanel');
@@ -219,7 +231,6 @@ class CVAnalyzer {
             this.loadUsers();
         }
         this.renderSessionUI();
-        this.renderNewUserPermissions();
     }
 
     isSuperUser() {
@@ -2023,13 +2034,43 @@ class CVAnalyzer {
         ).length;
     }
 
-    distributeSessionWeightsEqually() {
+    toggleSchedulePanel() {
+        this.schedulePanelOpen = !this.schedulePanelOpen;
+        if (this.schedulePanel) {
+            this.schedulePanel.style.display = this.schedulePanelOpen ? 'flex' : 'none';
+        }
+        if (this.toggleScheduleBtn) {
+            this.toggleScheduleBtn.textContent = this.schedulePanelOpen ? 'Ocultar programación' : 'Programar…';
+        }
+    }
+
+    toggleWeightAdjust() {
+        this.weightAdjustOpen = !this.weightAdjustOpen;
+        if (this.weightAdjustOpen) {
+            this.maybeReseedSessionCounts();
+        } else {
+            this.distributeSessionWeightsEqually({ silent: true });
+        }
+        this.updateSessionWeightUI();
+    }
+
+    setWeightInputsVisible(visible) {
+        if (!this.sessionCheckboxes) return;
+        this.sessionCheckboxes.classList.toggle('weight-adjust-open', visible);
+        this.sessionCheckboxes.querySelectorAll('.session-weight-wrap').forEach((wrap) => {
+            wrap.style.display = visible ? 'inline-flex' : 'none';
+        });
+    }
+
+    distributeSessionWeightsEqually(options = {}) {
         const selected = this.getSelectedSessionIds();
         if (selected.length === 0) return;
 
         const total = this.getReadyMessagesCount();
         if (total <= 0) {
-            this.showStatus('Primero genera los mensajes para repartir cantidades', 'error');
+            if (!options.silent) {
+                this.showStatus('Primero genera los mensajes para repartir cantidades', 'error');
+            }
             return;
         }
 
@@ -2068,7 +2109,9 @@ class CVAnalyzer {
             Object.values(weights).every((w) => w > 0 && w <= 100);
 
         const totalChanged = this._lastSeededReadyCount !== total;
-        if (!totalChanged && !looksLikeOldPercent) return;
+        // En modo simple siempre rebalancea si cambió el total o se descuadró.
+        const forceEqual = !this.weightAdjustOpen && sum !== total;
+        if (!totalChanged && !looksLikeOldPercent && !forceEqual) return;
 
         const base = Math.floor(total / selected.length);
         let remainder = total - base * selected.length;
@@ -2106,25 +2149,40 @@ class CVAnalyzer {
         const selected = this.getSelectedSessionIds();
         const multi = selected.length > 1;
         const cvsCount = this.getReadyMessagesCount();
+        if (!multi) this.weightAdjustOpen = false;
+        const adjusting = Boolean(this.weightAdjustOpen && multi);
+
+        if (multi && !this.weightAdjustOpen) {
+            this.maybeReseedSessionCounts();
+        }
+
+        this.setWeightInputsVisible(adjusting);
 
         this.getSessionWeightInputs().forEach((input) => {
             const row = input.closest('.session-send-row');
             const cb = row ? row.querySelector('.session-send-checkbox') : null;
-            const enabled = Boolean(cb && cb.checked && multi);
+            const enabled = Boolean(cb && cb.checked && adjusting);
             input.disabled = !enabled;
             input.max = cvsCount > 0 ? String(cvsCount) : '';
             row?.classList.toggle('session-send-row-disabled', Boolean(cb && !cb.checked));
         });
 
+        if (this.sessionWeightToolbar) {
+            this.sessionWeightToolbar.style.display = multi ? 'flex' : 'none';
+        }
+        if (this.toggleWeightAdjustBtn) {
+            this.toggleWeightAdjustBtn.style.display = multi ? 'inline-block' : 'none';
+            this.toggleWeightAdjustBtn.textContent = adjusting ? 'Ocultar ajuste' : 'Ajustar reparto';
+        }
         if (this.distributeWeightsEquallyBtn) {
-            this.distributeWeightsEquallyBtn.style.display = multi ? 'inline-block' : 'none';
+            this.distributeWeightsEquallyBtn.style.display = adjusting ? 'inline-block' : 'none';
         }
 
         const weights = this.getSelectedSessionWeights();
         const sum = Object.values(weights).reduce((a, b) => a + b, 0);
 
         if (this.sessionWeightSum) {
-            if (!multi) {
+            if (!multi || !adjusting) {
                 this.sessionWeightSum.textContent = '';
                 this.sessionWeightSum.className = 'session-weight-sum';
             } else if (cvsCount > 0) {
@@ -2144,8 +2202,9 @@ class CVAnalyzer {
             }
 
             if (cvsCount === 0) {
-                this.sessionWeightPreview.textContent =
-                    'Indica cuántos mensajes enviará cada línea. Deben sumar el total de mensajes listos.';
+                this.sessionWeightPreview.textContent = adjusting
+                    ? 'Indica cuántos mensajes enviará cada línea. Deben sumar el total de mensajes listos.'
+                    : 'Genera los mensajes para ver el reparto automático.';
                 return;
             }
 
@@ -2153,6 +2212,11 @@ class CVAnalyzer {
             const parts = preview.map(
                 (row) => `${this.getSessionLabel(row.id)}: ${row.count}`
             );
+            if (!adjusting) {
+                this.sessionWeightPreview.textContent = `Reparto equitativo: ${parts.join(' · ')}`;
+                return;
+            }
+
             const diff = cvsCount - sum;
             let hint = '';
             if (diff > 0) hint = ` · faltan ${diff}`;
@@ -2164,6 +2228,10 @@ class CVAnalyzer {
     validateSessionWeights() {
         const selected = this.getSelectedSessionIds();
         if (selected.length <= 1) return { ok: true, weights: {} };
+
+        if (!this.weightAdjustOpen) {
+            this.distributeSessionWeightsEqually({ silent: true });
+        }
 
         const weights = this.getSelectedSessionWeights();
         const sum = Object.values(weights).reduce((a, b) => a + b, 0);
@@ -2179,7 +2247,7 @@ class CVAnalyzer {
         if (cvsCount > 0 && sum !== cvsCount) {
             return {
                 ok: false,
-                message: `Las cantidades deben sumar ${cvsCount} mensajes (actualmente suman ${sum}). Usa "Repartir igual" o ajusta los valores.`
+                message: `Las cantidades deben sumar ${cvsCount} mensajes (actualmente suman ${sum}). Usa “Repartir igual” o ajusta los valores.`
             };
         }
 
@@ -2282,6 +2350,7 @@ class CVAnalyzer {
 
                 weightWrap.appendChild(weightInput);
                 weightWrap.appendChild(countLabel);
+                weightWrap.style.display = 'none';
 
                 label.appendChild(cb);
                 label.appendChild(span);
@@ -2354,7 +2423,9 @@ class CVAnalyzer {
         }
 
         this.applyPermissionUI();
-        this.renderNewUserPermissions();
+        if (this.isSuperUser()) {
+            this.renderLineUsersList();
+        }
     }
 
     escapeHtml(str) {
@@ -2384,65 +2455,154 @@ class CVAnalyzer {
         }
     }
 
-    collectPermissionsFromForm(container) {
-        /** @type {Record<string, string>} */
-        const permissions = {};
-        if (!container) return permissions;
-        container.querySelectorAll('.user-perm-select').forEach((select) => {
-            const sessionId = select.dataset.sessionId;
-            const value = String(select.value || '').trim();
-            if (sessionId && (value === 'view' || value === 'control')) {
-                permissions[sessionId] = value;
-            }
-        });
-        return permissions;
-    }
-
-    renderNewUserPermissions() {
-        if (!this.newUserPermissions) return;
-        const sessions = this.isSuperUser()
-            ? this.configuredSessions || []
-            : [];
-        if (!sessions.length) {
-            this.newUserPermissions.innerHTML =
-                '<p style="font-size:13px;color:#64748b;">Primero agrega sesiones WhatsApp para poder asignar permisos.</p>';
-            return;
-        }
-        this.newUserPermissions.innerHTML = `
-            <p style="font-size:13px;color:#64748b;margin:8px 0;">Permisos por sesión:</p>
-            ${sessions
-                .map(
-                    (s) => `
-                <div class="user-perm-row">
-                    <span class="user-perm-label">${this.escapeHtml(s.label || s.id)}</span>
-                    <select class="form-select user-perm-select" data-session-id="${this.escapeHtml(s.id)}">
-                        <option value="">Sin acceso</option>
-                        <option value="view">Solo ver</option>
-                        <option value="control">Controlar</option>
-                    </select>
-                </div>`
-                )
-                .join('')}
-        `;
-    }
-
     async loadUsers() {
-        if (!this.isSuperUser() || !this.usersList) return;
+        if (!this.isSuperUser()) return;
         try {
             const response = await fetch('/api/users');
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudieron cargar usuarios');
             this.managedUsers = data.users || [];
+            this.renderLineUsersList();
             this.renderUsersList();
         } catch (error) {
-            this.usersList.innerHTML = `<p style="color:#b91c1c;font-size:13px;">Error: ${this.escapeHtml(error.message)}</p>`;
+            const msg = `<p style="color:#b91c1c;font-size:13px;">Error: ${this.escapeHtml(error.message)}</p>`;
+            if (this.lineUsersList) this.lineUsersList.innerHTML = msg;
+            if (this.usersList) this.usersList.innerHTML = msg;
+        }
+    }
+
+    renderLineUsersList() {
+        if (!this.lineUsersList) return;
+        const sessions = this.configuredSessions || [];
+        const users = this.managedUsers || [];
+
+        if (!sessions.length) {
+            this.lineUsersList.innerHTML =
+                '<p style="font-size:13px;color:#64748b;">Primero agrega sesiones WhatsApp abajo para asignar usuarios a cada línea.</p>';
+            return;
+        }
+
+        this.lineUsersList.innerHTML = sessions
+            .map((session) => {
+                const assigned = users
+                    .filter((u) => u.permissions && (u.permissions[session.id] === 'view' || u.permissions[session.id] === 'control'))
+                    .map((u) => ({ user: u, access: u.permissions[session.id] }));
+                const unassigned = users.filter(
+                    (u) => !u.permissions || !u.permissions[session.id]
+                );
+
+                const assignedHtml = assigned.length
+                    ? assigned
+                          .map(
+                              ({ user, access }) => `
+                        <div class="line-user-row" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}">
+                            <span class="line-user-name">${this.escapeHtml(user.username)}</span>
+                            <select class="form-select line-user-access" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}">
+                                <option value="view" ${access === 'view' ? 'selected' : ''}>Solo ver</option>
+                                <option value="control" ${access === 'control' ? 'selected' : ''}>Controlar</option>
+                            </select>
+                            <button type="button" class="btn btn-secondary btn-sm remove-line-user-btn" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}" title="Quitar de esta línea">Quitar</button>
+                        </div>`
+                          )
+                          .join('')
+                    : '<p class="line-users-empty">Nadie asignado a esta línea.</p>';
+
+                const addRow =
+                    users.length === 0
+                        ? '<p class="line-users-empty">Crea un usuario abajo para poder asignarlo.</p>'
+                        : unassigned.length === 0
+                          ? '<p class="line-users-empty">Todos los usuarios ya están en esta línea.</p>'
+                          : `
+                        <div class="line-user-add">
+                            <select class="form-select line-add-user" data-session-id="${this.escapeHtml(session.id)}">
+                                <option value="">— Usuario —</option>
+                                ${unassigned
+                                    .map(
+                                        (u) =>
+                                            `<option value="${this.escapeHtml(u.id)}">${this.escapeHtml(u.username)}</option>`
+                                    )
+                                    .join('')}
+                            </select>
+                            <select class="form-select line-add-access" data-session-id="${this.escapeHtml(session.id)}">
+                                <option value="control">Controlar</option>
+                                <option value="view">Solo ver</option>
+                            </select>
+                            <button type="button" class="btn btn-secondary btn-sm add-line-user-btn" data-session-id="${this.escapeHtml(session.id)}">Agregar</button>
+                        </div>`;
+
+                return `
+                <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
+                    <div class="line-card-header">
+                        <strong>${this.escapeHtml(session.label || session.id)}</strong>
+                        <span class="line-card-meta">${assigned.length} usuario${assigned.length === 1 ? '' : 's'}</span>
+                    </div>
+                    <div class="line-users-assigned">${assignedHtml}</div>
+                    ${addRow}
+                </div>`;
+            })
+            .join('');
+
+        this.lineUsersList.querySelectorAll('.line-user-access').forEach((select) => {
+            select.addEventListener('change', () => {
+                this.setUserLineAccess(select.dataset.userId, select.dataset.sessionId, select.value);
+            });
+        });
+        this.lineUsersList.querySelectorAll('.remove-line-user-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                this.setUserLineAccess(btn.dataset.userId, btn.dataset.sessionId, '');
+            });
+        });
+        this.lineUsersList.querySelectorAll('.add-line-user-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const card = btn.closest('.line-card');
+                if (!card) return;
+                const userSelect = card.querySelector('.line-add-user');
+                const accessSelect = card.querySelector('.line-add-access');
+                const userId = userSelect ? userSelect.value : '';
+                const access = accessSelect ? accessSelect.value : 'control';
+                if (!userId) {
+                    this.showStatus('Elige un usuario para agregar', 'error');
+                    return;
+                }
+                this.setUserLineAccess(userId, btn.dataset.sessionId, access);
+            });
+        });
+    }
+
+    async setUserLineAccess(userId, sessionId, access) {
+        if (!this.isSuperUser() || !userId || !sessionId) return;
+        const user = (this.managedUsers || []).find((u) => u.id === userId);
+        if (!user) return;
+
+        const permissions = { ...(user.permissions || {}) };
+        if (access === 'view' || access === 'control') {
+            permissions[sessionId] = access;
+        } else {
+            delete permissions[sessionId];
+        }
+
+        try {
+            const response = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ permissions })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo actualizar');
+            user.permissions = permissions;
+            this.renderLineUsersList();
+            this.renderUsersList();
+            const label = access === 'control' ? 'control' : access === 'view' ? 'solo ver' : 'sin acceso';
+            this.showStatus(`${user.username}: ${label}`, 'success');
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+            await this.loadUsers();
         }
     }
 
     renderUsersList() {
         if (!this.usersList) return;
         const users = this.managedUsers || [];
-        const sessions = this.configuredSessions || [];
 
         if (!users.length) {
             this.usersList.innerHTML =
@@ -2452,31 +2612,20 @@ class CVAnalyzer {
 
         this.usersList.innerHTML = users
             .map((user) => {
-                const perms = user.permissions || {};
-                const permRows = sessions
-                    .map((s) => {
-                        const current = perms[s.id] || '';
-                        return `
-                        <div class="user-perm-row">
-                            <span class="user-perm-label">${this.escapeHtml(s.label || s.id)}</span>
-                            <select class="form-select user-perm-select" data-user-id="${this.escapeHtml(user.id)}" data-session-id="${this.escapeHtml(s.id)}">
-                                <option value="" ${!current ? 'selected' : ''}>Sin acceso</option>
-                                <option value="view" ${current === 'view' ? 'selected' : ''}>Solo ver</option>
-                                <option value="control" ${current === 'control' ? 'selected' : ''}>Controlar</option>
-                            </select>
-                        </div>`;
-                    })
-                    .join('');
-
+                const assignedCount = Object.values(user.permissions || {}).filter(
+                    (v) => v === 'view' || v === 'control'
+                ).length;
                 return `
                 <div class="user-card" data-user-id="${this.escapeHtml(user.id)}">
                     <div class="user-card-header">
-                        <strong>${this.escapeHtml(user.username)}</strong>
+                        <div>
+                            <strong>${this.escapeHtml(user.username)}</strong>
+                            <span class="user-card-meta">${assignedCount} línea${assignedCount === 1 ? '' : 's'}</span>
+                        </div>
                         <button type="button" class="btn btn-danger btn-sm delete-user-btn" data-id="${this.escapeHtml(user.id)}">Eliminar</button>
                     </div>
                     <label style="font-size:12px;color:#64748b;display:block;margin:6px 0 4px;">Correo gerente (Panel)</label>
                     <input type="email" class="form-select user-gerente-input" data-id="${this.escapeHtml(user.id)}" value="${this.escapeHtml(user.gerenteEmail || '')}" placeholder="correo@protalentconnections.com" autocomplete="off">
-                    <div class="user-card-perms">${permRows || '<p style="font-size:12px;color:#64748b;">No hay sesiones para asignar.</p>'}</div>
                     <div class="user-card-actions">
                         <input type="password" class="form-select user-password-input" data-id="${this.escapeHtml(user.id)}" placeholder="Nueva contraseña (opcional)" autocomplete="new-password">
                         <button type="button" class="btn btn-secondary btn-sm save-user-btn" data-id="${this.escapeHtml(user.id)}">Guardar cambios</button>
@@ -2498,13 +2647,12 @@ class CVAnalyzer {
         const username = this.newUserUsername ? this.newUserUsername.value.trim() : '';
         const password = this.newUserPassword ? this.newUserPassword.value : '';
         const gerenteEmail = this.newUserGerenteEmail ? this.newUserGerenteEmail.value.trim() : '';
-        const permissions = this.collectPermissionsFromForm(this.newUserPermissions);
 
         try {
             const response = await fetch('/api/users', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password, permissions, gerenteEmail })
+                body: JSON.stringify({ username, password, permissions: {}, gerenteEmail })
             });
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo crear');
@@ -2512,9 +2660,8 @@ class CVAnalyzer {
             if (this.newUserUsername) this.newUserUsername.value = '';
             if (this.newUserPassword) this.newUserPassword.value = '';
             if (this.newUserGerenteEmail) this.newUserGerenteEmail.value = '';
-            this.renderNewUserPermissions();
             if (this.usersFormStatus) {
-                this.usersFormStatus.textContent = `Usuario "${username}" creado`;
+                this.usersFormStatus.textContent = `Usuario "${username}" creado. Asígnale líneas arriba.`;
                 this.usersFormStatus.style.color = '#15803d';
             }
             await this.loadUsers();
@@ -2535,14 +2682,12 @@ class CVAnalyzer {
         const gerenteInput = card.querySelector('.user-gerente-input');
         const password = passwordInput ? passwordInput.value : '';
         const gerenteEmail = gerenteInput ? gerenteInput.value.trim() : '';
-        const permissions = this.collectPermissionsFromForm(card);
 
         try {
             const response = await fetch(`/api/users/${encodeURIComponent(userId)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    permissions,
                     gerenteEmail,
                     ...(password ? { password } : {})
                 })
@@ -2550,8 +2695,9 @@ class CVAnalyzer {
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo guardar');
             if (passwordInput) passwordInput.value = '';
-            this.showStatus(`Usuario actualizado`, 'success');
-            await this.loadUsers();
+            const user = (this.managedUsers || []).find((u) => u.id === userId);
+            if (user) user.gerenteEmail = gerenteEmail;
+            this.showStatus('Usuario actualizado', 'success');
         } catch (error) {
             this.showStatus(`Error: ${error.message}`, 'error');
         }
@@ -4374,6 +4520,17 @@ class CVAnalyzer {
         }
     }
 
+    queueStatusLabel(status) {
+        const map = {
+            queued: 'En cola',
+            scheduled: 'Programado',
+            sending: 'Enviando',
+            sent: 'Enviado',
+            cancelled: 'Cancelado'
+        };
+        return map[status] || status || '';
+    }
+
     applyQueueUi(data = {}) {
         if (!this.sendQueuePanel || !this.enqueueBtn || !this.sendWhatsAppBtn) return;
 
@@ -4385,17 +4542,17 @@ class CVAnalyzer {
             this.sendQueuePanel.style.display = 'none';
         } else {
             this.sendQueuePanel.style.display = 'block';
-            this.sendQueueStatus.textContent = batch.status;
+            this.sendQueueStatus.textContent = this.queueStatusLabel(batch.status);
 
             if (terminal) {
                 this.sendQueueMeta.textContent =
                     batch.status === 'sent'
-                        ? `Lote ${batch.id.slice(0, 8)}… enviado (${batch.total} mensajes)`
+                        ? `Lote enviado (${batch.total} mensajes)`
                         : 'Lote cancelado';
             } else {
                 const scheduled = batch.scheduledAt
-                    ? ` · programado ${new Date(batch.scheduledAt).toLocaleString()}`
-                    : '';
+                    ? ` · programado para ${new Date(batch.scheduledAt).toLocaleString()}`
+                    : ' · listo para iniciar';
                 this.sendQueueMeta.textContent = `${batch.total} mensajes${scheduled}`;
             }
 
@@ -4406,6 +4563,9 @@ class CVAnalyzer {
 
         const hasReady = this.getReadyMessagesCount() > 0;
         this.enqueueBtn.disabled = !hasReady || !data.canEnqueue;
+        if (this.toggleScheduleBtn) {
+            this.toggleScheduleBtn.disabled = !hasReady || !data.canEnqueue;
+        }
 
         if (data.buttonBurned || active) {
             this.sendWhatsAppBtn.disabled = true;
@@ -4413,19 +4573,21 @@ class CVAnalyzer {
                 this.sendWhatsAppBtn.textContent = 'Enviando…';
             } else if (batch?.status === 'sent') {
                 this.sendWhatsAppBtn.textContent = 'Enviado';
+            } else if (batch?.status === 'scheduled') {
+                this.sendWhatsAppBtn.textContent = 'Programado…';
             } else {
                 this.sendWhatsAppBtn.textContent = 'En cola…';
             }
         } else {
             this.sendWhatsAppBtn.disabled = !hasReady;
-            this.sendWhatsAppBtn.textContent = 'Enviar por WhatsApp';
+            this.sendWhatsAppBtn.textContent = 'Enviar ahora';
         }
     }
 
     async enqueueBatch() {
         const selectedSessions = this.getSelectedSessionIds();
         if (selectedSessions.length === 0) {
-            this.showStatus('Marca al menos una sesión para encolar mensajes', 'error');
+            this.showStatus('Marca al menos una línea para programar el envío', 'error');
             return;
         }
 
@@ -4453,15 +4615,20 @@ class CVAnalyzer {
             });
             const data = await response.json();
             if (!response.ok) {
-                this.showStatus(data.error || 'Error al encolar', 'error');
+                this.showStatus(data.error || 'Error al programar', 'error');
                 await this.refreshSendQueue();
                 return;
             }
 
             this.queueState = data;
             this.applyQueueUi(data);
+            this.schedulePanelOpen = false;
+            if (this.schedulePanel) this.schedulePanel.style.display = 'none';
+            if (this.toggleScheduleBtn) this.toggleScheduleBtn.textContent = 'Programar…';
             this.showStatus(
-                scheduledAt ? 'Lote programado' : 'Lote encolado (sin enviar)',
+                scheduledAt
+                    ? 'Envío programado'
+                    : 'Lote en cola. Pulsa “Iniciar envío” cuando quieras.',
                 'success'
             );
         } catch (error) {
@@ -4568,7 +4735,7 @@ class CVAnalyzer {
 
         const selectedSessions = this.getSelectedSessionIds();
         if (selectedSessions.length === 0) {
-            this.showStatus('Marca al menos una sesión para enviar mensajes', 'error');
+            this.showStatus('Marca al menos una línea para enviar mensajes', 'error');
             return;
         }
 
@@ -4579,24 +4746,23 @@ class CVAnalyzer {
         }
 
         const sessionLabels = selectedSessions.map((s) => this.getSessionLabel(s)).join(', ');
-        let confirmMessage = `¿Estás seguro de enviar ${cvsToSend.length} mensajes por WhatsApp?\n\n`;
+        let confirmMessage = `¿Enviar ${cvsToSend.length} mensajes por WhatsApp?\n\n`;
         if (this.testMode) {
-            confirmMessage += '🧪 MODO PRUEBA: Los mensajes se simularán (no se abrirá WhatsApp Web).';
+            confirmMessage += '🧪 MODO PRUEBA: Los mensajes se simularán (no se enviarán de verdad).';
         } else {
             if (selectedSessions.length > 1) {
-                confirmMessage += `📱 Envío paralelo entre ${selectedSessions.length} sesiones: ${sessionLabels}\n`;
+                confirmMessage += `Líneas (${selectedSessions.length}): ${sessionLabels}\n`;
                 const preview = this.computeWeightDistributionPreview(
                     cvsToSend.length,
                     weightValidation.weights
                 );
-                confirmMessage += `Reparto: ${preview.map((row) => `${this.getSessionLabel(row.id)} ${row.count} (${row.pct}%)`).join(', ')}\n`;
-                confirmMessage += 'Cada celular envía su primer mensaje al mismo tiempo.\n';
-                confirmMessage += 'Luego cada sesión espera su propio tiempo aleatorio (1-5 min).\n';
+                confirmMessage += `Reparto: ${preview.map((row) => `${this.getSessionLabel(row.id)} ${row.count}`).join(', ')}\n`;
+                confirmMessage += 'Cada línea envía su primer mensaje a la vez; luego espera 1–5 min entre mensajes.\n';
             } else {
-                confirmMessage += `Se usará la sesión: ${sessionLabels}.\n`;
-                confirmMessage += 'Se enviará con delay aleatorio de 1-5 minutos entre cada mensaje.';
+                confirmMessage += `Línea: ${sessionLabels}.\n`;
+                confirmMessage += 'Delay aleatorio de 1–5 minutos entre cada mensaje.';
             }
-            confirmMessage += '\nAsegúrate de tener las sesiones verificadas en OpenWA.';
+            confirmMessage += '\nAsegúrate de tener las líneas verificadas en OpenWA.';
         }
 
         if (!confirm(confirmMessage)) {
@@ -5057,7 +5223,7 @@ class CVAnalyzer {
                     this.progressSection.style.display = 'none';
                     this.generateMessagesBtn.disabled = true;
                     this.sendWhatsAppBtn.disabled = true;
-                    this.sendWhatsAppBtn.textContent = 'Enviar por WhatsApp';
+                    this.sendWhatsAppBtn.textContent = 'Enviar ahora';
                     this.queueState = queueResult;
                     this.applyQueueUi(queueResult);
                     this.fileInput.value = '';
