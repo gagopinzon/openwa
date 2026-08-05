@@ -185,6 +185,16 @@ function isConnectedStatus(status) {
   return s === 'connected' || s === 'open' || s === 'ready';
 }
 
+/** Errores típicos cuando la sesión OpenWA/WhatsApp ya no está usable. */
+function isDisconnectError(error) {
+  const status = error && error.status;
+  if (status === 409 || status === 502 || status === 503) return true;
+  const msg = String((error && error.message) || error || '');
+  return /not connected|disconnected|desconectad|session.*(closed|lost|not ready)|UNPAIRED|logged out|no está conectad|estado:.*(desconocido|close|conflict)/i.test(
+    msg
+  );
+}
+
 /**
  * @param {string} openwaSessionId
  * @returns {Promise<{ connected: boolean, status: string, raw: object }>}
@@ -499,6 +509,7 @@ module.exports = {
   assertOpenWAConfigured,
   formatPhoneToChatId,
   getSessionStatus,
+  isDisconnectError,
   sendTextMessage,
   sendChatState,
   editMessage,
