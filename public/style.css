@@ -738,11 +738,59 @@ section h2 {
     opacity: 0.55;
 }
 
+.session-send-row-offline {
+    background: #fef2f2;
+    border-color: #fecaca;
+    opacity: 0.85;
+}
+
+.session-send-row-offline .session-send-name {
+    color: #991b1b;
+}
+
+.session-send-row-checking {
+    opacity: 0.75;
+}
+
+.session-conn-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.session-conn-online {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.session-conn-offline {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.session-conn-unknown {
+    background: #e2e8f0;
+    color: #64748b;
+}
+
+.session-connection-hint {
+    font-size: 12px;
+    color: #64748b;
+    margin: 8px 0 0;
+    min-height: 1.2em;
+}
+
 .session-send-label {
     display: inline-flex;
     align-items: center;
     gap: 8px;
     cursor: pointer;
+}
+
+.session-send-row-offline .session-send-label {
+    cursor: not-allowed;
 }
 
 .session-send-checkbox {
@@ -1841,7 +1889,7 @@ footer p {
     font-style: italic;
 }
 
-/* Usuarios y permisos — vista por líneas */
+/* Líneas unificadas (config OpenWA + usuarios) */
 .line-users-list {
     display: flex;
     flex-direction: column;
@@ -1864,12 +1912,60 @@ footer p {
     margin-bottom: 10px;
 }
 
+.line-card-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
 .line-card-meta,
 .user-card-meta {
     font-size: 12px;
     color: #64748b;
     font-weight: 500;
-    margin-left: 8px;
+}
+
+.line-card-code {
+    font-size: 12px;
+    background: #e2e8f0;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.line-card-config {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px dashed #e2e8f0;
+}
+
+.line-card-sender {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.line-card-sender-label {
+    font-size: 12px;
+    color: #64748b;
+}
+
+.line-card-sender .session-sender-input {
+    padding: 4px 8px;
+    min-width: 180px;
+    max-width: 260px;
+    font-size: 13px;
+}
+
+.line-card-users-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+    margin: 0 0 8px;
 }
 
 .line-users-assigned {
@@ -1915,6 +2011,7 @@ footer p {
     margin: 0;
 }
 
+.lines-panel .users-list,
 .users-panel .users-list {
     display: flex;
     flex-direction: column;

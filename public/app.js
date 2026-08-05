@@ -5,6 +5,9 @@ class CVAnalyzer {
         this.testMode = false;
         this.whatsappProvider = 'openwa';
         this.configuredSessions = [];
+        this.openwaConnectionBySession = {};
+        this._connectionStatusPollTimer = null;
+        this._connectionStatusFetching = false;
         this.currentUser = window.__pendingAuthUser || null;
         this.managedUsers = [];
         this.panelConfig = {
@@ -59,13 +62,14 @@ class CVAnalyzer {
         this.openWhatsAppBtn = document.getElementById('openWhatsAppBtn');
         this.sessionSelect = document.getElementById('sessionSelect');
         this.sessionCheckboxes = document.getElementById('sessionCheckboxes');
+        this.sessionConnectionHint = document.getElementById('sessionConnectionHint');
         this.sessionWeightPreview = document.getElementById('sessionWeightPreview');
         this.sessionWeightSum = document.getElementById('sessionWeightSum');
         this.distributeWeightsEquallyBtn = document.getElementById('distributeWeightsEquallyBtn');
         this.toggleWeightAdjustBtn = document.getElementById('toggleWeightAdjustBtn');
         this.sessionWeightToolbar = document.getElementById('sessionWeightToolbar');
         this.weightAdjustOpen = false;
-        this.sessionsList = document.getElementById('sessionsList');
+        this.sessionsList = null;
         this.sessionsEmptyHint = document.getElementById('sessionsEmptyHint');
         this.openwaSessionPicker = document.getElementById('openwaSessionPicker');
         this.sessionLabelInput = document.getElementById('sessionLabelInput');
@@ -155,7 +159,9 @@ class CVAnalyzer {
     }
 
     initUsersElements() {
-        this.usersPanel = document.getElementById('usersPanel');
+        this.linesPanel = document.getElementById('linesPanel');
+        this.usersPanel = this.linesPanel;
+        this.accountsSection = document.getElementById('accountsSection');
         this.lineUsersList = document.getElementById('lineUsersList');
         this.usersList = document.getElementById('usersList');
         this.createUserForm = document.getElementById('createUserForm');
@@ -163,7 +169,7 @@ class CVAnalyzer {
         this.newUserPassword = document.getElementById('newUserPassword');
         this.newUserGerenteEmail = document.getElementById('newUserGerenteEmail');
         this.usersFormStatus = document.getElementById('usersFormStatus');
-        this.sessionsAddForm = document.querySelector('.sessions-add-form');
+        this.sessionsAddForm = document.getElementById('sessionsAddForm');
         this.autoReplyPanel = document.getElementById('autoReplyPanel');
     }
 
@@ -257,8 +263,8 @@ class CVAnalyzer {
         const isSuper = this.isSuperUser();
         const hasControl = this.getControllableSessions().length > 0 || isSuper;
 
-        if (this.usersPanel) {
-            this.usersPanel.style.display = isSuper ? 'block' : 'none';
+        if (this.accountsSection) {
+            this.accountsSection.style.display = isSuper ? 'block' : 'none';
         }
         if (this.sessionsAddForm) {
             this.sessionsAddForm.style.display = isSuper ? 'flex' : 'none';
@@ -1988,14 +1994,158 @@ class CVAnalyzer {
             .replace(/(\nAtte:\s*\n)\s*Mónica González\s*$/i, `$1${senderName}`);
     }
 
-    /** Devuelve array de sessionId de los checkboxes marcados */
+    /** Devuelve array de sessionId de los checkboxes marcados (solo líneas habilitadas/conectadas) */
     getSelectedSessionIds() {
         if (!this.sessionCheckboxes) return [];
         const ids = [];
         this.sessionCheckboxes.querySelectorAll('.session-send-checkbox:checked').forEach((cb) => {
-            if (cb.value) ids.push(cb.value);
+            if (!cb.value || cb.disabled) return;
+            const status = this.openwaConnectionBySession?.[cb.value];
+            if (status && status.connected === false) return;
+            ids.push(cb.value);
         });
         return ids;
+    }
+
+    isSessionConnectedForSend(sessionId) {
+        if (this.testMode) return true;
+        const status = this.openwaConnectionBySession?.[sessionId];
+        if (!status) return true; // aún desconocido: no bloquear hasta saber
+        return status.connected === true;
+    }
+
+    connectionBadgeForSession(sessionId) {
+        if (this.testMode) {
+            return { text: 'Prueba', className: 'session-conn-badge session-conn-online' };
+        }
+        const status = this.openwaConnectionBySession?.[sessionId];
+        if (!status) {
+            return { text: '…', className: 'session-conn-badge session-conn-unknown' };
+        }
+        if (status.connected) {
+            return { text: 'Conectada', className: 'session-conn-badge session-conn-online' };
+        }
+        const raw = String(status.status || '').toLowerCase();
+        let text = 'Desconectada';
+        if (raw === 'missing') text = 'No encontrada';
+        else if (raw === 'unreachable' || raw === 'error') text = 'Sin respuesta';
+        return { text, className: 'session-conn-badge session-conn-offline' };
+    }
+
+    applyConnectionStatusToSendRows() {
+        if (!this.sessionCheckboxes) return;
+        let online = 0;
+        let offline = 0;
+        let unknown = 0;
+
+        this.sessionCheckboxes.querySelectorAll('.session-send-row').forEach((row) => {
+            const sessionId = row.dataset.sessionId;
+            const cb = row.querySelector('.session-send-checkbox');
+            let badge = row.querySelector('.session-conn-badge');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'session-conn-badge session-conn-unknown';
+                const name = row.querySelector('.session-send-name');
+                if (name && name.parentNode) {
+                    name.insertAdjacentElement('afterend', badge);
+                } else {
+                    row.appendChild(badge);
+                }
+            }
+
+            const info = this.connectionBadgeForSession(sessionId);
+            badge.textContent = info.text;
+            badge.className = info.className;
+
+            const status = this.openwaConnectionBySession?.[sessionId];
+            row.classList.remove('session-send-row-offline', 'session-send-row-checking');
+
+            if (!status && !this.testMode) {
+                row.classList.add('session-send-row-checking');
+                unknown += 1;
+                return;
+            }
+
+            if (status && status.connected === false && !this.testMode) {
+                offline += 1;
+                row.classList.add('session-send-row-offline');
+                if (cb) {
+                    cb.checked = false;
+                    cb.disabled = true;
+                }
+                return;
+            }
+
+            online += 1;
+            if (cb) cb.disabled = false;
+        });
+
+        if (this.sessionConnectionHint) {
+            if (this.testMode) {
+                this.sessionConnectionHint.textContent = 'Modo prueba: no se consulta OpenWA.';
+            } else if (unknown > 0 && online + offline === 0) {
+                this.sessionConnectionHint.textContent = 'Comprobando conexión en OpenWA…';
+            } else if (offline > 0) {
+                this.sessionConnectionHint.textContent = `${online} conectada(s) · ${offline} desconectada(s) (no se pueden usar hasta reconectar).`;
+            } else if (online > 0) {
+                this.sessionConnectionHint.textContent = `Todas las líneas visibles están conectadas (${online}).`;
+            } else {
+                this.sessionConnectionHint.textContent = '';
+            }
+        }
+
+        this.updateSessionWeightUI();
+    }
+
+    startConnectionStatusPolling() {
+        if (this._connectionStatusPollTimer) return;
+        this._connectionStatusPollTimer = setInterval(() => {
+            if (!this.resultsSection || this.resultsSection.style.display === 'none') return;
+            this.refreshOpenWAConnectionStatuses({ silent: true, force: true });
+        }, 45000);
+    }
+
+    async refreshOpenWAConnectionStatuses(options = {}) {
+        if (this.testMode) {
+            this.openwaConnectionBySession = {};
+            (this.configuredSessions || []).forEach((s) => {
+                this.openwaConnectionBySession[s.id] = {
+                    connected: true,
+                    status: 'test'
+                };
+            });
+            this.applyConnectionStatusToSendRows();
+            return;
+        }
+        const now = Date.now();
+        if (
+            !options.force &&
+            this._lastConnectionCheckAt &&
+            now - this._lastConnectionCheckAt < 8000
+        ) {
+            this.applyConnectionStatusToSendRows();
+            return;
+        }
+        if (this._connectionStatusFetching) return;
+        this._connectionStatusFetching = true;
+        try {
+            const response = await fetch('/api/sessions/connection-status');
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.error || 'No se pudo consultar el estado');
+            }
+            this.openwaConnectionBySession = data.statuses || {};
+            this._lastConnectionCheckAt = Date.now();
+            this.applyConnectionStatusToSendRows();
+        } catch (error) {
+            console.warn('Estado OpenWA:', error.message);
+            if (!options.silent && this.sessionConnectionHint) {
+                this.sessionConnectionHint.textContent =
+                    'No se pudo consultar el estado de OpenWA. Reintenta en unos segundos.';
+            }
+        } finally {
+            this._connectionStatusFetching = false;
+        }
     }
 
     getSessionWeightInputs() {
@@ -2261,7 +2411,6 @@ class CVAnalyzer {
     renderSessionUI() {
         const sessions = this.configuredSessions || [];
         const controllable = this.getControllableSessions();
-        const isSuper = this.isSuperUser();
 
         if (this.sessionSelect) {
             const prev = this.sessionSelect.value;
@@ -2317,6 +2466,11 @@ class CVAnalyzer {
                 span.className = 'session-send-name';
                 span.textContent = s.label;
 
+                const badge = document.createElement('span');
+                const badgeInfo = this.connectionBadgeForSession(s.id);
+                badge.className = badgeInfo.className;
+                badge.textContent = badgeInfo.text;
+
                 const weightWrap = document.createElement('span');
                 weightWrap.className = 'session-weight-wrap';
 
@@ -2352,8 +2506,19 @@ class CVAnalyzer {
                 weightWrap.appendChild(countLabel);
                 weightWrap.style.display = 'none';
 
+                const offline =
+                    !this.testMode &&
+                    this.openwaConnectionBySession?.[s.id] &&
+                    this.openwaConnectionBySession[s.id].connected === false;
+                if (offline) {
+                    cb.checked = false;
+                    cb.disabled = true;
+                    row.classList.add('session-send-row-offline');
+                }
+
                 label.appendChild(cb);
                 label.appendChild(span);
+                label.appendChild(badge);
                 label.appendChild(weightWrap);
                 row.appendChild(label);
                 this.sessionCheckboxes.appendChild(row);
@@ -2370,52 +2535,7 @@ class CVAnalyzer {
             this._sessionsCheckboxesInitialized = true;
             this.maybeReseedSessionCounts();
             this.updateSessionWeightUI();
-        }
-
-        if (this.sessionsList) {
-            if (sessions.length === 0) {
-                this.sessionsList.innerHTML =
-                    '<p style="color:#64748b;font-size:13px;">Aún no hay sesiones guardadas.</p>';
-            } else {
-                this.sessionsList.innerHTML = sessions
-                    .map((s) => {
-                        const access = s.access || this.getSessionAccess(s.id) || 'view';
-                        const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
-                        if (!isSuper) {
-                            return `
-                    <div class="session-row" data-session-id="${s.id}" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
-                        <strong style="min-width:120px;">${this.escapeHtml(s.label)}</strong>
-                        <span class="session-access-badge session-access-${access}">${accessLabel}</span>
-                        <code style="font-size:12px;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${this.escapeHtml(s.openwaSessionId)}</code>
-                    </div>`;
-                        }
-                        return `
-                    <div class="session-row" data-session-id="${s.id}" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
-                        <strong style="min-width:120px;">${this.escapeHtml(s.label)}</strong>
-                        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;flex:1;min-width:200px;">
-                            <span style="font-size:12px;color:#64748b;">Remitente:</span>
-                            <input type="text" class="session-sender-input form-select" data-id="${s.id}" value="${this.escapeHtml(s.senderName || s.label || '')}" placeholder="Nombre en WhatsApp" style="padding:4px 8px;min-width:180px;max-width:260px;font-size:13px;">
-                            <button type="button" class="btn btn-secondary btn-sm save-sender-btn" data-id="${s.id}" style="padding:4px 10px;font-size:12px;">Guardar</button>
-                            <button type="button" class="btn btn-secondary btn-sm sync-sender-btn" data-id="${s.id}" title="Obtener nombre desde WhatsApp" style="padding:4px 10px;font-size:12px;">↻ WhatsApp</button>
-                        </div>
-                        <code style="font-size:12px;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${this.escapeHtml(s.openwaSessionId)}</code>
-                        <button type="button" class="btn btn-danger btn-sm remove-session-btn" data-id="${s.id}" style="padding:4px 10px;font-size:12px;">Quitar</button>
-                    </div>`;
-                    })
-                    .join('');
-
-                if (isSuper) {
-                    this.sessionsList.querySelectorAll('.remove-session-btn').forEach((btn) => {
-                        btn.addEventListener('click', () => this.removeSession(btn.dataset.id));
-                    });
-                    this.sessionsList.querySelectorAll('.save-sender-btn').forEach((btn) => {
-                        btn.addEventListener('click', () => this.saveSessionSenderName(btn.dataset.id));
-                    });
-                    this.sessionsList.querySelectorAll('.sync-sender-btn').forEach((btn) => {
-                        btn.addEventListener('click', () => this.syncSessionSenderName(btn.dataset.id));
-                    });
-                }
-            }
+            this.applyConnectionStatusToSendRows();
         }
 
         if (this.sessionsEmptyHint) {
@@ -2423,9 +2543,8 @@ class CVAnalyzer {
         }
 
         this.applyPermissionUI();
-        if (this.isSuperUser()) {
-            this.renderLineUsersList();
-        }
+        this.renderLineUsersList();
+        this.refreshOpenWAConnectionStatuses({ silent: true });
     }
 
     escapeHtml(str) {
@@ -2475,15 +2594,33 @@ class CVAnalyzer {
         if (!this.lineUsersList) return;
         const sessions = this.configuredSessions || [];
         const users = this.managedUsers || [];
+        const isSuper = this.isSuperUser();
 
         if (!sessions.length) {
-            this.lineUsersList.innerHTML =
-                '<p style="font-size:13px;color:#64748b;">Primero agrega sesiones WhatsApp abajo para asignar usuarios a cada línea.</p>';
+            this.lineUsersList.innerHTML = isSuper
+                ? '<p style="font-size:13px;color:#64748b;">Aún no hay líneas. Agrégalas con el picker de OpenWA abajo.</p>'
+                : '<p style="font-size:13px;color:#64748b;">No tienes líneas asignadas.</p>';
             return;
         }
 
         this.lineUsersList.innerHTML = sessions
             .map((session) => {
+                const access = session.access || this.getSessionAccess(session.id) || 'view';
+                const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
+
+                if (!isSuper) {
+                    return `
+                <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
+                    <div class="line-card-header">
+                        <div class="line-card-title">
+                            <strong>${this.escapeHtml(session.label || session.id)}</strong>
+                            <span class="session-access-badge session-access-${access}">${accessLabel}</span>
+                        </div>
+                        <code class="line-card-code">${this.escapeHtml(session.openwaSessionId || '')}</code>
+                    </div>
+                </div>`;
+                }
+
                 const assigned = users
                     .filter((u) => u.permissions && (u.permissions[session.id] === 'view' || u.permissions[session.id] === 'control'))
                     .map((u) => ({ user: u, access: u.permissions[session.id] }));
@@ -2494,12 +2631,12 @@ class CVAnalyzer {
                 const assignedHtml = assigned.length
                     ? assigned
                           .map(
-                              ({ user, access }) => `
+                              ({ user, access: userAccess }) => `
                         <div class="line-user-row" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}">
                             <span class="line-user-name">${this.escapeHtml(user.username)}</span>
                             <select class="form-select line-user-access" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}">
-                                <option value="view" ${access === 'view' ? 'selected' : ''}>Solo ver</option>
-                                <option value="control" ${access === 'control' ? 'selected' : ''}>Controlar</option>
+                                <option value="view" ${userAccess === 'view' ? 'selected' : ''}>Solo ver</option>
+                                <option value="control" ${userAccess === 'control' ? 'selected' : ''}>Controlar</option>
                             </select>
                             <button type="button" class="btn btn-secondary btn-sm remove-line-user-btn" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}" title="Quitar de esta línea">Quitar</button>
                         </div>`
@@ -2533,15 +2670,41 @@ class CVAnalyzer {
                 return `
                 <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
                     <div class="line-card-header">
-                        <strong>${this.escapeHtml(session.label || session.id)}</strong>
-                        <span class="line-card-meta">${assigned.length} usuario${assigned.length === 1 ? '' : 's'}</span>
+                        <div class="line-card-title">
+                            <strong>${this.escapeHtml(session.label || session.id)}</strong>
+                            <span class="line-card-meta">${assigned.length} usuario${assigned.length === 1 ? '' : 's'}</span>
+                        </div>
+                        <button type="button" class="btn btn-danger btn-sm remove-session-btn" data-id="${this.escapeHtml(session.id)}">Quitar línea</button>
                     </div>
-                    <div class="line-users-assigned">${assignedHtml}</div>
-                    ${addRow}
+                    <div class="line-card-config">
+                        <code class="line-card-code">${this.escapeHtml(session.openwaSessionId || '')}</code>
+                        <div class="line-card-sender">
+                            <span class="line-card-sender-label">Remitente</span>
+                            <input type="text" class="session-sender-input form-select" data-id="${this.escapeHtml(session.id)}" value="${this.escapeHtml(session.senderName || session.label || '')}" placeholder="Nombre en WhatsApp">
+                            <button type="button" class="btn btn-secondary btn-sm save-sender-btn" data-id="${this.escapeHtml(session.id)}">Guardar</button>
+                            <button type="button" class="btn btn-secondary btn-sm sync-sender-btn" data-id="${this.escapeHtml(session.id)}" title="Obtener nombre desde WhatsApp">↻ WhatsApp</button>
+                        </div>
+                    </div>
+                    <div class="line-card-users">
+                        <p class="line-card-users-label">Usuarios de esta línea</p>
+                        <div class="line-users-assigned">${assignedHtml}</div>
+                        ${addRow}
+                    </div>
                 </div>`;
             })
             .join('');
 
+        if (!isSuper) return;
+
+        this.lineUsersList.querySelectorAll('.remove-session-btn').forEach((btn) => {
+            btn.addEventListener('click', () => this.removeSession(btn.dataset.id));
+        });
+        this.lineUsersList.querySelectorAll('.save-sender-btn').forEach((btn) => {
+            btn.addEventListener('click', () => this.saveSessionSenderName(btn.dataset.id));
+        });
+        this.lineUsersList.querySelectorAll('.sync-sender-btn').forEach((btn) => {
+            btn.addEventListener('click', () => this.syncSessionSenderName(btn.dataset.id));
+        });
         this.lineUsersList.querySelectorAll('.line-user-access').forEach((select) => {
             select.addEventListener('change', () => {
                 this.setUserLineAccess(select.dataset.userId, select.dataset.sessionId, select.value);
@@ -2785,7 +2948,7 @@ class CVAnalyzer {
 
             if (this.sessionLabelInput) this.sessionLabelInput.value = '';
             await this.loadSessions();
-            this.showStatus(`Sesión "${label}" guardada`, 'success');
+            this.showStatus(`Línea "${label}" guardada`, 'success');
         } catch (error) {
             this.showStatus(`Error: ${error.message}`, 'error');
         }
@@ -2806,9 +2969,8 @@ class CVAnalyzer {
     }
 
     async saveSessionSenderName(sessionId) {
-        const input = this.sessionsList
-            ? this.sessionsList.querySelector(`.session-sender-input[data-id="${sessionId}"]`)
-            : null;
+        const root = this.lineUsersList || document;
+        const input = root.querySelector(`.session-sender-input[data-id="${sessionId}"]`);
         const senderName = input ? input.value.trim() : '';
         if (!senderName) {
             this.showStatus('Escribe un nombre de remitente', 'error');
@@ -2861,7 +3023,7 @@ class CVAnalyzer {
 
     async removeSession(sessionId) {
         const label = this.getSessionLabel(sessionId);
-        if (!confirm(`¿Quitar la sesión "${label}" de la configuración?`)) return;
+        if (!confirm(`¿Quitar la línea "${label}" de la configuración?`)) return;
 
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -3206,6 +3368,8 @@ class CVAnalyzer {
         });
 
         this.resultsSection.style.display = 'block';
+        this.refreshOpenWAConnectionStatuses({ silent: true, force: true });
+        this.startConnectionStatusPolling();
     }
 
     initAgendarModal() {
@@ -5187,6 +5351,7 @@ class CVAnalyzer {
                 this.showStatus(`Error: ${result.error || result.message}`, 'error');
             }
 
+            await this.refreshOpenWAConnectionStatuses({ silent: true, force: true });
         } catch (error) {
             console.error('Error opening WhatsApp:', error);
             this.showStatus(`Error de conexión: ${error.message}`, 'error');

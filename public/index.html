@@ -44,51 +44,45 @@
                 <p id="panelProfileStatus" class="users-form-status" style="display: none;"></p>
             </section>
 
-            <section class="users-panel" id="usersPanel" style="display: none; margin-top: 24px; text-align: left;">
-                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Líneas y usuarios</h2>
-                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                    Cada línea (sesión WhatsApp) y quién la maneja.
+            <section class="lines-panel" id="linesPanel" style="margin-top: 24px; text-align: left;">
+                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Líneas</h2>
+                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;" id="linesPanelIntro">
+                    Cada línea de WhatsApp: configuración OpenWA y quién la maneja.
                     <strong>Controlar</strong> = enviar/responder; <strong>Solo ver</strong> = consulta.
                 </p>
                 <div id="lineUsersList" class="line-users-list"></div>
-
-                <h3 style="font-size: 1rem; margin: 24px 0 8px;">Cuentas</h3>
-                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                    Crear, editar correo/contraseña o eliminar usuarios. La asignación a líneas se hace arriba.
-                </p>
-                <div id="usersList" class="users-list"></div>
-                <form id="createUserForm" class="users-create-form">
-                    <h3 style="font-size: 0.95rem; margin: 16px 0 8px;">Crear usuario</h3>
-                    <div class="users-create-row">
-                        <input type="text" id="newUserUsername" class="form-select" placeholder="Usuario" required minlength="3" autocomplete="off">
-                        <input type="password" id="newUserPassword" class="form-select" placeholder="Contraseña" required minlength="6" autocomplete="new-password">
-                    </div>
-                    <div class="users-create-row" style="margin-top: 8px;">
-                        <input type="email" id="newUserGerenteEmail" class="form-select" placeholder="Correo gerente en Panel (opcional)" autocomplete="off">
-                    </div>
-                    <button type="submit" class="btn btn-primary" style="margin-top: 10px;">Crear usuario</button>
-                    <p id="usersFormStatus" class="users-form-status"></p>
-                </form>
-            </section>
-
-            <section class="sessions-panel" id="sessionsPanel" style="margin-top: 24px; text-align: left;">
-                <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Sesiones WhatsApp (OpenWA)</h2>
-                <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                    Configura aquí las sesiones. Se guardan en el servidor y no necesitas editar el .env cada vez que cambien.
-                </p>
-                <div id="sessionsList" class="sessions-list"></div>
-                <div class="sessions-add-form" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px;">
+                <div class="sessions-add-form" id="sessionsAddForm" style="display: none; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px;">
                     <select id="openwaSessionPicker" class="form-select" style="min-width: 220px; padding: 8px;">
                         <option value="">— Cargar sesiones de OpenWA —</option>
                     </select>
-                    <input type="text" id="sessionLabelInput" placeholder="Etiqueta de sesión (opcional)" class="form-select" style="padding: 8px; min-width: 160px;">
-                    <button type="button" id="addSessionBtn" class="btn btn-secondary">Agregar sesión</button>
+                    <input type="text" id="sessionLabelInput" placeholder="Etiqueta de línea (opcional)" class="form-select" style="padding: 8px; min-width: 160px;">
+                    <button type="button" id="addSessionBtn" class="btn btn-secondary">Agregar línea</button>
                     <button type="button" id="importConnectedBtn" class="btn btn-secondary">Importar conectadas</button>
                     <button type="button" id="refreshOpenwaListBtn" class="btn btn-secondary" title="Actualizar lista de OpenWA">↻</button>
                 </div>
                 <p id="sessionsEmptyHint" style="font-size: 12px; color: #b45309; margin-top: 10px; display: none;">
-                    No hay sesiones configuradas. Agrega al menos una antes de enviar mensajes.
+                    No hay líneas configuradas. Agrega al menos una antes de enviar mensajes.
                 </p>
+
+                <div id="accountsSection" style="display: none;">
+                    <h3 style="font-size: 1rem; margin: 24px 0 8px;">Cuentas</h3>
+                    <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
+                        Crear, editar correo/contraseña o eliminar usuarios. La asignación a líneas se hace arriba.
+                    </p>
+                    <div id="usersList" class="users-list"></div>
+                    <form id="createUserForm" class="users-create-form">
+                        <h3 style="font-size: 0.95rem; margin: 16px 0 8px;">Crear usuario</h3>
+                        <div class="users-create-row">
+                            <input type="text" id="newUserUsername" class="form-select" placeholder="Usuario" required minlength="3" autocomplete="off">
+                            <input type="password" id="newUserPassword" class="form-select" placeholder="Contraseña" required minlength="6" autocomplete="new-password">
+                        </div>
+                        <div class="users-create-row" style="margin-top: 8px;">
+                            <input type="email" id="newUserGerenteEmail" class="form-select" placeholder="Correo gerente en Panel (opcional)" autocomplete="off">
+                        </div>
+                        <button type="submit" class="btn btn-primary" style="margin-top: 10px;">Crear usuario</button>
+                        <p id="usersFormStatus" class="users-form-status"></p>
+                    </form>
+                </div>
             </section>
 
             <section class="agenda-pending-panel" id="agendaPendingPanel" style="display: none;">
@@ -362,6 +356,7 @@
             <div class="sending-options" style="margin-bottom: 15px; text-align: center;">
                 <p style="font-weight: 600; color: #0369a1; margin-bottom: 10px;">Líneas para este envío:</p>
                 <div id="sessionCheckboxes" class="session-checkboxes"></div>
+                <p id="sessionConnectionHint" class="session-connection-hint"></p>
                 <div class="session-weight-toolbar" id="sessionWeightToolbar">
                     <button type="button" id="toggleWeightAdjustBtn" class="btn btn-secondary btn-sm">
                         Ajustar reparto
@@ -373,9 +368,9 @@
                 </div>
                 <p id="sessionWeightPreview" class="session-weight-preview"></p>
                 <p style="font-size: 12px; color: #64748b; margin-top: 8px;">
-                    Marca las líneas que participarán. Con varias, el reparto es equitativo por defecto;
-                    usa “Ajustar reparto” solo si quieres cantidades distintas. Cada línea arranca a la vez
-                    y luego espera su propio tiempo aleatorio entre mensajes.
+                    Solo las líneas <strong>conectadas</strong> se pueden marcar. El estado se actualiza al ver resultados
+                    y cada poco automáticamente. Con varias, el reparto es equitativo por defecto;
+                    usa “Ajustar reparto” solo si quieres cantidades distintas.
                 </p>
             </div>
 

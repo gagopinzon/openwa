@@ -1726,6 +1726,61 @@ app.get('/api/sessions', (req, res) => {
   }
 });
 
+/** Estado conectada/desconectada en OpenWA para las líneas visibles del usuario. */
+app.get('/api/sessions/connection-status', async (req, res) => {
+  try {
+    const sessions = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
+    if (TEST_MODE) {
+      const statuses = {};
+      sessions.forEach((s) => {
+        statuses[s.id] = {
+          connected: true,
+          status: 'test',
+          openwaSessionId: s.openwaSessionId
+        };
+      });
+      return res.json({ success: true, statuses, checkedAt: new Date().toISOString() });
+    }
+
+    let remoteById = new Map();
+    try {
+      const remote = await listOpenWASessions({ limit: 100 });
+      remoteById = new Map(
+        remote.map((row) => [String(row.id).toLowerCase(), row])
+      );
+    } catch (err) {
+      console.warn('[sessions/connection-status] listOpenWASessions falló:', err.message);
+    }
+
+    const statuses = {};
+    for (const s of sessions) {
+      const key = String(s.openwaSessionId || '').toLowerCase();
+      const row = key ? remoteById.get(key) : null;
+      if (!row) {
+        statuses[s.id] = {
+          connected: false,
+          status: remoteById.size === 0 ? 'unreachable' : 'missing',
+          openwaSessionId: s.openwaSessionId
+        };
+      } else {
+        statuses[s.id] = {
+          connected: isConnectedStatus(row.status),
+          status: row.status || 'unknown',
+          openwaSessionId: s.openwaSessionId
+        };
+      }
+    }
+
+    res.json({
+      success: true,
+      statuses,
+      checkedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/sessions', requireSuper, async (req, res) => {
   try {
     const openwaSessionId = String(req.body.openwaSessionId || '').trim();
