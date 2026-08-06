@@ -1475,7 +1475,40 @@ footer p {
     font-weight: 600;
     font-size: 13px;
     color: #0f172a;
+    margin-bottom: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.conversations-chat-item .chat-name-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     margin-bottom: 4px;
+}
+
+.conversations-chat-item .chat-direction {
+    flex: 0 0 auto;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    padding: 2px 7px;
+    line-height: 1.2;
+}
+
+.conversations-chat-item .chat-direction.from-me {
+    color: #166534;
+    background: #dcfce7;
+}
+
+.conversations-chat-item .chat-direction.from-them {
+    color: #9a3412;
+    background: #ffedd5;
 }
 
 .conversations-chat-item .chat-session {

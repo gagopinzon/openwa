@@ -3060,12 +3060,14 @@ app.post('/api/conversations/previews', async (req, res) => {
         const messages = await getChatHistory(session.openwaSessionId, item.chatId, {
           limit: 20
         });
-        const previewLines = buildChatPreviewLines(messages, lines);
+        const built = buildChatPreviewLines(messages, lines);
+        const previewLines = built.previewLines || [];
         return {
           sessionId: session.id,
           chatId: item.chatId,
           key: `${session.id}::${item.chatId}`,
           previewLines,
+          lastFromMe: built.lastFromMe,
           lastMessage: previewLines.length
             ? previewLines[previewLines.length - 1]
             : ''

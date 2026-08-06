@@ -477,15 +477,17 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
 }
 
 /**
- * Últimas N líneas de texto de un historial (cronológico).
+ * Últimas N líneas de texto de un historial (cronológico) + dirección del último.
  * @param {Array} messages
  * @param {number} [maxLines=4]
- * @returns {string[]}
+ * @returns {{ previewLines: string[], lastFromMe: boolean|null }}
  */
 function buildChatPreviewLines(messages, maxLines = 4) {
   const limit = Math.min(Math.max(parseInt(maxLines, 10) || 4, 1), 8);
   const list = Array.isArray(messages) ? [...messages] : [];
   list.sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+  const withBody = list.filter((m) => String((m && m.body) || '').trim());
+  const lastMsg = withBody.length ? withBody[withBody.length - 1] : null;
   const lines = [];
   for (let i = list.length - 1; i >= 0 && lines.length < limit; i--) {
     const body = String((list[i] && list[i].body) || '')
@@ -494,7 +496,10 @@ function buildChatPreviewLines(messages, maxLines = 4) {
     if (!body) continue;
     lines.unshift(body.length > 140 ? `${body.slice(0, 140)}…` : body);
   }
-  return lines;
+  return {
+    previewLines: lines,
+    lastFromMe: lastMsg ? Boolean(lastMsg.fromMe) : null
+  };
 }
 
 const INCOMING_WEBHOOK_FILTERS = {

@@ -1143,7 +1143,7 @@ class CVAnalyzer {
             if (previewLine) {
                 const lines = Array.isArray(chat.previewLines) ? [...chat.previewLines] : [];
                 lines.push(previewLine.length > 140 ? `${previewLine.slice(0, 140)}…` : previewLine);
-                this.rememberConversationPreview(chat, lines.slice(-4));
+                this.rememberConversationPreview(chat, lines.slice(-4), false);
             }
             this.conversationsChats.sort(
                 (a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)
@@ -1298,6 +1298,12 @@ class CVAnalyzer {
                 ? `<span class="unread">${chat.unreadCount}</span>`
                 : '';
             const sessionLabel = chat.sessionLabel || chat.sessionId || '';
+            const directionBadge =
+                chat.lastFromMe === true
+                    ? '<span class="chat-direction from-me">Tú</span>'
+                    : chat.lastFromMe === false
+                      ? '<span class="chat-direction from-them">Ellos</span>'
+                      : '';
             const previewLines = Array.isArray(chat.previewLines) && chat.previewLines.length
                 ? chat.previewLines
                 : String(chat.lastMessage || '')
@@ -1310,7 +1316,10 @@ class CVAnalyzer {
                 : '';
             btn.innerHTML = `
                 <span class="chat-session">${this.escapeHtml(sessionLabel)}</span>
-                <div class="chat-name">${this.escapeHtml(chat.name || chat.id)}</div>
+                <div class="chat-name-row">
+                    <div class="chat-name">${this.escapeHtml(chat.name || chat.id)}</div>
+                    ${directionBadge}
+                </div>
                 <div class="chat-preview">${previewHtml}</div>
                 <div class="chat-meta">
                     <span>${this.escapeHtml(this.formatConversationTime(chat.timestamp))}</span>
@@ -1327,15 +1336,19 @@ class CVAnalyzer {
         return chat.key || `${chat.sessionId}::${chat.id}`;
     }
 
-    rememberConversationPreview(chat, previewLines) {
+    rememberConversationPreview(chat, previewLines, lastFromMe = undefined) {
         if (!chat || !Array.isArray(previewLines) || !previewLines.length) return;
         if (!this._conversationPreviewByKey) this._conversationPreviewByKey = new Map();
         const key = this.conversationChatKey(chat);
+        const fromMe =
+            lastFromMe === undefined ? chat.lastFromMe : lastFromMe;
         this._conversationPreviewByKey.set(key, {
             previewLines: [...previewLines],
-            lastMessage: previewLines[previewLines.length - 1] || chat.lastMessage || ''
+            lastMessage: previewLines[previewLines.length - 1] || chat.lastMessage || '',
+            lastFromMe: fromMe === true || fromMe === false ? fromMe : null
         });
         chat.previewLines = [...previewLines];
+        if (fromMe === true || fromMe === false) chat.lastFromMe = fromMe;
     }
 
     mergeConversationChatsPreservingPreviews(incoming) {
@@ -1347,7 +1360,11 @@ class CVAnalyzer {
             if (Array.isArray(chat.previewLines) && chat.previewLines.length) {
                 this._conversationPreviewByKey.set(key, {
                     previewLines: [...chat.previewLines],
-                    lastMessage: chat.lastMessage || chat.previewLines[chat.previewLines.length - 1] || ''
+                    lastMessage: chat.lastMessage || chat.previewLines[chat.previewLines.length - 1] || '',
+                    lastFromMe:
+                        chat.lastFromMe === true || chat.lastFromMe === false
+                            ? chat.lastFromMe
+                            : null
                 });
             }
         }
@@ -1380,7 +1397,11 @@ class CVAnalyzer {
                 ...chat,
                 key,
                 previewLines: [...lines],
-                lastMessage: incomingLast || cachedLast || chat.lastMessage
+                lastMessage: incomingLast || cachedLast || chat.lastMessage,
+                lastFromMe:
+                    cached.lastFromMe === true || cached.lastFromMe === false
+                        ? cached.lastFromMe
+                        : chat.lastFromMe
             };
         });
     }
@@ -1439,8 +1460,11 @@ class CVAnalyzer {
                     lines = [String(chat.lastMessage)];
                 }
                 if (!lines.length) continue;
-                this.rememberConversationPreview(chat, lines);
+                this.rememberConversationPreview(chat, lines, preview.lastFromMe);
                 if (preview.lastMessage) chat.lastMessage = preview.lastMessage;
+                if (preview.lastFromMe === true || preview.lastFromMe === false) {
+                    chat.lastFromMe = preview.lastFromMe;
+                }
                 changed = true;
             }
             if (changed) this.renderConversationsChatList();
@@ -1911,13 +1935,15 @@ class CVAnalyzer {
                 .slice(-4)
                 .map((line) => (line.length > 140 ? `${line.slice(0, 140)}…` : line));
             if (previewLines.length) {
+                const lastMsg = [...messages].reverse().find((m) => String((m && m.body) || '').trim());
+                const lastFromMe = lastMsg ? Boolean(lastMsg.fromMe) : null;
                 const chat = (this.conversationsChats || []).find(
                     (c) =>
                         this.sameConversationChatId(c.id, active.chatId) &&
                         String(c.sessionId) === String(active.sessionId)
                 );
                 if (chat) {
-                    this.rememberConversationPreview(chat, previewLines);
+                    this.rememberConversationPreview(chat, previewLines, lastFromMe);
                     if (!silent) this.renderConversationsChatList();
                 }
             }
@@ -2033,6 +2059,12 @@ class CVAnalyzer {
                 (c) => (c.key || `${c.sessionId}::${c.id}`) === this.activeConversation.key
             );
             if (chat) {
+                const line = String(text).replace(/\s+/g, ' ').trim();
+                const lines = Array.isArray(chat.previewLines) ? [...chat.previewLines] : [];
+                if (line) {
+                    lines.push(line.length > 140 ? `${line.slice(0, 140)}…` : line);
+                }
+                this.rememberConversationPreview(chat, lines.slice(-4), true);
                 chat.lastMessage = text;
                 chat.timestamp = Math.floor(Date.now() / 1000);
                 this.conversationsChats.sort(
