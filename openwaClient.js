@@ -476,6 +476,27 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
   return setCached(cacheKey, messages);
 }
 
+/**
+ * Últimas N líneas de texto de un historial (cronológico).
+ * @param {Array} messages
+ * @param {number} [maxLines=4]
+ * @returns {string[]}
+ */
+function buildChatPreviewLines(messages, maxLines = 4) {
+  const limit = Math.min(Math.max(parseInt(maxLines, 10) || 4, 1), 8);
+  const list = Array.isArray(messages) ? [...messages] : [];
+  list.sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+  const lines = [];
+  for (let i = list.length - 1; i >= 0 && lines.length < limit; i--) {
+    const body = String((list[i] && list[i].body) || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!body) continue;
+    lines.unshift(body.length > 140 ? `${body.slice(0, 140)}…` : body);
+  }
+  return lines;
+}
+
 const INCOMING_WEBHOOK_FILTERS = {
   conditions: [
     // OpenWA valida operators: is | isNot | contains | equals
@@ -592,6 +613,7 @@ module.exports = {
   unblockContact,
   listChats,
   getChatHistory,
+  buildChatPreviewLines,
   searchMessages,
   invalidateOpenWACache,
   isConnectedStatus,

@@ -18,6 +18,7 @@ const {
   formatPhoneToChatId,
   listChats,
   getChatHistory,
+  buildChatPreviewLines,
   searchMessages,
   invalidateOpenWACache,
   sendTextMessage,
@@ -49,6 +50,7 @@ const {
   getRequestUser,
   filterSessionsForUser,
   canControlSession,
+  canViewSession,
   requireSuper,
   forbidUnlessControlSessions,
   forbidUnlessViewSession,
@@ -3013,6 +3015,75 @@ app.get('/api/conversations', async (req, res) => {
     });
   } catch (error) {
     console.error('[conversations] error:', error.message);
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Enriquecer previews: últimas N líneas de historial por chat.
+ * Body: { items: [{ sessionId, chatId }], lines?: 4 }
+ */
+app.post('/api/conversations/previews', async (req, res) => {
+  try {
+    const lines = Math.min(Math.max(parseInt(req.body.lines, 10) || 4, 1), 6);
+    const rawItems = Array.isArray(req.body.items) ? req.body.items : [];
+    const items = rawItems.slice(0, 80).map((row) => ({
+      sessionId: String((row && row.sessionId) || '').trim(),
+      chatId: String((row && row.chatId) || '').trim()
+    })).filter((row) => row.sessionId && row.chatId);
+
+    if (!items.length) {
+      return res.json({ success: true, previews: [] });
+    }
+
+    const previews = await mapWithConcurrency(items, 4, async (item) => {
+      const session = resolveConfiguredSession(item.sessionId);
+      if (!session) {
+        return {
+          sessionId: item.sessionId,
+          chatId: item.chatId,
+          key: `${item.sessionId}::${item.chatId}`,
+          previewLines: [],
+          error: 'sesión no encontrada'
+        };
+      }
+      if (!canViewSession(req.user, session.id)) {
+        return {
+          sessionId: session.id,
+          chatId: item.chatId,
+          key: `${session.id}::${item.chatId}`,
+          previewLines: [],
+          error: 'sin acceso'
+        };
+      }
+      try {
+        const messages = await getChatHistory(session.openwaSessionId, item.chatId, {
+          limit: Math.max(lines, 8)
+        });
+        const previewLines = buildChatPreviewLines(messages, lines);
+        return {
+          sessionId: session.id,
+          chatId: item.chatId,
+          key: `${session.id}::${item.chatId}`,
+          previewLines,
+          lastMessage: previewLines.length
+            ? previewLines[previewLines.length - 1]
+            : ''
+        };
+      } catch (err) {
+        return {
+          sessionId: session.id,
+          chatId: item.chatId,
+          key: `${session.id}::${item.chatId}`,
+          previewLines: [],
+          error: err.message
+        };
+      }
+    });
+
+    res.json({ success: true, lines, previews });
+  } catch (error) {
+    console.error('[conversations] previews error:', error.message);
     res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
   }
 });

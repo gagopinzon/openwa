@@ -1498,8 +1498,14 @@ footer p {
     margin-top: 2px;
     max-height: calc(1.4em * 4);
     overflow: hidden;
-    white-space: pre-line;
+    white-space: normal;
     word-break: break-word;
+}
+
+.conversations-chat-item .chat-preview br {
+    display: block;
+    content: '';
+    margin-top: 0;
 }
 
 .conversations-chat-item .chat-meta {

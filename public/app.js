@@ -1134,6 +1134,14 @@ class CVAnalyzer {
                 this._conversationsLocallyRead.add(chatKey);
                 this.markConversationRead(chat);
             }
+            const previewLine = String(msg.body || '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (previewLine) {
+                const lines = Array.isArray(chat.previewLines) ? [...chat.previewLines] : [];
+                lines.push(previewLine.length > 140 ? `${previewLine.slice(0, 140)}…` : previewLine);
+                chat.previewLines = lines.slice(-4);
+            }
             this.conversationsChats.sort(
                 (a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)
             );
@@ -1210,6 +1218,7 @@ class CVAnalyzer {
             this.startConversationsPolling();
             this.applyLocallyReadConversations();
             this.renderConversationsChatList();
+            this.enrichConversationPreviews({ silent });
 
             const errCount = (data.errors || []).length;
             this.updateConversationsStatus({
@@ -1284,14 +1293,20 @@ class CVAnalyzer {
                 ? `<span class="unread">${chat.unreadCount}</span>`
                 : '';
             const sessionLabel = chat.sessionLabel || chat.sessionId || '';
-            const previewRaw = String(chat.lastMessage || '')
-                .replace(/\r\n/g, '\n')
-                .replace(/\n{3,}/g, '\n\n')
-                .trim();
+            const previewLines = Array.isArray(chat.previewLines) && chat.previewLines.length
+                ? chat.previewLines
+                : String(chat.lastMessage || '')
+                    .split(/\n+/)
+                    .map((l) => l.trim())
+                    .filter(Boolean)
+                    .slice(-4);
+            const previewHtml = previewLines.length
+                ? previewLines.map((line) => this.escapeHtml(line)).join('<br>')
+                : '';
             btn.innerHTML = `
                 <span class="chat-session">${this.escapeHtml(sessionLabel)}</span>
                 <div class="chat-name">${this.escapeHtml(chat.name || chat.id)}</div>
-                <div class="chat-preview">${this.escapeHtml(previewRaw)}</div>
+                <div class="chat-preview">${previewHtml}</div>
                 <div class="chat-meta">
                     <span>${this.escapeHtml(this.formatConversationTime(chat.timestamp))}</span>
                     ${unread}
@@ -1300,6 +1315,55 @@ class CVAnalyzer {
             btn.addEventListener('click', () => this.openConversationChat(chat));
             this.conversationsChatList.appendChild(btn);
         });
+    }
+
+    async enrichConversationPreviews(options = {}) {
+        const silent = Boolean(options.silent);
+        const chats = this.getVisibleConversationsChats().slice(0, 60);
+        if (!chats.length) return;
+
+        const items = chats.map((c) => ({
+            sessionId: c.sessionId,
+            chatId: c.id
+        }));
+
+        try {
+            const response = await fetch('/api/conversations/previews', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ items, lines: 4 })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) {
+                if (!silent) {
+                    console.warn(
+                        '[conversations] previews:',
+                        data.error || `HTTP ${response.status}`
+                    );
+                }
+                return;
+            }
+
+            const byKey = new Map(
+                (data.previews || []).map((p) => [p.key || `${p.sessionId}::${p.chatId}`, p])
+            );
+            let changed = false;
+            for (const chat of this.conversationsChats) {
+                const key = chat.key || `${chat.sessionId}::${chat.id}`;
+                const preview = byKey.get(key);
+                if (!preview || !Array.isArray(preview.previewLines) || !preview.previewLines.length) {
+                    continue;
+                }
+                chat.previewLines = preview.previewLines;
+                if (preview.lastMessage) chat.lastMessage = preview.lastMessage;
+                changed = true;
+            }
+            if (changed) this.renderConversationsChatList();
+        } catch (error) {
+            if (!silent) {
+                console.warn('[conversations] previews error:', error.message || error);
+            }
+        }
     }
 
     async openConversationChat(chat) {
