@@ -1223,7 +1223,8 @@ class CVAnalyzer {
             this.startConversationsPolling();
             this.applyLocallyReadConversations();
             this.renderConversationsChatList();
-            this.enrichConversationPreviews({ silent, onlyMissing: silent });
+            // Solo pedir a OpenWA los que aún no traen preview (el servidor ya manda los guardados en disco).
+            this.enrichConversationPreviews({ silent: true, onlyMissing: true });
 
             const errCount = (data.errors || []).length;
             this.updateConversationsStatus({
@@ -1349,6 +1350,27 @@ class CVAnalyzer {
         });
         chat.previewLines = [...previewLines];
         if (fromMe === true || fromMe === false) chat.lastFromMe = fromMe;
+
+        // Persistir en disco (best-effort) para que al recargar no parpadee.
+        if (chat.sessionId && chat.id) {
+            fetch('/api/conversations/previews', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    lines: 4,
+                    items: [
+                        {
+                            sessionId: chat.sessionId,
+                            chatId: chat.id,
+                            lastMessage: chat.lastMessage || '',
+                            sourceLastMessage: chat.lastMessage || '',
+                            lastFromMe: fromMe,
+                            previewLines: [...previewLines]
+                        }
+                    ]
+                })
+            }).catch(() => {});
+        }
     }
 
     mergeConversationChatsPreservingPreviews(incoming) {
@@ -1425,7 +1447,8 @@ class CVAnalyzer {
 
         const items = chats.map((c) => ({
             sessionId: c.sessionId,
-            chatId: c.id
+            chatId: c.id,
+            lastMessage: c.lastMessage || ''
         }));
 
         try {

@@ -41,6 +41,7 @@ const agendaAvailability = require('./agendaAvailability');
 const agendaPendingStore = require('./agendaPendingStore');
 const agendaOfferStore = require('./agendaOfferStore');
 const sendQueueStore = require('./sendQueueStore');
+const conversationPreviewStore = require('./conversationPreviewStore');
 const {
   isAuthEnabled,
   authMiddleware,
@@ -2841,6 +2842,111 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
+let conversationPreviewEnrichPromise = null;
+
+/**
+ * Carga previews de historial y los persiste en disco.
+ * @param {Array<{ sessionId: string, chatId: string, key?: string, lastMessage?: string }>} items
+ * @param {{ lines?: number, user?: object }} [opts]
+ */
+async function enrichAndPersistConversationPreviews(items, opts = {}) {
+  const lines = Math.min(Math.max(parseInt(opts.lines, 10) || 4, 1), 6);
+  const list = (Array.isArray(items) ? items : []).slice(0, 80);
+  if (!list.length) return [];
+
+  const previews = await mapWithConcurrency(list, 4, async (item) => {
+    const session = resolveConfiguredSession(item.sessionId);
+    const key =
+      item.key ||
+      conversationPreviewStore.chatKey(item.sessionId, item.chatId);
+
+    // Si el cliente ya manda líneas, solo persistir (sin pegarle a OpenWA).
+    if (Array.isArray(item.previewLines) && item.previewLines.length) {
+      const previewLines = item.previewLines
+        .map((l) => String(l || '').trim())
+        .filter(Boolean)
+        .slice(-8);
+      return {
+        key: session
+          ? conversationPreviewStore.chatKey(session.id, item.chatId)
+          : key,
+        sessionId: session ? session.id : item.sessionId,
+        chatId: item.chatId,
+        previewLines,
+        lastFromMe:
+          item.lastFromMe === true || item.lastFromMe === false
+            ? item.lastFromMe
+            : null,
+        lastMessage:
+          item.lastMessage || previewLines[previewLines.length - 1] || '',
+        sourceLastMessage:
+          item.sourceLastMessage || item.lastMessage || previewLines[previewLines.length - 1] || ''
+      };
+    }
+
+    if (!session) {
+      return { key, sessionId: item.sessionId, chatId: item.chatId, previewLines: [] };
+    }
+    if (opts.user && !canViewSession(opts.user, session.id)) {
+      return { key, sessionId: session.id, chatId: item.chatId, previewLines: [] };
+    }
+    try {
+      const messages = await getChatHistory(session.openwaSessionId, item.chatId, {
+        limit: 20
+      });
+      const built = buildChatPreviewLines(messages, lines);
+      const previewLines = built.previewLines || [];
+      return {
+        key: conversationPreviewStore.chatKey(session.id, item.chatId),
+        sessionId: session.id,
+        chatId: item.chatId,
+        previewLines,
+        lastFromMe: built.lastFromMe,
+        lastMessage: previewLines.length
+          ? previewLines[previewLines.length - 1]
+          : item.lastMessage || '',
+        sourceLastMessage: item.lastMessage || ''
+      };
+    } catch (err) {
+      return {
+        key,
+        sessionId: session.id,
+        chatId: item.chatId,
+        previewLines: [],
+        error: err.message
+      };
+    }
+  });
+
+  conversationPreviewStore.upsertMany(
+    previews.filter((p) => p.previewLines && p.previewLines.length)
+  );
+  return previews;
+}
+
+function scheduleConversationPreviewEnrichment(chats, user) {
+  const needing = conversationPreviewStore.listNeedingEnrichment(chats, 80);
+  if (!needing.length) return;
+  if (conversationPreviewEnrichPromise) return;
+
+  conversationPreviewEnrichPromise = enrichAndPersistConversationPreviews(needing, {
+    lines: 4,
+    user
+  })
+    .then((rows) => {
+      const ok = rows.filter((r) => r.previewLines && r.previewLines.length).length;
+      if (ok) {
+        console.log(`[conversations] previews persistidos: ${ok}/${needing.length}`);
+      }
+    })
+    .catch((err) => {
+      console.warn('[conversations] enrich background:', err.message);
+    })
+    .finally(() => {
+      conversationPreviewEnrichPromise = null;
+    });
+}
+
 app.get('/api/conversations/search', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
@@ -3002,6 +3108,9 @@ app.get('/api/conversations', async (req, res) => {
       `[conversations] OK ${chats.length} chats (${sessions.length} sesiones, ${errors.length} errores)`
     );
 
+    const chatsWithPreviews = conversationPreviewStore.applyToChats(chats);
+    scheduleConversationPreviewEnrichment(chatsWithPreviews, req.user);
+
     res.json({
       success: true,
       all: wantAll,
@@ -3011,7 +3120,7 @@ app.get('/api/conversations', async (req, res) => {
         openwaSessionId: s.openwaSessionId
       })),
       errors,
-      chats
+      chats: chatsWithPreviews
     });
   } catch (error) {
     console.error('[conversations] error:', error.message);
@@ -3027,60 +3136,28 @@ app.post('/api/conversations/previews', async (req, res) => {
   try {
     const lines = Math.min(Math.max(parseInt(req.body.lines, 10) || 4, 1), 6);
     const rawItems = Array.isArray(req.body.items) ? req.body.items : [];
-    const items = rawItems.slice(0, 80).map((row) => ({
-      sessionId: String((row && row.sessionId) || '').trim(),
-      chatId: String((row && row.chatId) || '').trim()
-    })).filter((row) => row.sessionId && row.chatId);
+    const items = rawItems
+      .slice(0, 80)
+      .map((row) => ({
+        sessionId: String((row && row.sessionId) || '').trim(),
+        chatId: String((row && row.chatId) || '').trim(),
+        lastMessage: String((row && row.lastMessage) || ''),
+        sourceLastMessage: String((row && row.sourceLastMessage) || ''),
+        lastFromMe:
+          row && (row.lastFromMe === true || row.lastFromMe === false)
+            ? row.lastFromMe
+            : undefined,
+        previewLines: Array.isArray(row && row.previewLines) ? row.previewLines : undefined
+      }))
+      .filter((row) => row.sessionId && row.chatId);
 
     if (!items.length) {
       return res.json({ success: true, previews: [] });
     }
 
-    const previews = await mapWithConcurrency(items, 4, async (item) => {
-      const session = resolveConfiguredSession(item.sessionId);
-      if (!session) {
-        return {
-          sessionId: item.sessionId,
-          chatId: item.chatId,
-          key: `${item.sessionId}::${item.chatId}`,
-          previewLines: [],
-          error: 'sesión no encontrada'
-        };
-      }
-      if (!canViewSession(req.user, session.id)) {
-        return {
-          sessionId: session.id,
-          chatId: item.chatId,
-          key: `${session.id}::${item.chatId}`,
-          previewLines: [],
-          error: 'sin acceso'
-        };
-      }
-      try {
-        const messages = await getChatHistory(session.openwaSessionId, item.chatId, {
-          limit: 20
-        });
-        const built = buildChatPreviewLines(messages, lines);
-        const previewLines = built.previewLines || [];
-        return {
-          sessionId: session.id,
-          chatId: item.chatId,
-          key: `${session.id}::${item.chatId}`,
-          previewLines,
-          lastFromMe: built.lastFromMe,
-          lastMessage: previewLines.length
-            ? previewLines[previewLines.length - 1]
-            : ''
-        };
-      } catch (err) {
-        return {
-          sessionId: session.id,
-          chatId: item.chatId,
-          key: `${session.id}::${item.chatId}`,
-          previewLines: [],
-          error: err.message
-        };
-      }
+    const previews = await enrichAndPersistConversationPreviews(items, {
+      lines,
+      user: req.user
     });
 
     res.json({ success: true, lines, previews });
