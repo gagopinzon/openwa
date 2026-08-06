@@ -190,7 +190,7 @@ function isDisconnectError(error) {
   const status = error && error.status;
   if (status === 409 || status === 502 || status === 503) return true;
   const msg = String((error && error.message) || error || '');
-  return /not connected|disconnected|desconectad|session.*(closed|lost|not ready)|UNPAIRED|logged out|no está conectad|estado:.*(desconocido|close|conflict)/i.test(
+  return /not connected|disconnected|desconectad|session.*(closed|lost|not ready)|UNPAIRED|logged out|no está conectad|estado:.*(desconocido|close|conflict)|banned|bannead|restrict|blocked by whatsapp/i.test(
     msg
   );
 }
@@ -248,6 +248,24 @@ async function sendChatState(openwaSessionId, chatId, state) {
     { chatId: id, state: presence }
   );
   return { success: true, raw: data };
+}
+
+/**
+ * Marca un chat como leído (sendSeen) y limpia unreadCount en OpenWA.
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ */
+async function markChatRead(openwaSessionId, chatId) {
+  const id = String(chatId || '').trim();
+  if (!id) throw new Error('chatId es obligatorio');
+
+  const data = await openwaRequest(
+    'POST',
+    `/sessions/${openwaSessionId}/chats/read`,
+    { chatId: id }
+  );
+  invalidateOpenWACache({ openwaSessionId, chatId: id });
+  return { success: data.success !== false, raw: data };
 }
 
 /**
@@ -505,6 +523,59 @@ async function testWebhook(openwaSessionId, webhookId) {
   return openwaRequest('POST', `/sessions/${openwaSessionId}/webhooks/${webhookId}/test`);
 }
 
+/**
+ * Búsqueda global de mensajes en OpenWA (FTS).
+ * @param {{ q: string, sessionId?: string, chatId?: string, limit?: number, offset?: number }} params
+ * @returns {Promise<{ hits: Array, total: number, tookMs: number|null, provider: string|null, available: boolean }>}
+ */
+async function searchMessages(params = {}) {
+  const q = String(params.q || '').trim();
+  if (!q) {
+    return { hits: [], total: 0, tookMs: 0, provider: null, available: true };
+  }
+
+  const qs = new URLSearchParams();
+  qs.set('q', q);
+  if (params.sessionId) qs.set('sessionId', String(params.sessionId));
+  if (params.chatId) qs.set('chatId', String(params.chatId));
+  const limit = Math.min(Math.max(parseInt(params.limit, 10) || 30, 1), 100);
+  const offset = Math.max(parseInt(params.offset, 10) || 0, 0);
+  qs.set('limit', String(limit));
+  qs.set('offset', String(offset));
+
+  try {
+    const data = await openwaRequest('GET', `/search?${qs.toString()}`, undefined, {
+      timeout: 45000
+    });
+    const hits = Array.isArray(data.hits)
+      ? data.hits
+      : Array.isArray(data.data)
+        ? data.data
+        : Array.isArray(data)
+          ? data
+          : [];
+    return {
+      hits,
+      total: Number(data.total) || hits.length,
+      tookMs: data.tookMs != null ? Number(data.tookMs) : null,
+      provider: data.provider != null ? String(data.provider) : null,
+      available: true
+    };
+  } catch (error) {
+    if (error && (error.status === 501 || error.status === 404)) {
+      return {
+        hits: [],
+        total: 0,
+        tookMs: null,
+        provider: null,
+        available: false,
+        error: error.message
+      };
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   assertOpenWAConfigured,
   formatPhoneToChatId,
@@ -512,6 +583,7 @@ module.exports = {
   isDisconnectError,
   sendTextMessage,
   sendChatState,
+  markChatRead,
   editMessage,
   deleteMessage,
   deleteChat,
@@ -520,6 +592,7 @@ module.exports = {
   unblockContact,
   listChats,
   getChatHistory,
+  searchMessages,
   invalidateOpenWACache,
   isConnectedStatus,
   listOpenWASessions,

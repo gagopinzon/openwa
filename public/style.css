@@ -611,6 +611,26 @@ section h2 {
     font-size: 0.9rem;
 }
 
+.progress-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    justify-content: center;
+    align-items: baseline;
+}
+
+.progress-success {
+    text-align: center;
+    font-weight: 600;
+    color: #047857;
+    font-size: 0.95rem;
+}
+
+.progress-success strong {
+    font-size: 1.15rem;
+    color: #065f46;
+}
+
 .current-message {
     background: #f8faff;
     padding: 20px;
@@ -1273,25 +1293,162 @@ footer p {
     color: #0f172a;
 }
 
-.conversations-layout {
-    display: grid;
-    grid-template-columns: minmax(220px, 320px) 1fr;
-    gap: 12px;
-    min-height: 420px;
+.conversations-search-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
 }
 
-@media (max-width: 800px) {
-    .conversations-layout {
-        grid-template-columns: 1fr;
-    }
+.conversations-search-input {
+    flex: 1 1 220px;
+    min-width: 180px;
+    padding: 9px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: inherit;
+    background: #fff;
+    color: #0f172a;
+}
+
+.conversations-search-input:focus {
+    outline: none;
+    border-color: #38bdf8;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+.conversations-search-status {
+    font-size: 12px;
+    color: #64748b;
+    white-space: nowrap;
+}
+
+.conversations-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
 }
 
 .conversations-chat-list {
     border: 1px solid #e2e8f0;
     border-radius: 10px;
     overflow-y: auto;
-    max-height: 480px;
+    flex: 1 1 auto;
+    min-height: 280px;
+    max-height: none;
     background: #f8fafc;
+}
+
+.conversations-search-hits {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #fff;
+    flex: 0 1 auto;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.conversations-search-hits-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: #64748b;
+    padding: 10px 12px 6px;
+}
+
+.conversations-search-hit {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    border-top: 1px solid #f1f5f9;
+    background: transparent;
+    padding: 10px 12px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.conversations-search-hit:hover {
+    background: #f8fafc;
+}
+
+.conversations-search-hit .hit-session {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    color: #0369a1;
+    background: #e0f2fe;
+    border-radius: 999px;
+    padding: 1px 7px;
+    margin-bottom: 4px;
+}
+
+.conversations-search-hit .hit-chat {
+    font-size: 13px;
+    font-weight: 600;
+    color: #0f172a;
+    margin-bottom: 2px;
+}
+
+.conversations-search-hit .hit-snippet {
+    font-size: 12px;
+    color: #475569;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.conversations-search-hit .hit-snippet mark {
+    background: #fef08a;
+    color: inherit;
+    padding: 0 1px;
+    border-radius: 2px;
+}
+
+.conversations-search-hit .hit-meta {
+    font-size: 11px;
+    color: #94a3b8;
+    margin-top: 4px;
+}
+
+.conversations-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    min-height: min(72vh, 760px);
+    height: min(72vh, 760px);
+    align-items: stretch;
+}
+
+@media (max-width: 900px) {
+    .conversations-layout {
+        grid-template-columns: 1fr;
+        height: auto;
+        min-height: 0;
+    }
+
+    .conversations-sidebar {
+        height: auto;
+    }
+
+    .conversations-chat-list {
+        max-height: 420px;
+        min-height: 220px;
+    }
+
+    .conversations-thread {
+        height: auto;
+        min-height: 420px;
+        max-height: 560px;
+    }
 }
 
 .conversations-chat-item {
@@ -1301,7 +1458,7 @@ footer p {
     border: none;
     border-bottom: 1px solid #e2e8f0;
     background: transparent;
-    padding: 12px 14px;
+    padding: 10px 12px;
     cursor: pointer;
     font-family: inherit;
 }
@@ -1337,9 +1494,12 @@ footer p {
 .conversations-chat-item .chat-preview {
     font-size: 12px;
     color: #64748b;
-    white-space: nowrap;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    line-height: 1.35;
 }
 
 .conversations-chat-item .chat-meta {
@@ -1364,8 +1524,9 @@ footer p {
     border-radius: 10px;
     display: flex;
     flex-direction: column;
-    min-height: 420px;
-    max-height: 520px;
+    min-height: 0;
+    height: 100%;
+    max-height: none;
     background: #fafafa;
 }
 

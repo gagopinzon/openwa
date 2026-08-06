@@ -18,8 +18,10 @@ const {
   formatPhoneToChatId,
   listChats,
   getChatHistory,
+  searchMessages,
   invalidateOpenWACache,
   sendTextMessage,
+  markChatRead,
   editMessage,
   deleteMessage,
   deleteChat,
@@ -208,10 +210,11 @@ let generationState = {
   completedAt: null
 };
 
-/** @type {{ inProgress: boolean, total: number, sessionIds: string[], startedAt: number|null, completedAt: number|null, error: string|null, message: string|null, results: Array|null, skippedAlreadyContacted: Array, testMode: boolean }} */
+/** @type {{ inProgress: boolean, total: number, successCount: number, sessionIds: string[], startedAt: number|null, completedAt: number|null, error: string|null, message: string|null, results: Array|null, skippedAlreadyContacted: Array, testMode: boolean }} */
 let lastSendJob = {
   inProgress: false,
   total: 0,
+  successCount: 0,
   sessionIds: [],
   startedAt: null,
   completedAt: null,
@@ -260,7 +263,9 @@ function buildSendProgressHandlers(controlId) {
         total: progressData.total,
         sessionCurrent: progressData.sessionCurrent,
         sessionTotal: progressData.sessionTotal,
-        success: progressData.success
+        success: progressData.success,
+        requeuedFrom: progressData.requeuedFrom,
+        requeuedTo: progressData.requeuedTo
       });
     }
   };
@@ -297,6 +302,7 @@ async function runWhatsAppSendJob({
 
   lastSendJob.inProgress = true;
   lastSendJob.total = finalCvsToSend.length;
+  lastSendJob.successCount = 0;
   lastSendJob.sessionIds = sessionIds;
   lastSendJob.startedAt = Date.now();
   lastSendJob.completedAt = null;
@@ -305,6 +311,37 @@ async function runWhatsAppSendJob({
   lastSendJob.results = null;
   lastSendJob.skippedAlreadyContacted = skippedAlreadyContacted;
   lastSendJob.testMode = testMode;
+
+  const trackMessageResult = (row) => {
+    if (row && row.success) {
+      lastSendJob.successCount = (lastSendJob.successCount || 0) + 1;
+      broadcastEvent('sendSuccess', {
+        successCount: lastSendJob.successCount,
+        total: lastSendJob.total,
+        nombre: row.nombre,
+        telefono: row.telefono,
+        sessionId: row.sessionId || null,
+        success: true
+      });
+    } else if (row) {
+      broadcastEvent('sendSuccess', {
+        successCount: lastSendJob.successCount || 0,
+        total: lastSendJob.total,
+        nombre: row.nombre,
+        telefono: row.telefono,
+        sessionId: row.sessionId || null,
+        success: false,
+        error: row.error || null
+      });
+    }
+    if (typeof mongoRecordHook === 'function') {
+      try {
+        mongoRecordHook(row);
+      } catch (err) {
+        console.warn('mongoRecordHook:', err.message);
+      }
+    }
+  };
 
   try {
     if (testMode) {
@@ -326,11 +363,18 @@ async function runWhatsAppSendJob({
           sessionTotal: progress.total,
           phase: 'sending'
         });
+        if (progress.result) {
+          trackMessageResult({
+            ...progress.result,
+            sessionId: sessionIds[0]
+          });
+        }
       });
 
       resetBulkControlState(controlId, sessionIds);
       lastSendJob.results = results;
-      lastSendJob.message = `Envío completado: ${results.filter((r) => r.success).length}/${results.length} mensajes enviados (modo prueba)`;
+      lastSendJob.successCount = results.filter((r) => r.success).length;
+      lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes enviados (modo prueba)`;
     } else {
       console.log(`📱 Envío paralelo con ${N} sesión(es): ${sessionIds.join(', ')}`);
 
@@ -386,7 +430,7 @@ async function runWhatsAppSendJob({
             2,
             onProgress,
             singleCheck,
-            mongoRecordHook,
+            trackMessageResult,
             onWaitProgress
           );
         } else {
@@ -396,7 +440,7 @@ async function runWhatsAppSendJob({
             contactsToSend,
             onProgress,
             checkControlsBySession,
-            mongoRecordHook,
+            trackMessageResult,
             onWaitProgressBySession,
             sessionWeights
           );
@@ -406,7 +450,8 @@ async function runWhatsAppSendJob({
       }
 
       lastSendJob.results = results;
-      lastSendJob.message = `Envío completado: ${results.filter((r) => r.success).length}/${results.length} mensajes enviados`;
+      lastSendJob.successCount = results.filter((r) => r.success).length;
+      lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes enviados`;
     }
 
     lastSendJob.completedAt = Date.now();
@@ -415,7 +460,7 @@ async function runWhatsAppSendJob({
     broadcastEvent('sendComplete', {
       message: lastSendJob.message,
       total: finalCvsToSend.length,
-      successCount: lastSendJob.results.filter((r) => r.success).length,
+      successCount: lastSendJob.successCount,
       testMode
     });
   } catch (error) {
@@ -780,7 +825,8 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
         telefono: cv.telefono,
         saludo: cv.saludo,
         mensajeIA: cv.mensajeIA,
-        success: success
+        success: success,
+        result
       });
     }
 
@@ -2131,6 +2177,7 @@ app.get('/send-job-status', (req, res) => {
     inProgress: lastSendJob.inProgress || anyInProgress,
     anyInProgress,
     total: lastSendJob.total,
+    successCount: lastSendJob.successCount || 0,
     sessionIds: lastSendJob.sessionIds,
     startedAt: lastSendJob.startedAt,
     completedAt: lastSendJob.completedAt,
@@ -2792,6 +2839,83 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
+app.get('/api/conversations/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: 'Escribe al menos 2 caracteres para buscar'
+      });
+    }
+
+    const allowed = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
+    if (!allowed.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'No hay sesiones configuradas a las que tengas acceso'
+      });
+    }
+
+    const byOpenwaId = new Map(
+      allowed.map((s) => [String(s.openwaSessionId), s])
+    );
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 50);
+
+    const raw = await searchMessages({ q, limit: Math.min(limit * 3, 100) });
+    if (!raw.available) {
+      return res.json({
+        success: true,
+        available: false,
+        q,
+        hits: [],
+        total: 0,
+        error: raw.error || 'Búsqueda en historial no disponible en OpenWA'
+      });
+    }
+
+    const hits = [];
+    for (const hit of raw.hits || []) {
+      if (!hit || typeof hit !== 'object') continue;
+      const openwaSessionId = String(hit.sessionId || '');
+      const session = byOpenwaId.get(openwaSessionId);
+      if (!session) continue;
+
+      const chatId = String(hit.chatId || '');
+      if (!chatId) continue;
+
+      hits.push({
+        messageId: hit.messageId || hit.waMessageId || null,
+        sessionId: session.id,
+        sessionLabel: session.label || session.id,
+        openwaSessionId: session.openwaSessionId,
+        chatId,
+        body: hit.body != null ? String(hit.body) : '',
+        snippet: hit.snippet != null ? String(hit.snippet) : String(hit.body || ''),
+        timestamp: hit.timestamp != null ? Number(hit.timestamp) : null,
+        type: hit.type != null ? String(hit.type) : 'text',
+        direction: hit.direction != null ? String(hit.direction) : null,
+        from: hit.from != null ? String(hit.from) : null,
+        score: hit.score != null ? Number(hit.score) : null
+      });
+      if (hits.length >= limit) break;
+    }
+
+    res.json({
+      success: true,
+      available: true,
+      q,
+      hits,
+      total: hits.length,
+      tookMs: raw.tookMs,
+      provider: raw.provider
+    });
+  } catch (error) {
+    console.error('[conversations] search error:', error.message);
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/api/conversations', async (req, res) => {
   try {
     const rawSession = String(req.query.sessionId || '').trim();
@@ -3149,6 +3273,38 @@ app.get('/api/conversations/:chatId/messages', async (req, res) => {
       messages: sorted
     });
   } catch (error) {
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/mark-read', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+
+    if (!forbidUnlessViewSession(session.id, req, res)) {
+      return;
+    }
+
+    const chatId = String(req.body.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+
+    const result = await markChatRead(session.openwaSessionId, chatId);
+    res.json({
+      success: true,
+      sessionId: session.id,
+      chatId,
+      marked: Boolean(result.success)
+    });
+  } catch (error) {
+    console.error('[conversations] mark-read error:', error.message);
     res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
   }
 });

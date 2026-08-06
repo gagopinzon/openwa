@@ -94,6 +94,9 @@ class CVAnalyzer {
         this.progressSection = document.getElementById('progressSection');
         this.progressFill = document.getElementById('progressFill');
         this.progressText = document.getElementById('progressText');
+        this.progressSuccessText = document.getElementById('progressSuccessText');
+        this.progressSuccessCount = document.getElementById('progressSuccessCount');
+        this.sendSuccessCount = 0;
         this.currentMessage = document.getElementById('currentMessage');
         this.logContainer = document.getElementById('logContainer');
         this.loadingOverlay = document.getElementById('loadingOverlay');
@@ -332,6 +335,10 @@ class CVAnalyzer {
         this.conversationsSessionSelect = document.getElementById('conversationsSessionSelect');
         this.refreshConversationsBtn = document.getElementById('refreshConversationsBtn');
         this.conversationsUnreadOnlyToggle = document.getElementById('conversationsUnreadOnlyToggle');
+        this.conversationsSearchInput = document.getElementById('conversationsSearchInput');
+        this.conversationsSearchStatus = document.getElementById('conversationsSearchStatus');
+        this.conversationsSearchHits = document.getElementById('conversationsSearchHits');
+        this.conversationsSearchHitsList = document.getElementById('conversationsSearchHitsList');
         this.conversationsChatList = document.getElementById('conversationsChatList');
         this.conversationsThreadHeader = document.getElementById('conversationsThreadHeader');
         this.conversationsThreadMessages = document.getElementById('conversationsThreadMessages');
@@ -352,6 +359,11 @@ class CVAnalyzer {
         this.activeConversationAutoReplyEnabled = false;
         this.conversationsEverLoaded = false;
         this.conversationsUnreadOnly = false;
+        this.conversationsSearchQuery = '';
+        this.conversationsSearchHitsData = [];
+        this._conversationsSearchTimer = null;
+        this._conversationsSearchSeq = 0;
+        this._conversationsLocallyRead = new Set();
         this._conversationsRefreshTimer = null;
         this._conversationsLoadInFlight = false;
         this._conversationsLoadPending = false;
@@ -397,6 +409,23 @@ class CVAnalyzer {
                 this.conversationsUnreadOnly = Boolean(this.conversationsUnreadOnlyToggle.checked);
                 this.renderConversationsChatList();
                 this.updateConversationsStatus();
+            });
+        }
+        if (this.conversationsSearchInput) {
+            this.conversationsSearchInput.addEventListener('input', () => {
+                this.conversationsSearchQuery = String(this.conversationsSearchInput.value || '');
+                this.renderConversationsChatList();
+                this.updateConversationsStatus();
+                this.scheduleConversationsDeepSearch();
+            });
+            this.conversationsSearchInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') {
+                    this.conversationsSearchInput.value = '';
+                    this.conversationsSearchQuery = '';
+                    this.clearConversationsSearchHits();
+                    this.renderConversationsChatList();
+                    this.updateConversationsStatus();
+                }
             });
         }
         if (this.conversationsSessionSelect) {
@@ -781,8 +810,177 @@ class CVAnalyzer {
     }
 
     getVisibleConversationsChats() {
-        if (!this.conversationsUnreadOnly) return this.conversationsChats;
-        return this.conversationsChats.filter((c) => (Number(c.unreadCount) || 0) > 0);
+        let chats = this.conversationsChats || [];
+        if (this.conversationsUnreadOnly) {
+            chats = chats.filter((c) => (Number(c.unreadCount) || 0) > 0);
+        }
+        const q = String(this.conversationsSearchQuery || '').trim().toLowerCase();
+        if (!q) return chats;
+
+        const qDigits = q.replace(/\D/g, '');
+        return chats.filter((chat) => {
+            const name = String(chat.name || '').toLowerCase();
+            const preview = String(chat.lastMessage || '').toLowerCase();
+            const sessionLabel = String(chat.sessionLabel || chat.sessionId || '').toLowerCase();
+            const id = String(chat.id || '').toLowerCase();
+            const idDigits = id.replace(/@.*$/, '').replace(/\D/g, '');
+            if (name.includes(q) || preview.includes(q) || sessionLabel.includes(q) || id.includes(q)) {
+                return true;
+            }
+            if (qDigits.length >= 3 && idDigits.includes(qDigits)) return true;
+            return false;
+        });
+    }
+
+    scheduleConversationsDeepSearch() {
+        if (this._conversationsSearchTimer) clearTimeout(this._conversationsSearchTimer);
+        const q = String(this.conversationsSearchQuery || '').trim();
+        if (q.length < 2) {
+            this.clearConversationsSearchHits();
+            return;
+        }
+        this._conversationsSearchTimer = setTimeout(() => {
+            this._conversationsSearchTimer = null;
+            this.runConversationsDeepSearch(q);
+        }, 400);
+    }
+
+    clearConversationsSearchHits() {
+        this.conversationsSearchHitsData = [];
+        if (this.conversationsSearchHits) this.conversationsSearchHits.hidden = true;
+        if (this.conversationsSearchHitsList) this.conversationsSearchHitsList.innerHTML = '';
+        if (this.conversationsSearchStatus) this.conversationsSearchStatus.textContent = '';
+    }
+
+    formatConversationsSearchSnippet(snippet) {
+        const raw = String(snippet || '');
+        return raw
+            .split(/(<\/?mark>)/i)
+            .map((part) => {
+                if (/^<mark>$/i.test(part)) return '<mark>';
+                if (/^<\/mark>$/i.test(part)) return '</mark>';
+                return this.escapeHtml(part);
+            })
+            .join('');
+    }
+
+    async runConversationsDeepSearch(query) {
+        const q = String(query || '').trim();
+        if (q.length < 2) {
+            this.clearConversationsSearchHits();
+            return;
+        }
+        const seq = ++this._conversationsSearchSeq;
+        if (this.conversationsSearchStatus) {
+            this.conversationsSearchStatus.textContent = 'Buscando en historial…';
+        }
+        try {
+            const response = await fetch(
+                `/api/conversations/search?q=${encodeURIComponent(q)}&limit=30`
+            );
+            const data = await response.json().catch(() => ({}));
+            if (seq !== this._conversationsSearchSeq) return;
+
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+
+            if (data.available === false) {
+                this.conversationsSearchHitsData = [];
+                if (this.conversationsSearchHits) this.conversationsSearchHits.hidden = true;
+                if (this.conversationsSearchHitsList) this.conversationsSearchHitsList.innerHTML = '';
+                if (this.conversationsSearchStatus) {
+                    this.conversationsSearchStatus.textContent =
+                        'Historial: búsqueda no disponible en OpenWA';
+                }
+                return;
+            }
+
+            this.conversationsSearchHitsData = data.hits || [];
+            this.renderConversationsSearchHits();
+            if (this.conversationsSearchStatus) {
+                this.conversationsSearchStatus.textContent = this.conversationsSearchHitsData.length
+                    ? `${this.conversationsSearchHitsData.length} mensaje(s)`
+                    : 'Sin mensajes en historial';
+            }
+        } catch (error) {
+            if (seq !== this._conversationsSearchSeq) return;
+            console.warn('[conversations] search:', error.message || error);
+            if (this.conversationsSearchStatus) {
+                this.conversationsSearchStatus.textContent = `Error: ${error.message || error}`;
+            }
+        }
+    }
+
+    renderConversationsSearchHits() {
+        if (!this.conversationsSearchHits || !this.conversationsSearchHitsList) return;
+        const hits = this.conversationsSearchHitsData || [];
+        if (!hits.length) {
+            this.conversationsSearchHits.hidden = true;
+            this.conversationsSearchHitsList.innerHTML = '';
+            return;
+        }
+
+        this.conversationsSearchHits.hidden = false;
+        this.conversationsSearchHitsList.innerHTML = '';
+        hits.forEach((hit) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'conversations-search-hit';
+            const chatLabel =
+                (this.conversationsChats || []).find(
+                    (c) =>
+                        this.sameConversationChatId(c.id, hit.chatId) &&
+                        String(c.sessionId) === String(hit.sessionId)
+                )?.name || hit.chatId;
+            const time =
+                hit.timestamp != null
+                    ? this.formatConversationTime(
+                          hit.timestamp > 1e12
+                              ? Math.floor(hit.timestamp / 1000)
+                              : hit.timestamp
+                      )
+                    : '';
+            btn.innerHTML = `
+                <span class="hit-session">${this.escapeHtml(hit.sessionLabel || hit.sessionId || '')}</span>
+                <div class="hit-chat">${this.escapeHtml(chatLabel)}</div>
+                <div class="hit-snippet">${this.formatConversationsSearchSnippet(hit.snippet || hit.body || '')}</div>
+                ${time ? `<div class="hit-meta">${this.escapeHtml(time)}</div>` : ''}
+            `;
+            btn.addEventListener('click', () => this.openConversationFromSearchHit(hit));
+            this.conversationsSearchHitsList.appendChild(btn);
+        });
+    }
+
+    async openConversationFromSearchHit(hit) {
+        if (!hit || !hit.chatId || !hit.sessionId) return;
+        let chat = (this.conversationsChats || []).find(
+            (c) =>
+                this.sameConversationChatId(c.id, hit.chatId) &&
+                String(c.sessionId) === String(hit.sessionId)
+        );
+        if (!chat) {
+            chat = {
+                id: hit.chatId,
+                name: hit.chatId,
+                sessionId: hit.sessionId,
+                sessionLabel: hit.sessionLabel || hit.sessionId,
+                openwaSessionId: hit.openwaSessionId || null,
+                key: `${hit.sessionId}::${hit.chatId}`,
+                lastMessage: hit.body || hit.snippet || '',
+                timestamp:
+                    hit.timestamp != null
+                        ? hit.timestamp > 1e12
+                            ? Math.floor(hit.timestamp / 1000)
+                            : hit.timestamp
+                        : null,
+                unreadCount: 0,
+                isGroup: /@g\.us$/i.test(String(hit.chatId))
+            };
+            this.conversationsChats.unshift(chat);
+            this.renderConversationsChatList();
+        }
+        await this.openConversationChat(chat);
     }
 
     scheduleConversationsRefresh(delayMs = 600) {
@@ -909,6 +1107,12 @@ class CVAnalyzer {
                 isGroup: Boolean(msg.isGroup)
             };
             this.conversationsChats.unshift(chat);
+            if (isActive) {
+                const chatKey = chat.key;
+                if (!this._conversationsLocallyRead) this._conversationsLocallyRead = new Set();
+                this._conversationsLocallyRead.add(chatKey);
+                this.markConversationRead(chat);
+            }
         } else if (chat) {
             chat.lastMessage = msg.body || chat.lastMessage || '';
             chat.timestamp = msg.timestamp
@@ -919,6 +1123,16 @@ class CVAnalyzer {
             }
             if (!isActive) {
                 chat.unreadCount = (Number(chat.unreadCount) || 0) + 1;
+                const chatKey = chat.key || `${chat.sessionId}::${chat.id}`;
+                if (this._conversationsLocallyRead) {
+                    this._conversationsLocallyRead.delete(chatKey);
+                }
+            } else {
+                chat.unreadCount = 0;
+                const chatKey = chat.key || `${chat.sessionId}::${chat.id}`;
+                if (!this._conversationsLocallyRead) this._conversationsLocallyRead = new Set();
+                this._conversationsLocallyRead.add(chatKey);
+                this.markConversationRead(chat);
             }
             this.conversationsChats.sort(
                 (a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)
@@ -994,15 +1208,7 @@ class CVAnalyzer {
             this.conversationsChats = data.chats || [];
             this.conversationsEverLoaded = true;
             this.startConversationsPolling();
-            if (this.activeConversation) {
-                const active = this.conversationsChats.find(
-                    (c) =>
-                        (c.key || `${c.sessionId}::${c.id}`) === this.activeConversation.key ||
-                        (this.sameConversationChatId(c.id, this.activeConversation.chatId) &&
-                            String(c.sessionId) === String(this.activeConversation.sessionId))
-                );
-                if (active) active.unreadCount = 0;
-            }
+            this.applyLocallyReadConversations();
             this.renderConversationsChatList();
 
             const errCount = (data.errors || []).length;
@@ -1054,9 +1260,15 @@ class CVAnalyzer {
             return;
         }
         if (!chats.length) {
-            this.conversationsChatList.innerHTML = this.conversationsUnreadOnly
-                ? '<p class="auto-reply-empty">No hay conversaciones sin leer.</p>'
-                : '<p class="auto-reply-empty">No hay chats en estas sesiones.</p>';
+            const q = String(this.conversationsSearchQuery || '').trim();
+            if (q) {
+                this.conversationsChatList.innerHTML =
+                    '<p class="auto-reply-empty">Ningún chat coincide con la búsqueda.</p>';
+            } else {
+                this.conversationsChatList.innerHTML = this.conversationsUnreadOnly
+                    ? '<p class="auto-reply-empty">No hay conversaciones sin leer.</p>'
+                    : '<p class="auto-reply-empty">No hay chats en estas sesiones.</p>';
+            }
             return;
         }
 
@@ -1102,8 +1314,10 @@ class CVAnalyzer {
         this.activeConversationKnownContact = false;
         this.activeConversationSessionAiEnabled = true;
         this.activeConversationAutoReplyEnabled = false;
-        // Al abrir, marcar como leído en la UI (OpenWA actualizará en el próximo sync)
+        // Marcar leído en UI y recordar para que el sync no lo restaure al cambiar de chat.
         chat.unreadCount = 0;
+        if (!this._conversationsLocallyRead) this._conversationsLocallyRead = new Set();
+        this._conversationsLocallyRead.add(key);
         this.renderConversationsChatList();
         this.updateConversationsStatus();
         this.setConversationsReplyEnabled(true);
@@ -1126,8 +1340,59 @@ class CVAnalyzer {
 
         await Promise.all([
             this.refreshActiveConversationMessages({ silent: false }),
-            this.refreshActiveConversationBlockStatus()
+            this.refreshActiveConversationBlockStatus(),
+            this.markConversationRead(chat)
         ]);
+    }
+
+    applyLocallyReadConversations() {
+        if (!this._conversationsLocallyRead || !this._conversationsLocallyRead.size) {
+            if (this.activeConversation) {
+                const active = this.conversationsChats.find(
+                    (c) =>
+                        (c.key || `${c.sessionId}::${c.id}`) === this.activeConversation.key ||
+                        (this.sameConversationChatId(c.id, this.activeConversation.chatId) &&
+                            String(c.sessionId) === String(this.activeConversation.sessionId))
+                );
+                if (active) active.unreadCount = 0;
+            }
+            return;
+        }
+
+        for (const chat of this.conversationsChats) {
+            const key = chat.key || `${chat.sessionId}::${chat.id}`;
+            const isActive =
+                this.activeConversation &&
+                (key === this.activeConversation.key ||
+                    (this.sameConversationChatId(chat.id, this.activeConversation.chatId) &&
+                        String(chat.sessionId) === String(this.activeConversation.sessionId)));
+            if (isActive || this._conversationsLocallyRead.has(key)) {
+                chat.unreadCount = 0;
+            }
+        }
+    }
+
+    async markConversationRead(chat) {
+        if (!chat || !chat.id || !chat.sessionId) return;
+        try {
+            const response = await fetch('/api/conversations/mark-read', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: chat.sessionId,
+                    chatId: chat.id
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) {
+                console.warn(
+                    '[conversations] mark-read falló:',
+                    data.error || `HTTP ${response.status}`
+                );
+            }
+        } catch (error) {
+            console.warn('[conversations] mark-read error:', error.message || error);
+        }
     }
 
     updateConversationThreadActions() {
@@ -5201,6 +5466,15 @@ class CVAnalyzer {
             statusText = state.nombre
                 ? `Esperando <strong>${wait}</strong> → próximo: ${state.nombre}`
                 : `Esperando <strong>${wait}</strong> para el siguiente mensaje`;
+        } else if (state.phase === 'session_dead') {
+            statusText = '⛔ Línea desconectada / bloqueada — reencolando…';
+        } else if (state.phase === 'requeued') {
+            const to = state.requeuedTo ? ` → ${this.escapeHtml(String(state.requeuedTo))}` : '';
+            statusText = state.nombre
+                ? `↩ Reencolado <strong>${this.escapeHtml(state.nombre)}</strong>${to}`
+                : `↩ Contacto reencolado${to}`;
+        } else if (state.phase === 'retrying') {
+            statusText = 'Reintentando envío…';
         } else if (state.phase === 'paused') {
             statusText = '⏸️ Envío pausado';
         } else if (state.phase === 'time_paused') {
@@ -5246,8 +5520,10 @@ class CVAnalyzer {
         if (!results.length) return;
 
         const total = results.length;
+        const okCount = results.filter((r) => r.success).length;
+        this.setSendSuccessCount(okCount);
         let sentCount = 0;
-        results.forEach((result, index) => {
+        results.forEach((result) => {
             sentCount++;
             const progress = (sentCount / total) * 100;
             this.progressFill.style.width = `${progress}%`;
@@ -5267,12 +5543,24 @@ class CVAnalyzer {
                 result.success ? 'success' : 'error'
             );
         });
+        this.addLogEntry(
+            `Resumen: ${okCount} enviados con éxito de ${total}`,
+            okCount === total ? 'success' : 'info'
+        );
+    }
+
+    setSendSuccessCount(count) {
+        this.sendSuccessCount = Math.max(0, Number(count) || 0);
+        if (this.progressSuccessCount) {
+            this.progressSuccessCount.textContent = String(this.sendSuccessCount);
+        }
     }
 
     showProgress(total) {
         this.progressSection.style.display = 'block';
         this.progressFill.style.width = '0%';
         this.progressText.textContent = `0 / ${total}`;
+        this.setSendSuccessCount(0);
         this.currentMessage.innerHTML = 'Preparando envío...';
         this.logContainer.innerHTML = '';
 
@@ -5868,14 +6156,59 @@ class CVAnalyzer {
                     sessionCurrent: data.sessionTotal,
                     sessionTotal: data.sessionTotal
                 });
+            } else if (
+                data.phase === 'session_dead' ||
+                data.phase === 'requeued' ||
+                data.phase === 'retrying'
+            ) {
+                this.updateSessionCard(data.sessionId, {
+                    phase: data.phase,
+                    nombre: data.nombre,
+                    telefono: data.telefono,
+                    requeuedFrom: data.requeuedFrom,
+                    requeuedTo: data.requeuedTo,
+                    sessionCurrent: data.sessionCurrent,
+                    sessionTotal: data.sessionTotal
+                });
+            }
+        });
+
+        this.eventSource.addEventListener('sendSuccess', (event) => {
+            const data = JSON.parse(event.data);
+            if (data.successCount != null) {
+                this.setSendSuccessCount(data.successCount);
+            } else if (data.success === true) {
+                this.setSendSuccessCount((this.sendSuccessCount || 0) + 1);
+            }
+            if (data.success === true && data.nombre) {
+                const sessionLabel = data.sessionId ? this.getSessionLabel(data.sessionId) : '';
+                this.addLogEntry(
+                    `✓ Enviado${sessionLabel ? ` [${sessionLabel}]` : ''}: ${data.nombre} (${data.telefono || ''})`,
+                    'success'
+                );
+            } else if (data.success === false && data.nombre) {
+                const sessionLabel = data.sessionId ? this.getSessionLabel(data.sessionId) : '';
+                this.addLogEntry(
+                    `✗ Falló${sessionLabel ? ` [${sessionLabel}]` : ''}: ${data.nombre}${data.error ? ` — ${data.error}` : ''}`,
+                    'error'
+                );
             }
         });
 
         this.eventSource.addEventListener('sendComplete', async (event) => {
             try {
+                const payload = JSON.parse(event.data || '{}');
+                if (payload.successCount != null) {
+                    this.setSendSuccessCount(payload.successCount);
+                }
                 const res = await fetch('/send-job-status');
                 const status = await res.json();
                 this.sendJobCompleted = status;
+                if (status.successCount != null) {
+                    this.setSendSuccessCount(status.successCount);
+                } else if (Array.isArray(status.results)) {
+                    this.setSendSuccessCount(status.results.filter((r) => r.success).length);
+                }
             } catch (error) {
                 console.warn('Error cargando resultado de envío:', error);
             }

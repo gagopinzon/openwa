@@ -9,6 +9,13 @@ const { getSessionSenderName } = require('./sessionsStore');
 const { applySenderName } = require('./messageSignature');
 const { resolveExactCounts, buildQueuesFromCounts } = require('./sessionDistribution');
 const { buildOutboundMessageParts } = require('./aiService');
+const {
+  getFailoverConfig,
+  classifySendError,
+  createFailoverContext,
+  requeueContact,
+  drainSessionQueue
+} = require('./sendFailover');
 
 /** Id lógico para pausar/abortar envíos round-robin multi-sesión */
 const ROUND_ROBIN_CONTROL_ID = '__roundrobin__';
@@ -205,12 +212,16 @@ class OpenWAWhatsAppService {
       return true;
     } catch (error) {
       const msg = error.message || String(error);
-      if (/invalid|inválido|not on whatsapp|no está en whatsapp/i.test(msg)) {
+      const errorClass = classifySendError(error);
+      if (error && typeof error === 'object') {
+        error.errorClass = errorClass;
+      }
+      if (errorClass === 'invalid') {
         console.log(`Número inválido o sin WhatsApp: ${phone} — ${msg}`);
       } else {
         console.error(`Error enviando mensaje a ${phone}:`, msg);
       }
-      return false;
+      throw error;
     }
   }
 
@@ -404,7 +415,93 @@ class OpenWAWhatsAppService {
 }
 
 /**
+ * @param {OpenWAWhatsAppService} service
+ * @param {{ healthRetries: number, healthWaitMs: number }} cfg
+ */
+async function ensureSessionHealthy(service, cfg) {
+  const openwaSessionId = service.openwaSessionId;
+  let lastStatus = null;
+  for (let attempt = 0; attempt <= cfg.healthRetries; attempt++) {
+    try {
+      lastStatus = await getSessionStatus(openwaSessionId);
+      if (lastStatus.connected) return { ok: true, status: lastStatus };
+    } catch (error) {
+      lastStatus = { connected: false, status: error.message || 'error' };
+      if (classifySendError(error) !== 'session_dead' && attempt < cfg.healthRetries) {
+        await new Promise((r) => setTimeout(r, cfg.healthWaitMs));
+        continue;
+      }
+      if (attempt >= cfg.healthRetries) {
+        return { ok: false, status: lastStatus, error };
+      }
+    }
+    if (attempt < cfg.healthRetries) {
+      await new Promise((r) => setTimeout(r, cfg.healthWaitMs));
+    }
+  }
+  return { ok: false, status: lastStatus };
+}
+
+function emitMessageResult(onMessageResult, row) {
+  if (!onMessageResult) return;
+  try {
+    onMessageResult(row);
+  } catch (cbErr) {
+    console.warn('onMessageResult:', cbErr.message);
+  }
+}
+
+function buildResultRow(contact, globalIndex, logicalSessionId, extra = {}) {
+  return {
+    index: globalIndex,
+    nombre: contact.nombre,
+    telefono: contact.telefono,
+    saludo: contact.saludo,
+    mensajeIA: contact.mensajeIA,
+    cvId: contact.cvId || null,
+    archivoOriginal: contact.archivoOriginal || null,
+    sessionId: logicalSessionId,
+    timestamp: new Date().toISOString(),
+    ...extra
+  };
+}
+
+function emitDrainProgress(onProgress, logicalSessionId, moved) {
+  if (!onProgress) return;
+  onProgress({
+    sessionId: logicalSessionId,
+    phase: 'session_dead',
+    sessionTotal: 0
+  });
+  for (const entry of moved) {
+    if (!entry.toSessionId) continue;
+    onProgress({
+      sessionId: logicalSessionId,
+      phase: 'requeued',
+      nombre: entry.item.contact && entry.item.contact.nombre,
+      telefono: entry.item.contact && entry.item.contact.telefono,
+      requeuedFrom: logicalSessionId,
+      requeuedTo: entry.toSessionId
+    });
+  }
+}
+
+function finalizeDrainFailures(moved, logicalSessionId, onMessageResult, results) {
+  for (const entry of moved) {
+    if (entry.toSessionId) continue;
+    const contact = entry.item.contact;
+    const rowFail = buildResultRow(contact, entry.item.globalIndex, logicalSessionId, {
+      success: false,
+      error: entry.reason || 'no_healthy_sessions'
+    });
+    results.push(rowFail);
+    emitMessageResult(onMessageResult, rowFail);
+  }
+}
+
+/**
  * Procesa la cola de contactos de una sola sesión con su propio timer.
+ * Con failoverCtx, reencola a otras líneas si esta se cae o el envío falla de forma recuperable.
  */
 async function sendSessionQueue(
   logicalSessionId,
@@ -414,15 +511,62 @@ async function sendSessionQueue(
   onProgress = null,
   checkControls = null,
   onMessageResult = null,
-  onWaitProgress = null
+  onWaitProgress = null,
+  failoverCtx = null
 ) {
   const results = [];
+  const cfg = getFailoverConfig();
+  let processedOnThisSession = 0;
 
-  for (let i = 0; i < queueItems.length; i++) {
-    const { contact, globalIndex } = queueItems[i];
+  try {
+  while (true) {
+    if (failoverCtx && failoverCtx.deadSessionIds.has(logicalSessionId)) {
+      break;
+    }
 
     if ((await applySendingControls(checkControls)) === 'aborted') {
       break;
+    }
+
+    if (queueItems.length === 0) {
+      if (!failoverCtx || !failoverCtx.busySessions) break;
+      const peersBusy = [...failoverCtx.busySessions].some(
+        (id) => id !== logicalSessionId
+      );
+      if (!peersBusy) break;
+      await new Promise((r) => setTimeout(r, 500));
+      continue;
+    }
+
+    const item = queueItems.shift();
+    const { contact, globalIndex } = item;
+
+    if (
+      failoverCtx &&
+      Array.isArray(item.triedSessionIds) &&
+      item.triedSessionIds.includes(logicalSessionId)
+    ) {
+      const r = requeueContact(failoverCtx, item, logicalSessionId);
+      if (r.ok) {
+        if (onProgress) {
+          onProgress({
+            sessionId: logicalSessionId,
+            phase: 'requeued',
+            nombre: contact.nombre,
+            telefono: contact.telefono,
+            requeuedFrom: logicalSessionId,
+            requeuedTo: r.toSessionId
+          });
+        }
+      } else {
+        const rowFail = buildResultRow(contact, globalIndex, logicalSessionId, {
+          success: false,
+          error: r.reason
+        });
+        results.push(rowFail);
+        emitMessageResult(onMessageResult, rowFail);
+      }
+      continue;
     }
 
     const mensajePreview =
@@ -431,18 +575,32 @@ async function sendSessionQueue(
         : contact.mensajeIA;
 
     console.log(
-      `Sesión ${logicalSessionId} ${i + 1}/${queueItems.length} (global ${globalIndex + 1}/${totalContacts}): ${contact.nombre} (${contact.telefono})`
+      `Sesión ${logicalSessionId} ${processedOnThisSession + 1}/~${queueItems.length + 1} (global ${globalIndex + 1}/${totalContacts}): ${contact.nombre} (${contact.telefono})`
     );
     console.log(`Saludo: ${contact.saludo || '(auto)'}`);
     console.log(`Mensaje: ${mensajePreview}`);
+
+    if (failoverCtx) {
+      const health = await ensureSessionHealthy(service, cfg);
+      if (!health.ok) {
+        console.warn(
+          `Sesión ${logicalSessionId} no saludable — drenando cola (${queueItems.length + 1} pendientes)`
+        );
+        queueItems.unshift(item);
+        const moved = drainSessionQueue(failoverCtx, logicalSessionId);
+        emitDrainProgress(onProgress, logicalSessionId, moved);
+        finalizeDrainFailures(moved, logicalSessionId, onMessageResult, results);
+        break;
+      }
+    }
 
     if (onProgress) {
       onProgress({
         readyToSend: true,
         current: globalIndex + 1,
         total: totalContacts,
-        sessionCurrent: i + 1,
-        sessionTotal: queueItems.length,
+        sessionCurrent: processedOnThisSession + 1,
+        sessionTotal: processedOnThisSession + 1 + queueItems.length,
         nombre: contact.nombre,
         telefono: contact.telefono,
         saludo: contact.saludo,
@@ -452,87 +610,130 @@ async function sendSessionQueue(
       });
     }
 
-    try {
-      const success = await service.sendContactWithGreeting(contact);
+    let success = false;
+    let lastErr = null;
+    const maxAttempts = failoverCtx ? cfg.localRetries + 1 : 1;
 
-      const row = {
-        index: globalIndex,
-        nombre: contact.nombre,
-        telefono: contact.telefono,
-        saludo: contact.saludo,
-        mensajeIA: contact.mensajeIA,
-        cvId: contact.cvId || null,
-        archivoOriginal: contact.archivoOriginal || null,
-        sessionId: logicalSessionId,
-        success,
-        timestamp: new Date().toISOString()
-      };
-      results.push(row);
-
-      if (onMessageResult) {
-        try {
-          onMessageResult(row);
-        } catch (cbErr) {
-          console.warn('onMessageResult:', cbErr.message);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (attempt > 0 && onProgress) {
+          onProgress({
+            sessionId: logicalSessionId,
+            phase: 'retrying',
+            nombre: contact.nombre,
+            telefono: contact.telefono,
+            sessionCurrent: processedOnThisSession + 1,
+            sessionTotal: processedOnThisSession + 1 + queueItems.length
+          });
         }
+        success = await service.sendContactWithGreeting(contact);
+        lastErr = null;
+        break;
+      } catch (error) {
+        lastErr = error;
+        const cls = error.errorClass || classifySendError(error);
+        console.error(
+          `Error sesión ${logicalSessionId} contacto ${contact.telefono} (intento ${attempt + 1}/${maxAttempts}):`,
+          error.message
+        );
+        if (cls === 'invalid' || cls === 'session_dead') break;
+        if (attempt >= maxAttempts - 1) break;
       }
+    }
+
+    if (success) {
+      processedOnThisSession += 1;
+      const row = buildResultRow(contact, globalIndex, logicalSessionId, { success: true });
+      results.push(row);
+      emitMessageResult(onMessageResult, row);
 
       if (onProgress) {
         onProgress({
           current: globalIndex + 1,
           total: totalContacts,
-          sessionCurrent: i + 1,
-          sessionTotal: queueItems.length,
+          sessionCurrent: processedOnThisSession,
+          sessionTotal: processedOnThisSession + queueItems.length,
           nombre: contact.nombre,
           telefono: contact.telefono,
           saludo: contact.saludo,
           mensajeIA: contact.mensajeIA,
           sessionId: logicalSessionId,
-          success,
+          success: true,
           phase: 'sent'
         });
       }
 
-      if (i < queueItems.length - 1) {
+      if (queueItems.length > 0) {
+        const next = queueItems[0];
         if (onProgress) {
           onProgress({
             sessionId: logicalSessionId,
-            sessionCurrent: i + 1,
-            sessionTotal: queueItems.length,
+            sessionCurrent: processedOnThisSession,
+            sessionTotal: processedOnThisSession + queueItems.length,
             phase: 'waiting',
-            nombre: queueItems[i + 1].contact.nombre,
-            telefono: queueItems[i + 1].contact.telefono
+            nombre: next.contact.nombre,
+            telefono: next.contact.telefono
           });
         }
-
         const waitResult = await waitBetweenMessages(checkControls, onWaitProgress);
-        if (waitResult === 'aborted') {
-          break;
-        }
+        if (waitResult === 'aborted') break;
       }
-    } catch (error) {
-      console.error(`Error sesión ${logicalSessionId} contacto ${i + 1}:`, error.message);
-      const rowFail = {
-        index: globalIndex,
-        nombre: contact.nombre,
-        telefono: contact.telefono,
-        saludo: contact.saludo,
-        mensajeIA: contact.mensajeIA,
-        cvId: contact.cvId || null,
-        archivoOriginal: contact.archivoOriginal || null,
-        sessionId: logicalSessionId,
+      continue;
+    }
+
+    const errorClass =
+      (lastErr && lastErr.errorClass) || classifySendError(lastErr || 'unknown');
+    const errorMsg = (lastErr && lastErr.message) || 'send_failed';
+
+    if (errorClass === 'invalid' || !failoverCtx) {
+      processedOnThisSession += 1;
+      const rowFail = buildResultRow(contact, globalIndex, logicalSessionId, {
         success: false,
-        error: error.message,
-        timestamp: new Date().toISOString()
-      };
+        error: errorClass === 'invalid' ? 'invalid_number' : errorMsg
+      });
       results.push(rowFail);
-      if (onMessageResult) {
-        try {
-          onMessageResult(rowFail);
-        } catch (cbErr) {
-          console.warn('onMessageResult:', cbErr.message);
-        }
+      emitMessageResult(onMessageResult, rowFail);
+      continue;
+    }
+
+    if (errorClass === 'session_dead') {
+      console.warn(`Sesión ${logicalSessionId} muerta durante envío — drenando cola`);
+      queueItems.unshift(item);
+      const moved = drainSessionQueue(failoverCtx, logicalSessionId);
+      emitDrainProgress(onProgress, logicalSessionId, moved);
+      finalizeDrainFailures(moved, logicalSessionId, onMessageResult, results);
+      break;
+    }
+
+    // transient → reencolar solo este contacto
+    const r = requeueContact(failoverCtx, item, logicalSessionId);
+    if (r.ok) {
+      console.log(
+        `↩ Reencolado ${contact.telefono} de ${logicalSessionId} → ${r.toSessionId}`
+      );
+      if (onProgress) {
+        onProgress({
+          sessionId: logicalSessionId,
+          phase: 'requeued',
+          nombre: contact.nombre,
+          telefono: contact.telefono,
+          requeuedFrom: logicalSessionId,
+          requeuedTo: r.toSessionId
+        });
       }
+    } else {
+      processedOnThisSession += 1;
+      const rowFail = buildResultRow(contact, globalIndex, logicalSessionId, {
+        success: false,
+        error: r.reason
+      });
+      results.push(rowFail);
+      emitMessageResult(onMessageResult, rowFail);
+    }
+  }
+  } finally {
+    if (failoverCtx && failoverCtx.busySessions) {
+      failoverCtx.busySessions.delete(logicalSessionId);
     }
   }
 
@@ -540,7 +741,7 @@ async function sendSessionQueue(
     onProgress({
       sessionId: logicalSessionId,
       phase: 'done',
-      sessionTotal: queueItems.length
+      sessionTotal: processedOnThisSession
     });
   }
 
@@ -549,7 +750,7 @@ async function sendSessionQueue(
 
 /**
  * Envía mensajes en paralelo por sesión: cada sesión tiene su cola y su timer independiente.
- * El primer mensaje de cada sesión se dispara al mismo tiempo.
+ * Si una línea cae, reencola pendientes a las vivas (round-robin).
  * @param {Map<string, OpenWAWhatsAppService>} servicesBySessionId
  * @param {string[]} sessionOrder
  */
@@ -566,6 +767,7 @@ async function sendRoundRobinBulk(
   const N = sessionOrder.length;
   const counts = resolveExactCounts(sessionOrder, sessionWeights, contacts.length);
   const queues = buildQueuesFromCounts(sessionOrder, contacts, counts);
+  const failoverCtx = createFailoverContext(sessionOrder, queues);
   const sumCounts = counts.reduce((a, b) => a + b, 0) || 1;
 
   const distribution = sessionOrder.map((sId, i) => {
@@ -573,7 +775,7 @@ async function sendRoundRobinBulk(
     return `${sId}: ${queues.get(sId).length} msgs (${pct}%)`;
   });
   console.log(
-    `Envío paralelo: ${contacts.length} mensaje(s) entre ${N} sesión(es) con timers independientes`
+    `Envío paralelo: ${contacts.length} mensaje(s) entre ${N} sesión(es) con timers independientes + failover`
   );
   console.log(`📊 Distribución por cantidad → ${distribution.join(', ')}`);
 
@@ -601,7 +803,8 @@ async function sendRoundRobinBulk(
       onProgress,
       checkControls,
       onMessageResult,
-      onWaitProgress
+      onWaitProgress,
+      failoverCtx
     );
   });
 
@@ -614,4 +817,6 @@ async function sendRoundRobinBulk(
 
 module.exports = OpenWAWhatsAppService;
 module.exports.sendRoundRobinBulk = sendRoundRobinBulk;
+module.exports.sendSessionQueue = sendSessionQueue;
 module.exports.ROUND_ROBIN_CONTROL_ID = ROUND_ROBIN_CONTROL_ID;
+module.exports.ensureSessionHealthy = ensureSessionHealthy;

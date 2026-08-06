@@ -140,9 +140,26 @@
                     <button type="button" id="refreshConversationsBtn" class="btn btn-secondary btn-sm">Cargar chats</button>
                     <span id="conversationsStatus" class="conversations-status"></span>
                 </div>
+                <div class="conversations-search-row">
+                    <input
+                        type="search"
+                        id="conversationsSearchInput"
+                        class="conversations-search-input"
+                        placeholder="Buscar por número, nombre o texto del mensaje…"
+                        autocomplete="off"
+                        spellcheck="false"
+                    >
+                    <span id="conversationsSearchStatus" class="conversations-search-status"></span>
+                </div>
                 <div class="conversations-layout">
-                    <div class="conversations-chat-list" id="conversationsChatList">
-                        <p class="auto-reply-empty">Pulsa «Cargar chats» para ver todas las conversaciones.</p>
+                    <div class="conversations-sidebar">
+                        <div class="conversations-chat-list" id="conversationsChatList">
+                            <p class="auto-reply-empty">Pulsa «Cargar chats» para ver todas las conversaciones.</p>
+                        </div>
+                        <div class="conversations-search-hits" id="conversationsSearchHits" hidden>
+                            <div class="conversations-search-hits-title">Mensajes encontrados</div>
+                            <div id="conversationsSearchHitsList"></div>
+                        </div>
                     </div>
                     <div class="conversations-thread" id="conversationsThread">
                         <div class="conversations-thread-header" id="conversationsThreadHeader">
@@ -425,7 +442,12 @@
                 <div class="progress-bar">
                     <div class="progress-fill" id="progressFill"></div>
                 </div>
-                <div class="progress-text" id="progressText">0 / 0</div>
+                <div class="progress-stats">
+                    <div class="progress-text" id="progressText">0 / 0</div>
+                    <div class="progress-success" id="progressSuccessText">
+                        Enviados con éxito: <strong id="progressSuccessCount">0</strong>
+                    </div>
+                </div>
             </div>
             <div class="current-message" id="currentMessage"></div>
             <div class="message-preview" id="messagePreview" style="display: none;">
