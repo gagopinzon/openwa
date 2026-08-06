@@ -127,11 +127,20 @@ async function openwaRequest(method, path, body, opts = {}) {
     if (allowRetry && isRateLimitError(response.status, message)) {
       const retryAfterHeader = response.headers && response.headers['retry-after'];
       const retryAfterSec = parseInt(retryAfterHeader, 10);
+      const attempt = Number(opts._rateLimitAttempt) || 0;
       const waitMs = Number.isFinite(retryAfterSec)
-        ? Math.min(Math.max(retryAfterSec * 1000, 1000), 10000)
-        : 3000;
+        ? Math.min(Math.max(retryAfterSec * 1000, 2000), 30000)
+        : Math.min(4000 * (attempt + 1), 20000);
+      console.warn(
+        `[openwa] rate-limit ${method} ${path} — reintento ${attempt + 1} en ${waitMs}ms`
+      );
       await sleep(waitMs);
-      return openwaRequest(method, path, body, { ...opts, retry: false });
+      if (attempt < 2) {
+        return openwaRequest(method, path, body, {
+          ...opts,
+          _rateLimitAttempt: attempt + 1
+        });
+      }
     }
 
     if (isRateLimitError(response.status, message)) {

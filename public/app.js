@@ -1223,8 +1223,14 @@ class CVAnalyzer {
             this.startConversationsPolling();
             this.applyLocallyReadConversations();
             this.renderConversationsChatList();
-            // Solo pedir a OpenWA los que aún no traen preview (el servidor ya manda los guardados en disco).
-            this.enrichConversationPreviews({ silent: true, onlyMissing: true });
+            // El servidor enriquece en background a ritmo lento.
+            // El cliente solo pide un lote pequeño si faltan (no en cada sync silencioso).
+            if (!silent) {
+                this.enrichConversationPreviews({ silent: true, onlyMissing: true });
+            } else {
+                // Re-aplicar desde disco vía un soft refresh de previews ya guardados
+                this.pullCachedConversationPreviews();
+            }
 
             const errCount = (data.errors || []).length;
             this.updateConversationsStatus({
@@ -1432,6 +1438,26 @@ class CVAnalyzer {
         });
     }
 
+    async pullCachedConversationPreviews() {
+        // Relee solo lo ya persistido: manda items con preview vacío no — en su lugar
+        // pide al servidor la lista otra vez no. Usamos enrich onlyMissing=false no.
+        // Truco: POST con previewLines vacíos no; mejor GET no existe.
+        // Tras sync silencioso, si el server ya enriqueció, merge ya trajo previewLines.
+        // Si aún faltan direcciones, agenda un lote pequeño diferido.
+        const missing = (this.conversationsChats || []).filter(
+            (c) =>
+                !Array.isArray(c.previewLines) ||
+                c.previewLines.length === 0 ||
+                (c.lastFromMe !== true && c.lastFromMe !== false)
+        );
+        if (!missing.length) return;
+        if (this._conversationsPreviewSoftTimer) clearTimeout(this._conversationsPreviewSoftTimer);
+        this._conversationsPreviewSoftTimer = setTimeout(() => {
+            this._conversationsPreviewSoftTimer = null;
+            this.enrichConversationPreviews({ silent: true, onlyMissing: true });
+        }, 8000);
+    }
+
     async enrichConversationPreviews(options = {}) {
         const silent = Boolean(options.silent);
         const onlyMissing = Boolean(options.onlyMissing);
@@ -1446,7 +1472,7 @@ class CVAnalyzer {
                     (c.lastFromMe !== true && c.lastFromMe !== false)
             );
         }
-        chats = chats.slice(0, 80);
+        chats = chats.slice(0, 12);
         if (!chats.length) return;
 
         const seq = ++this._conversationsPreviewSeq;

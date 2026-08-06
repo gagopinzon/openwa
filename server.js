@@ -2843,18 +2843,35 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 let conversationPreviewEnrichPromise = null;
+let conversationPreviewEnrichQueued = null;
+
+function previewEnrichDelayMs() {
+  const v = parseInt(process.env.CONVERSATIONS_PREVIEW_DELAY_MS, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 700;
+}
+
+function previewEnrichBatchSize() {
+  const v = parseInt(process.env.CONVERSATIONS_PREVIEW_BATCH, 10);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 40) : 12;
+}
 
 /**
  * Carga previews de historial y los persiste en disco.
+ * Ritmo lento a propósito para no disparar ThrottlerException en OpenWA.
  * @param {Array<{ sessionId: string, chatId: string, key?: string, lastMessage?: string }>} items
  * @param {{ lines?: number, user?: object }} [opts]
  */
 async function enrichAndPersistConversationPreviews(items, opts = {}) {
   const lines = Math.min(Math.max(parseInt(opts.lines, 10) || 4, 1), 6);
-  const list = (Array.isArray(items) ? items : []).slice(0, 80);
+  const delayMs = previewEnrichDelayMs();
+  const list = Array.isArray(items) ? items : [];
   if (!list.length) return [];
 
-  const previews = await mapWithConcurrency(list, 4, async (item) => {
+  const previews = [];
+  let hitRateLimit = false;
+
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
     const session = resolveConfiguredSession(item.sessionId);
     const key =
       item.key ||
@@ -2866,7 +2883,7 @@ async function enrichAndPersistConversationPreviews(items, opts = {}) {
         .map((l) => String(l || '').trim())
         .filter(Boolean)
         .slice(-8);
-      return {
+      previews.push({
         key: session
           ? conversationPreviewStore.chatKey(session.id, item.chatId)
           : key,
@@ -2880,23 +2897,51 @@ async function enrichAndPersistConversationPreviews(items, opts = {}) {
         lastMessage:
           item.lastMessage || previewLines[previewLines.length - 1] || '',
         sourceLastMessage:
-          item.sourceLastMessage || item.lastMessage || previewLines[previewLines.length - 1] || ''
-      };
+          item.sourceLastMessage ||
+          item.lastMessage ||
+          previewLines[previewLines.length - 1] ||
+          ''
+      });
+      continue;
+    }
+
+    if (hitRateLimit) {
+      previews.push({
+        key,
+        sessionId: item.sessionId,
+        chatId: item.chatId,
+        previewLines: [],
+        error: 'rate_limited'
+      });
+      continue;
     }
 
     if (!session) {
-      return { key, sessionId: item.sessionId, chatId: item.chatId, previewLines: [] };
+      previews.push({
+        key,
+        sessionId: item.sessionId,
+        chatId: item.chatId,
+        previewLines: []
+      });
+      continue;
     }
     if (opts.user && !canViewSession(opts.user, session.id)) {
-      return { key, sessionId: session.id, chatId: item.chatId, previewLines: [] };
+      previews.push({
+        key,
+        sessionId: session.id,
+        chatId: item.chatId,
+        previewLines: []
+      });
+      continue;
     }
+
     try {
       const messages = await getChatHistory(session.openwaSessionId, item.chatId, {
-        limit: 20
+        limit: 12
       });
       const built = buildChatPreviewLines(messages, lines);
       const previewLines = built.previewLines || [];
-      return {
+      previews.push({
         key: conversationPreviewStore.chatKey(session.id, item.chatId),
         sessionId: session.id,
         chatId: item.chatId,
@@ -2906,17 +2951,30 @@ async function enrichAndPersistConversationPreviews(items, opts = {}) {
           ? previewLines[previewLines.length - 1]
           : item.lastMessage || '',
         sourceLastMessage: item.lastMessage || ''
-      };
+      });
     } catch (err) {
-      return {
+      if (err && err.code === 'RATE_LIMIT') {
+        hitRateLimit = true;
+        console.warn(
+          `[conversations] rate-limit en previews — pausando lote (${list.length - i} pendientes)`
+        );
+      }
+      previews.push({
         key,
         sessionId: session.id,
         chatId: item.chatId,
         previewLines: [],
         error: err.message
-      };
+      });
+      if (hitRateLimit) {
+        await new Promise((r) => setTimeout(r, Math.max(delayMs * 4, 5000)));
+      }
     }
-  });
+
+    if (i < list.length - 1 && delayMs > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
 
   conversationPreviewStore.upsertMany(
     previews.filter((p) => p.previewLines && p.previewLines.length)
@@ -2925,9 +2983,14 @@ async function enrichAndPersistConversationPreviews(items, opts = {}) {
 }
 
 function scheduleConversationPreviewEnrichment(chats, user) {
-  const needing = conversationPreviewStore.listNeedingEnrichment(chats, 80);
+  const batch = previewEnrichBatchSize();
+  const needing = conversationPreviewStore.listNeedingEnrichment(chats, batch);
   if (!needing.length) return;
-  if (conversationPreviewEnrichPromise) return;
+
+  if (conversationPreviewEnrichPromise) {
+    conversationPreviewEnrichQueued = { chats, user };
+    return;
+  }
 
   conversationPreviewEnrichPromise = enrichAndPersistConversationPreviews(needing, {
     lines: 4,
@@ -2944,6 +3007,16 @@ function scheduleConversationPreviewEnrichment(chats, user) {
     })
     .finally(() => {
       conversationPreviewEnrichPromise = null;
+      const queued = conversationPreviewEnrichQueued;
+      conversationPreviewEnrichQueued = null;
+      const nextChats = queued ? queued.chats : chats;
+      const nextUser = queued ? queued.user : user;
+      const still = conversationPreviewStore.listNeedingEnrichment(nextChats, batch);
+      if (still.length) {
+        setTimeout(() => {
+          scheduleConversationPreviewEnrichment(nextChats, nextUser);
+        }, Math.max(previewEnrichDelayMs() * 3, 4000));
+      }
     });
 }
 
@@ -3137,7 +3210,7 @@ app.post('/api/conversations/previews', async (req, res) => {
     const lines = Math.min(Math.max(parseInt(req.body.lines, 10) || 4, 1), 6);
     const rawItems = Array.isArray(req.body.items) ? req.body.items : [];
     const items = rawItems
-      .slice(0, 80)
+      .slice(0, previewEnrichBatchSize())
       .map((row) => ({
         sessionId: String((row && row.sessionId) || '').trim(),
         chatId: String((row && row.chatId) || '').trim(),
