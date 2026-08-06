@@ -1494,12 +1494,12 @@ footer p {
 .conversations-chat-item .chat-preview {
     font-size: 12px;
     color: #64748b;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    line-height: 1.4;
+    margin-top: 2px;
+    max-height: calc(1.4em * 4);
     overflow: hidden;
-    white-space: normal;
-    line-height: 1.35;
+    white-space: pre-line;
+    word-break: break-word;
 }
 
 .conversations-chat-item .chat-meta {

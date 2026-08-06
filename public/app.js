@@ -1284,10 +1284,14 @@ class CVAnalyzer {
                 ? `<span class="unread">${chat.unreadCount}</span>`
                 : '';
             const sessionLabel = chat.sessionLabel || chat.sessionId || '';
+            const previewRaw = String(chat.lastMessage || '')
+                .replace(/\r\n/g, '\n')
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
             btn.innerHTML = `
                 <span class="chat-session">${this.escapeHtml(sessionLabel)}</span>
                 <div class="chat-name">${this.escapeHtml(chat.name || chat.id)}</div>
-                <div class="chat-preview">${this.escapeHtml(chat.lastMessage || '')}</div>
+                <div class="chat-preview">${this.escapeHtml(previewRaw)}</div>
                 <div class="chat-meta">
                     <span>${this.escapeHtml(this.formatConversationTime(chat.timestamp))}</span>
                     ${unread}
