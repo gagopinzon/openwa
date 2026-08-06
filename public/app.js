@@ -1299,12 +1299,16 @@ class CVAnalyzer {
                 ? `<span class="unread">${chat.unreadCount}</span>`
                 : '';
             const sessionLabel = chat.sessionLabel || chat.sessionId || '';
+            let lastFromMe = chat.lastFromMe;
+            if (lastFromMe !== true && lastFromMe !== false && Number(chat.unreadCount) > 0) {
+                lastFromMe = false;
+            }
             const directionBadge =
-                chat.lastFromMe === true
-                    ? '<span class="chat-direction from-me">Tú</span>'
-                    : chat.lastFromMe === false
-                      ? '<span class="chat-direction from-them">Ellos</span>'
-                      : '';
+                lastFromMe === true
+                    ? '<span class="chat-direction from-me" title="El último mensaje lo enviaste tú">Tú</span>'
+                    : lastFromMe === false
+                      ? '<span class="chat-direction from-them" title="El último mensaje es del contacto">Ellos</span>'
+                      : '<span class="chat-direction from-unknown" title="Aún no se sabe quién envió el último">…</span>';
             const previewLines = Array.isArray(chat.previewLines) && chat.previewLines.length
                 ? chat.previewLines
                 : String(chat.lastMessage || '')
@@ -1324,7 +1328,7 @@ class CVAnalyzer {
                 <div class="chat-preview">${previewHtml}</div>
                 <div class="chat-meta">
                     <span>${this.escapeHtml(this.formatConversationTime(chat.timestamp))}</span>
-                    ${unread}
+                    <span class="chat-meta-right">${unread}</span>
                 </div>
             `;
             btn.addEventListener('click', () => this.openConversationChat(chat));
@@ -1436,7 +1440,10 @@ class CVAnalyzer {
         let chats = this.getVisibleConversationsChats();
         if (onlyMissing) {
             chats = chats.filter(
-                (c) => !Array.isArray(c.previewLines) || c.previewLines.length === 0
+                (c) =>
+                    !Array.isArray(c.previewLines) ||
+                    c.previewLines.length === 0 ||
+                    (c.lastFromMe !== true && c.lastFromMe !== false)
             );
         }
         chats = chats.slice(0, 80);

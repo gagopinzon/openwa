@@ -121,6 +121,10 @@ function isPreviewStale(chat, preview) {
   return true;
 }
 
+function hasDirection(preview) {
+  return preview && (preview.lastFromMe === true || preview.lastFromMe === false);
+}
+
 /**
  * Adjunta previewLines/lastFromMe desde disco a los chats de la lista.
  * @param {Array} chats
@@ -132,17 +136,18 @@ function applyToChats(chats) {
   return list.map((chat) => {
     const key = chat.key || chatKey(chat.sessionId, chat.id);
     const preview = store.previews[key];
-    if (!preview || isPreviewStale(chat, preview)) {
+    if (!preview || !Array.isArray(preview.previewLines) || !preview.previewLines.length) {
+      return { ...chat, key };
+    }
+    // Si el mensaje cambió, no uses preview viejo (se re-enriquece en background).
+    if (isPreviewStale(chat, preview)) {
       return { ...chat, key };
     }
     return {
       ...chat,
       key,
       previewLines: [...preview.previewLines],
-      lastFromMe:
-        preview.lastFromMe === true || preview.lastFromMe === false
-          ? preview.lastFromMe
-          : null,
+      lastFromMe: hasDirection(preview) ? preview.lastFromMe : null,
       lastMessage: chat.lastMessage || preview.lastMessage || ''
     };
   });
@@ -159,7 +164,10 @@ function listNeedingEnrichment(chats, limit = 80) {
     if (needing.length >= limit) break;
     const key = chat.key || chatKey(chat.sessionId, chat.id);
     const preview = store.previews[key];
-    if (!preview || isPreviewStale(chat, preview)) {
+    const missingPreview =
+      !preview || !Array.isArray(preview.previewLines) || !preview.previewLines.length;
+    const missingDirection = !hasDirection(preview);
+    if (missingPreview || isPreviewStale(chat, preview) || missingDirection) {
       needing.push({
         sessionId: chat.sessionId,
         chatId: chat.id,
@@ -179,6 +187,7 @@ module.exports = {
   upsertMany,
   applyToChats,
   isPreviewStale,
+  hasDirection,
   listNeedingEnrichment,
   STORE_FILE
 };

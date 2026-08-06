@@ -1492,23 +1492,38 @@ footer p {
 
 .conversations-chat-item .chat-direction {
     flex: 0 0 auto;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.03em;
     text-transform: uppercase;
     border-radius: 999px;
-    padding: 2px 7px;
+    padding: 3px 9px;
     line-height: 1.2;
+    border: 1px solid transparent;
 }
 
 .conversations-chat-item .chat-direction.from-me {
-    color: #166534;
-    background: #dcfce7;
+    color: #14532d;
+    background: #86efac;
+    border-color: #22c55e;
 }
 
 .conversations-chat-item .chat-direction.from-them {
     color: #9a3412;
-    background: #ffedd5;
+    background: #fdba74;
+    border-color: #f97316;
+}
+
+.conversations-chat-item .chat-direction.from-unknown {
+    color: #64748b;
+    background: #e2e8f0;
+    border-color: #cbd5e1;
+}
+
+.conversations-chat-item .chat-meta-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .conversations-chat-item .chat-session {

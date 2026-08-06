@@ -438,7 +438,7 @@ async function listChats(openwaSessionId, opts = {}) {
  */
 async function getChatHistory(openwaSessionId, chatId, opts = {}) {
   const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 100);
-  const cacheKey = `history:${openwaSessionId}:${chatId}:${limit}`;
+  const cacheKey = `history:v2:${openwaSessionId}:${chatId}:${limit}`;
   if (!opts.fresh) {
     const cached = getCached(cacheKey);
     if (cached) return cached;
@@ -462,7 +462,7 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
         to: msg.to || null,
         body: body || (type !== 'text' ? `[${type}]` : ''),
         type,
-        fromMe: Boolean(msg.fromMe || msg.direction === 'outgoing'),
+        fromMe: resolveMessageFromMe(msg),
         isGroup: Boolean(msg.isGroup),
         timestamp: msg.timestamp != null ? Number(msg.timestamp) : null,
         contactName:
@@ -477,6 +477,26 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
 }
 
 /**
+ * Normaliza si un mensaje es propio (OpenWA/WhatsApp usan varios campos).
+ * @returns {boolean|null}
+ */
+function resolveMessageFromMe(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  if (typeof msg.fromMe === 'boolean') return msg.fromMe;
+  if (msg.fromMe === 1 || msg.fromMe === '1' || msg.fromMe === 'true') return true;
+  if (msg.fromMe === 0 || msg.fromMe === '0' || msg.fromMe === 'false') return false;
+  const dir = String(msg.direction || msg.messageDirection || msg.flow || '').toLowerCase();
+  if (['outgoing', 'outbound', 'out', 'sent', 'fromme', 'from_me'].includes(dir)) {
+    return true;
+  }
+  if (['incoming', 'inbound', 'in', 'received', 'tome', 'to_me'].includes(dir)) {
+    return false;
+  }
+  if (msg.author === 'me' || msg.sender === 'me') return true;
+  return null;
+}
+
+/**
  * Últimas N líneas de texto de un historial (cronológico) + dirección del último.
  * @param {Array} messages
  * @param {number} [maxLines=4]
@@ -488,6 +508,11 @@ function buildChatPreviewLines(messages, maxLines = 4) {
   list.sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
   const withBody = list.filter((m) => String((m && m.body) || '').trim());
   const lastMsg = withBody.length ? withBody[withBody.length - 1] : null;
+  let lastFromMe = null;
+  if (lastMsg) {
+    if (typeof lastMsg.fromMe === 'boolean') lastFromMe = lastMsg.fromMe;
+    else lastFromMe = resolveMessageFromMe(lastMsg);
+  }
   const lines = [];
   for (let i = list.length - 1; i >= 0 && lines.length < limit; i--) {
     const body = String((list[i] && list[i].body) || '')
@@ -498,7 +523,7 @@ function buildChatPreviewLines(messages, maxLines = 4) {
   }
   return {
     previewLines: lines,
-    lastFromMe: lastMsg ? Boolean(lastMsg.fromMe) : null
+    lastFromMe
   };
 }
 
