@@ -361,6 +361,9 @@ class CVAnalyzer {
         this.conversationsUnreadOnly = false;
         this.conversationsSearchQuery = '';
         this.conversationsSearchHitsData = [];
+        this._conversationPreviewByKey = new Map();
+        this._conversationsPreviewSeq = 0;
+        this._conversationsPreviewInFlight = false;
         this._conversationsSearchTimer = null;
         this._conversationsSearchSeq = 0;
         this._conversationsLocallyRead = new Set();
@@ -1140,7 +1143,7 @@ class CVAnalyzer {
             if (previewLine) {
                 const lines = Array.isArray(chat.previewLines) ? [...chat.previewLines] : [];
                 lines.push(previewLine.length > 140 ? `${previewLine.slice(0, 140)}…` : previewLine);
-                chat.previewLines = lines.slice(-4);
+                this.rememberConversationPreview(chat, lines.slice(-4));
             }
             this.conversationsChats.sort(
                 (a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)
@@ -1213,12 +1216,14 @@ class CVAnalyzer {
                 throw new Error(data.error || `HTTP ${response.status}`);
             }
 
-            this.conversationsChats = data.chats || [];
+            this.conversationsChats = this.mergeConversationChatsPreservingPreviews(
+                data.chats || []
+            );
             this.conversationsEverLoaded = true;
             this.startConversationsPolling();
             this.applyLocallyReadConversations();
             this.renderConversationsChatList();
-            this.enrichConversationPreviews({ silent });
+            this.enrichConversationPreviews({ silent, onlyMissing: silent });
 
             const errCount = (data.errors || []).length;
             this.updateConversationsStatus({
@@ -1317,10 +1322,85 @@ class CVAnalyzer {
         });
     }
 
+    conversationChatKey(chat) {
+        if (!chat) return '';
+        return chat.key || `${chat.sessionId}::${chat.id}`;
+    }
+
+    rememberConversationPreview(chat, previewLines) {
+        if (!chat || !Array.isArray(previewLines) || !previewLines.length) return;
+        if (!this._conversationPreviewByKey) this._conversationPreviewByKey = new Map();
+        const key = this.conversationChatKey(chat);
+        this._conversationPreviewByKey.set(key, {
+            previewLines: [...previewLines],
+            lastMessage: previewLines[previewLines.length - 1] || chat.lastMessage || ''
+        });
+        chat.previewLines = [...previewLines];
+    }
+
+    mergeConversationChatsPreservingPreviews(incoming) {
+        if (!this._conversationPreviewByKey) this._conversationPreviewByKey = new Map();
+
+        // Persistir previews actuales en la caché antes de reemplazar.
+        for (const chat of this.conversationsChats || []) {
+            const key = this.conversationChatKey(chat);
+            if (Array.isArray(chat.previewLines) && chat.previewLines.length) {
+                this._conversationPreviewByKey.set(key, {
+                    previewLines: [...chat.previewLines],
+                    lastMessage: chat.lastMessage || chat.previewLines[chat.previewLines.length - 1] || ''
+                });
+            }
+        }
+
+        return (incoming || []).map((chat) => {
+            const key = this.conversationChatKey(chat);
+            const cached = this._conversationPreviewByKey.get(key);
+            if (!cached || !cached.previewLines || !cached.previewLines.length) {
+                return { ...chat, key };
+            }
+
+            const incomingLast = String(chat.lastMessage || '').trim();
+            const cachedLast = String(cached.lastMessage || '').trim();
+            const lines = cached.previewLines;
+            const lastLine = String(lines[lines.length - 1] || '').trim();
+
+            // Si llegó un mensaje nuevo distinto, invalidar para re-enriquecer.
+            if (
+                incomingLast &&
+                cachedLast &&
+                incomingLast !== cachedLast &&
+                incomingLast !== lastLine &&
+                !lines.some((l) => l === incomingLast)
+            ) {
+                this._conversationPreviewByKey.delete(key);
+                return { ...chat, key };
+            }
+
+            return {
+                ...chat,
+                key,
+                previewLines: [...lines],
+                lastMessage: incomingLast || cachedLast || chat.lastMessage
+            };
+        });
+    }
+
     async enrichConversationPreviews(options = {}) {
         const silent = Boolean(options.silent);
-        const chats = this.getVisibleConversationsChats().slice(0, 60);
+        const onlyMissing = Boolean(options.onlyMissing);
+        if (this._conversationsPreviewInFlight && onlyMissing) return;
+
+        let chats = this.getVisibleConversationsChats();
+        if (onlyMissing) {
+            chats = chats.filter(
+                (c) => !Array.isArray(c.previewLines) || c.previewLines.length === 0
+            );
+        }
+        chats = chats.slice(0, 80);
         if (!chats.length) return;
+
+        const seq = ++this._conversationsPreviewSeq;
+        this._conversationsPreviewInFlight = true;
 
         const items = chats.map((c) => ({
             sessionId: c.sessionId,
@@ -1334,6 +1414,8 @@ class CVAnalyzer {
                 body: JSON.stringify({ items, lines: 4 })
             });
             const data = await response.json().catch(() => ({}));
+            if (seq !== this._conversationsPreviewSeq) return;
+
             if (!response.ok || !data.success) {
                 if (!silent) {
                     console.warn(
@@ -1349,19 +1431,27 @@ class CVAnalyzer {
             );
             let changed = false;
             for (const chat of this.conversationsChats) {
-                const key = chat.key || `${chat.sessionId}::${chat.id}`;
+                const key = this.conversationChatKey(chat);
                 const preview = byKey.get(key);
-                if (!preview || !Array.isArray(preview.previewLines) || !preview.previewLines.length) {
-                    continue;
+                if (!preview) continue;
+                let lines = Array.isArray(preview.previewLines) ? preview.previewLines : [];
+                if (!lines.length && chat.lastMessage) {
+                    lines = [String(chat.lastMessage)];
                 }
-                chat.previewLines = preview.previewLines;
+                if (!lines.length) continue;
+                this.rememberConversationPreview(chat, lines);
                 if (preview.lastMessage) chat.lastMessage = preview.lastMessage;
                 changed = true;
             }
             if (changed) this.renderConversationsChatList();
         } catch (error) {
+            if (seq !== this._conversationsPreviewSeq) return;
             if (!silent) {
                 console.warn('[conversations] previews error:', error.message || error);
+            }
+        } finally {
+            if (seq === this._conversationsPreviewSeq) {
+                this._conversationsPreviewInFlight = false;
             }
         }
     }
@@ -1812,7 +1902,25 @@ class CVAnalyzer {
                 return;
             }
 
-            this.renderConversationMessages(data.messages || [], { preserveScroll: silent });
+            const messages = data.messages || [];
+            this.renderConversationMessages(messages, { preserveScroll: silent });
+
+            const previewLines = messages
+                .map((m) => String((m && m.body) || '').replace(/\s+/g, ' ').trim())
+                .filter(Boolean)
+                .slice(-4)
+                .map((line) => (line.length > 140 ? `${line.slice(0, 140)}…` : line));
+            if (previewLines.length) {
+                const chat = (this.conversationsChats || []).find(
+                    (c) =>
+                        this.sameConversationChatId(c.id, active.chatId) &&
+                        String(c.sessionId) === String(active.sessionId)
+                );
+                if (chat) {
+                    this.rememberConversationPreview(chat, previewLines);
+                    if (!silent) this.renderConversationsChatList();
+                }
+            }
         } catch (error) {
             if (!silent && this.conversationsThreadMessages) {
                 this.conversationsThreadMessages.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;

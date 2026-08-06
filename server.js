@@ -3058,7 +3058,7 @@ app.post('/api/conversations/previews', async (req, res) => {
       }
       try {
         const messages = await getChatHistory(session.openwaSessionId, item.chatId, {
-          limit: Math.max(lines, 8)
+          limit: 20
         });
         const previewLines = buildChatPreviewLines(messages, lines);
         return {
