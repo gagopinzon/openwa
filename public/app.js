@@ -5348,6 +5348,9 @@ class CVAnalyzer {
         } else {
             this.sendWhatsAppBtn.disabled = !hasReady;
             this.sendWhatsAppBtn.textContent = 'Enviar ahora';
+            if (this.generateMessagesBtn) {
+                this.generateMessagesBtn.disabled = false;
+            }
         }
     }
 
@@ -5418,7 +5421,9 @@ class CVAnalyzer {
         if (!this.sendProgressTrackingPromise) {
             this.sendProgressTrackingPromise = this.waitForSendComplete(total).finally(async () => {
                 this.sendProgressTrackingPromise = null;
+                await this.clearIdleSendQueue();
                 await this.refreshSendQueue();
+                this.unlockSendControlsIfIdle();
             });
         }
         return this.sendProgressTrackingPromise;
@@ -5711,6 +5716,71 @@ class CVAnalyzer {
         }
         this.showStatus(message, 'success');
         this.finalizeSendingProgress(status.results || []);
+        // Quitar enviados de la mesa, limpiar cola sent y reactivar botón.
+        this.syncWorkspaceAfterSend()
+            .catch((err) => console.warn('post-send workspace sync:', err));
+    }
+
+    async syncWorkspaceAfterSend() {
+        await this.reloadCvsFromServer();
+        await this.clearIdleSendQueue();
+        await this.refreshSendQueue();
+        this.unlockSendControlsIfIdle();
+        const remaining = this.getReadyMessagesCount();
+        if (remaining === 0) {
+            this.showStatus(
+                'Envío terminado. Los enviados se quitaron de la lista para no reenviarlos.',
+                'success'
+            );
+        } else {
+            this.showStatus(
+                `Envío terminado. Quedan ${remaining} sin enviar (fallidos u omitidos).`,
+                'info'
+            );
+        }
+    }
+
+    async reloadCvsFromServer() {
+        try {
+            const cvsRes = await fetch('/cvs-status');
+            const cvsResult = await cvsRes.json();
+            if (cvsResult.success && Array.isArray(cvsResult.cvs)) {
+                this.cvsData = cvsResult.cvs;
+                if (this.cvsData.length === 0) {
+                    this.resultsSection.style.display = 'none';
+                } else {
+                    this.displayResults();
+                }
+            }
+        } catch (error) {
+            console.warn('Error recargando CVs:', error);
+        }
+    }
+
+    /** Reactiva Enviar/Generar si no hay lote sending. */
+    unlockSendControlsIfIdle() {
+        const batches = Array.isArray(this.queueState?.batches)
+            ? this.queueState.batches
+            : this.queueState?.batch
+              ? [this.queueState.batch]
+              : [];
+        const stillSending = batches.some((b) => b.status === 'sending');
+        if (stillSending) return;
+
+        const hasReady = this.getReadyMessagesCount() > 0;
+        if (this.sendWhatsAppBtn) {
+            this.sendWhatsAppBtn.disabled = !hasReady;
+            this.sendWhatsAppBtn.textContent = 'Enviar ahora';
+        }
+        if (this.generateMessagesBtn) {
+            this.generateMessagesBtn.disabled = this.cvsData.length === 0;
+        }
+        if (this.toggleScheduleBtn) {
+            this.toggleScheduleBtn.disabled = !hasReady;
+        }
+        if (this.enqueueBtn) this.enqueueBtn.disabled = !hasReady;
+        if (this.scheduleMorningBtn) this.scheduleMorningBtn.disabled = !hasReady;
+        if (this.scheduleAfternoonBtn) this.scheduleAfternoonBtn.disabled = !hasReady;
     }
 
     initSessionSendingPanel(sessionIds) {
@@ -6543,8 +6613,30 @@ class CVAnalyzer {
                 } else if (Array.isArray(status.results)) {
                     this.setSendSuccessCount(status.results.filter((r) => r.success).length);
                 }
+                await this.syncWorkspaceAfterSend();
             } catch (error) {
                 console.warn('Error cargando resultado de envío:', error);
+                this.unlockSendControlsIfIdle();
+            }
+        });
+
+        this.eventSource.addEventListener('cvsUpdated', async (event) => {
+            try {
+                const data = JSON.parse(event.data || '{}');
+                if (Array.isArray(data.cvs)) {
+                    this.cvsData = data.cvs;
+                    if (this.cvsData.length === 0) {
+                        this.resultsSection.style.display = 'none';
+                    } else {
+                        this.displayResults();
+                    }
+                    this.unlockSendControlsIfIdle();
+                } else {
+                    await this.reloadCvsFromServer();
+                    this.unlockSendControlsIfIdle();
+                }
+            } catch (error) {
+                console.warn('cvsUpdated:', error);
             }
         });
 
@@ -6562,7 +6654,7 @@ class CVAnalyzer {
         });
 
         this.eventSource.addEventListener('sendQueueFinished', async () => {
-            await this.refreshSendQueue();
+            await this.syncWorkspaceAfterSend();
         });
 
         this.eventSource.addEventListener('sendError', (event) => {

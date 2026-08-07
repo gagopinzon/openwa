@@ -172,6 +172,36 @@ function persistCvsData() {
   }
 }
 
+/** Quita de la mesa de trabajo los CVs enviados con éxito (evita reenvío accidental). */
+function removeSuccessfullySentFromWorkspace(results) {
+  if (!Array.isArray(results) || results.length === 0) {
+    return { removed: 0, remaining: cvsData.length };
+  }
+
+  const sentPhones = results
+    .filter((r) => r && r.success && r.telefono)
+    .map((r) => r.telefono);
+
+  if (sentPhones.length === 0) {
+    return { removed: 0, remaining: cvsData.length };
+  }
+
+  const before = cvsData.length;
+  cvsData = cvsData.filter((cv) => {
+    const phone = cv?.telefono;
+    if (!phone || phone === 'No encontrado') return true;
+    return !sentPhones.some((sent) => contactHistory.phonesMatch(phone, sent));
+  });
+  const removed = before - cvsData.length;
+  if (removed > 0) {
+    persistCvsData();
+    console.log(
+      `🧹 Mesa de trabajo: quitados ${removed} CV(s) ya enviados; quedan ${cvsData.length}`
+    );
+  }
+  return { removed, remaining: cvsData.length };
+}
+
 /**
  * Resuelve el CV del lead por teléfono (o cvId del historial).
  * @param {string} phone
@@ -458,20 +488,40 @@ async function runWhatsAppSendJob({
     lastSendJob.completedAt = Date.now();
     console.log(`Envío completado. ${lastSendJob.message}`);
 
+    const workspaceCleanup = removeSuccessfullySentFromWorkspace(lastSendJob.results || []);
+
+    // Marcar cola como sent ANTES de liberar inProgress / sendComplete,
+    // para que la UI no refresque viendo aún "sending".
+    markSendQueueJobFinished();
+    try {
+      sendQueueStore.clearTerminalBatches();
+    } catch (err) {
+      console.warn('clearTerminalBatches:', err.message);
+    }
+
+    broadcastEvent('cvsUpdated', {
+      removed: workspaceCleanup.removed,
+      remaining: workspaceCleanup.remaining,
+      cvs: cvsData
+    });
+    broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+
     broadcastEvent('sendComplete', {
       message: lastSendJob.message,
       total: finalCvsToSend.length,
       successCount: lastSendJob.successCount,
-      testMode
+      testMode,
+      removedFromWorkspace: workspaceCleanup.removed,
+      remainingInWorkspace: workspaceCleanup.remaining
     });
   } catch (error) {
     console.error('Error en envío en segundo plano:', error);
     lastSendJob.error = error.message;
     resetBulkControlState(controlId, sessionIds);
+    markSendQueueJobFinished();
     broadcastEvent('sendError', { error: error.message });
   } finally {
     lastSendJob.inProgress = false;
-    markSendQueueJobFinished();
   }
 }
 
