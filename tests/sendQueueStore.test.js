@@ -17,13 +17,31 @@ const sampleCvs = [
   }
 ];
 
+const sampleCvs2 = [
+  {
+    archivoOriginal: 'b.pdf',
+    nombre: 'Bob',
+    telefono: '5215559998877',
+    mensajeIA: 'Hola Bob',
+    saludo: 'Hola',
+    cvId: '2'
+  }
+];
+
 describe('sendQueueStore', () => {
   let backup;
 
   beforeEach(() => {
     backup = fs.existsSync(STORE_FILE) ? fs.readFileSync(STORE_FILE, 'utf8') : null;
     fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
-    fs.writeFileSync(STORE_FILE, JSON.stringify({ version: 1, batch: null }, null, 2));
+    fs.writeFileSync(
+      STORE_FILE,
+      JSON.stringify(
+        { version: 2, scheduleDefaults: { morning: '10:30', afternoon: '16:00' }, batches: [] },
+        null,
+        2
+      )
+    );
   });
 
   afterEach(() => {
@@ -82,26 +100,43 @@ describe('sendQueueStore', () => {
     );
   });
 
-  it('segundo enqueue activo → 409', () => {
+  it('permite segundo enqueue mientras hay lote scheduled', () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     store.enqueue({
       cvs: sampleCvs,
       selectedSessions: ['s1'],
       sessionWeights: null,
-      scheduledAt: null
+      scheduledAt: future
     });
-    assert.throws(
-      () =>
-        store.enqueue({
-          cvs: sampleCvs,
-          selectedSessions: ['s1'],
-          sessionWeights: null,
-          scheduledAt: null
-        }),
-      (err) => err.status === 409
-    );
+    const b2 = store.enqueue({
+      cvs: sampleCvs2,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    });
+    assert.equal(b2.status, 'scheduled');
+    assert.equal(store.getBatches().length, 2);
+    assert.equal(store.canEnqueue(), true);
   });
 
-  it('markSending quema botón; markSent mantiene burned; luego canEnqueue', () => {
+  it('slot morning/afternoon calcula scheduledAt mañana', () => {
+    const batch = store.enqueue({
+      cvs: sampleCvs,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      slot: 'morning'
+    });
+    assert.equal(batch.status, 'scheduled');
+    assert.equal(batch.slot, 'morning');
+    const when = new Date(batch.scheduledAt);
+    assert.equal(when.getHours(), 10);
+    assert.equal(when.getMinutes(), 30);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    assert.equal(when.getDate(), tomorrow.getDate());
+  });
+
+  it('markSending quema botón; markSent libera; se puede encolar más', () => {
     store.enqueue({
       cvs: sampleCvs,
       selectedSessions: ['s1'],
@@ -112,41 +147,44 @@ describe('sendQueueStore', () => {
     assert.equal(store.buttonBurned(), true);
     assert.equal(store.canDispatch(), false);
     store.markSent();
-    assert.equal(store.getBatch().status, 'sent');
-    assert.equal(store.buttonBurned(), true);
+    assert.equal(store.getSendingBatch(), null);
+    assert.equal(store.buttonBurned(), false);
     assert.equal(store.canEnqueue(), true);
   });
 
-  it('cancel solo en queued/scheduled', () => {
+  it('no permite dos sending a la vez', () => {
     store.enqueue({
       cvs: sampleCvs,
       selectedSessions: ['s1'],
       sessionWeights: null,
       scheduledAt: null
     });
-    const c = store.cancel();
-    assert.equal(c.status, 'cancelled');
-    assert.equal(store.canEnqueue(), true);
-    assert.equal(store.buttonBurned(), false);
-  });
-
-  it('tras sent se puede encolar de nuevo (reemplaza)', () => {
     store.enqueue({
-      cvs: sampleCvs,
+      cvs: sampleCvs2,
       selectedSessions: ['s1'],
       sessionWeights: null,
       scheduledAt: null
     });
     store.markSending();
-    store.markSent();
-    const b2 = store.enqueue({
+    assert.throws(() => store.markSending(), (err) => err.status === 409);
+  });
+
+  it('cancel por batchId con varios lotes', () => {
+    const a = store.enqueue({
       cvs: sampleCvs,
-      selectedSessions: ['s2'],
+      selectedSessions: ['s1'],
       sessionWeights: null,
       scheduledAt: null
     });
-    assert.equal(b2.status, 'queued');
-    assert.equal(b2.selectedSessions[0], 's2');
+    const b = store.enqueue({
+      cvs: sampleCvs2,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: null
+    });
+    const c = store.cancel(a.id);
+    assert.equal(c.status, 'cancelled');
+    assert.equal(store.getBatchById(b.id).status, 'queued');
   });
 
   it('beginDirectSend crea batch ya en sending', () => {
@@ -173,7 +211,61 @@ describe('sendQueueStore', () => {
       () => store.clearBatch(),
       (err) => err.status === 409
     );
-    assert.equal(store.getBatch().id, batch.id);
-    assert.equal(store.getBatch().status, 'sending');
+    assert.equal(store.getSendingBatch().id, batch.id);
+  });
+
+  it('recoverOrphanSending marca sending como sent', () => {
+    store.beginDirectSend({
+      cvs: sampleCvs,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: null
+    });
+    const n = store.recoverOrphanSending();
+    assert.equal(n, 1);
+    assert.equal(store.getSendingBatch(), null);
+    assert.equal(store.getBatches()[0].status, 'sent');
+    assert.equal(store.getBatches()[0].recoveredOrphan, true);
+  });
+
+  it('migra store v1 batch único a batches[]', () => {
+    const legacy = {
+      version: 1,
+      batch: {
+        id: 'legacy1',
+        status: 'scheduled',
+        cvs: sampleCvs,
+        selectedSessions: ['s1'],
+        sessionWeights: null,
+        scheduledAt: new Date(Date.now() + 3600000).toISOString(),
+        createdAt: new Date().toISOString(),
+        total: 1,
+        sendingAt: null,
+        sentAt: null,
+        cancelledAt: null
+      }
+    };
+    fs.writeFileSync(STORE_FILE, JSON.stringify(legacy));
+    const batches = store.getBatches();
+    assert.equal(batches.length, 1);
+    assert.equal(batches[0].id, 'legacy1');
+  });
+
+  it('getNextScheduledBatch elige el más temprano', () => {
+    const later = new Date(Date.now() + 3 * 3600000).toISOString();
+    const sooner = new Date(Date.now() + 3600000).toISOString();
+    store.enqueue({
+      cvs: sampleCvs,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: later
+    });
+    const early = store.enqueue({
+      cvs: sampleCvs2,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: sooner
+    });
+    assert.equal(store.getNextScheduledBatch().id, early.id);
   });
 });

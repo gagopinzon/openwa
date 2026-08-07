@@ -78,12 +78,15 @@ class CVAnalyzer {
         this.refreshOpenwaListBtn = document.getElementById('refreshOpenwaListBtn');
         this.clearDataBtn = document.getElementById('clearDataBtn');
         this.enqueueBtn = document.getElementById('enqueueBtn');
+        this.scheduleMorningBtn = document.getElementById('scheduleMorningBtn');
+        this.scheduleAfternoonBtn = document.getElementById('scheduleAfternoonBtn');
         this.scheduleAtInput = document.getElementById('scheduleAtInput');
         this.schedulePanel = document.getElementById('schedulePanel');
         this.toggleScheduleBtn = document.getElementById('toggleScheduleBtn');
         this.schedulePanelOpen = false;
         this.sendQueuePanel = document.getElementById('sendQueuePanel');
         this.sendQueueStatus = document.getElementById('sendQueueStatus');
+        this.sendQueueList = document.getElementById('sendQueueList');
         this.sendQueueMeta = document.getElementById('sendQueueMeta');
         this.dispatchQueueBtn = document.getElementById('dispatchQueueBtn');
         this.cancelQueueBtn = document.getElementById('cancelQueueBtn');
@@ -129,6 +132,8 @@ class CVAnalyzer {
         this.openWhatsAppBtn.addEventListener('click', this.openWhatsApp.bind(this));
         this.clearDataBtn.addEventListener('click', this.clearData.bind(this));
         this.enqueueBtn?.addEventListener('click', this.enqueueBatch.bind(this));
+        this.scheduleMorningBtn?.addEventListener('click', () => this.enqueueBatch({ slot: 'morning' }));
+        this.scheduleAfternoonBtn?.addEventListener('click', () => this.enqueueBatch({ slot: 'afternoon' }));
         this.dispatchQueueBtn?.addEventListener('click', this.dispatchQueue.bind(this));
         this.cancelQueueBtn?.addEventListener('click', this.cancelQueue.bind(this));
         if (this.toggleScheduleBtn) {
@@ -5199,18 +5204,12 @@ class CVAnalyzer {
     }
 
     /**
-     * Tras generar mensajes nuevos, el lote anterior en `sent`/`cancelled`
-     * deja buttonBurned=true y bloquea «Enviar ahora». Lo limpiamos si no hay envío activo.
+     * Tras generar mensajes nuevos, quita lotes sent/cancelled del panel
+     * sin tocar queued/scheduled/sending.
      */
     async clearIdleSendQueue() {
         try {
-            const response = await fetch('/api/send-queue');
-            const data = await response.json();
-            if (!response.ok) return;
-            const status = data.batch?.status;
-            if (status !== 'sent' && status !== 'cancelled') return;
-
-            const clearRes = await fetch('/api/send-queue/clear', { method: 'POST' });
+            const clearRes = await fetch('/api/send-queue/clear-terminal', { method: 'POST' });
             if (!clearRes.ok) {
                 const err = await clearRes.json().catch(() => ({}));
                 console.warn('No se pudo limpiar cola idle:', err.error || clearRes.status);
@@ -5247,60 +5246,112 @@ class CVAnalyzer {
         return map[status] || status || '';
     }
 
+    updateScheduleSlotLabels(defaults = {}) {
+        const morning = defaults.morning || '10:30';
+        const afternoon = defaults.afternoon || '16:00';
+        if (this.scheduleMorningBtn) {
+            this.scheduleMorningBtn.textContent = `Mañana ${morning}`;
+        }
+        if (this.scheduleAfternoonBtn) {
+            this.scheduleAfternoonBtn.textContent = `Tarde ${afternoon}`;
+        }
+    }
+
     applyQueueUi(data = {}) {
         if (!this.sendQueuePanel || !this.enqueueBtn || !this.sendWhatsAppBtn) return;
 
-        const batch = data.batch;
-        const terminal = batch && ['sent', 'cancelled'].includes(batch.status);
-        const active = batch && ['queued', 'scheduled', 'sending'].includes(batch.status);
+        const batches = Array.isArray(data.batches)
+            ? data.batches
+            : data.batch
+              ? [data.batch]
+              : [];
+        const active = batches.filter((b) =>
+            ['queued', 'scheduled', 'sending'].includes(b.status)
+        );
+        const sending = active.find((b) => b.status === 'sending');
 
-        if (!batch) {
+        this.updateScheduleSlotLabels(data.scheduleDefaults || {});
+
+        if (active.length === 0 && batches.length === 0) {
             this.sendQueuePanel.style.display = 'none';
         } else {
             this.sendQueuePanel.style.display = 'block';
-            this.sendQueueStatus.textContent = this.queueStatusLabel(batch.status);
+            this.sendQueueStatus.textContent = sending
+                ? 'Enviando'
+                : active.length
+                  ? `${active.length} en cola`
+                  : this.queueStatusLabel(batches[batches.length - 1]?.status);
 
-            if (terminal) {
-                this.sendQueueMeta.textContent =
-                    batch.status === 'sent'
-                        ? `Lote enviado (${batch.total} mensajes)`
-                        : 'Lote cancelado';
-            } else {
-                const scheduled = batch.scheduledAt
-                    ? ` · programado para ${new Date(batch.scheduledAt).toLocaleString()}`
-                    : ' · listo para iniciar';
-                this.sendQueueMeta.textContent = `${batch.total} mensajes${scheduled}`;
+            if (this.sendQueueList) {
+                const show = active.length ? active : batches.slice(-3);
+                this.sendQueueList.innerHTML = show
+                    .map((batch) => {
+                        const title =
+                            batch.label ||
+                            (batch.slot === 'afternoon'
+                                ? 'Tarde'
+                                : batch.slot === 'morning'
+                                  ? 'Mañana'
+                                  : 'Lote');
+                        const when = batch.scheduledAt
+                            ? new Date(batch.scheduledAt).toLocaleString()
+                            : 'sin hora (manual)';
+                        const canAct =
+                            batch.status === 'queued' || batch.status === 'scheduled';
+                        return `
+                        <div class="send-queue-item" data-batch-id="${batch.id}">
+                            <div class="send-queue-item-info">
+                                <strong>${title}</strong> · ${this.queueStatusLabel(batch.status)}
+                                <br>${batch.total || 0} mensajes · ${when}
+                            </div>
+                            <div class="send-queue-item-actions">
+                                ${
+                                    canAct
+                                        ? `<button type="button" class="btn btn-success btn-sm" data-action="dispatch" data-batch-id="${batch.id}">Iniciar</button>
+                                           <button type="button" class="btn btn-danger btn-sm" data-action="cancel" data-batch-id="${batch.id}">Cancelar</button>`
+                                        : ''
+                                }
+                            </div>
+                        </div>`;
+                    })
+                    .join('');
+
+                this.sendQueueList.querySelectorAll('[data-action="dispatch"]').forEach((btn) => {
+                    btn.addEventListener('click', () =>
+                        this.dispatchQueue(btn.getAttribute('data-batch-id'))
+                    );
+                });
+                this.sendQueueList.querySelectorAll('[data-action="cancel"]').forEach((btn) => {
+                    btn.addEventListener('click', () =>
+                        this.cancelQueue(btn.getAttribute('data-batch-id'))
+                    );
+                });
             }
-
-            const showActions = Boolean(data.canDispatch && !terminal);
-            this.dispatchQueueBtn.style.display = showActions ? '' : 'none';
-            this.cancelQueueBtn.style.display = showActions ? '' : 'none';
         }
 
         const hasReady = this.getReadyMessagesCount() > 0;
-        this.enqueueBtn.disabled = !hasReady || !data.canEnqueue;
+        const canEnqueue = data.canEnqueue !== false;
+        this.enqueueBtn.disabled = !hasReady || !canEnqueue;
         if (this.toggleScheduleBtn) {
-            this.toggleScheduleBtn.disabled = !hasReady || !data.canEnqueue;
+            this.toggleScheduleBtn.disabled = !hasReady || !canEnqueue;
+        }
+        if (this.scheduleMorningBtn) {
+            this.scheduleMorningBtn.disabled = !hasReady || !canEnqueue;
+        }
+        if (this.scheduleAfternoonBtn) {
+            this.scheduleAfternoonBtn.disabled = !hasReady || !canEnqueue;
         }
 
-        if (data.buttonBurned || active) {
+        if (sending || data.buttonBurned) {
             this.sendWhatsAppBtn.disabled = true;
-            if (batch?.status === 'sending') {
-                this.sendWhatsAppBtn.textContent = 'Enviando…';
-            } else if (batch?.status === 'sent') {
-                this.sendWhatsAppBtn.textContent = 'Enviado';
-            } else if (batch?.status === 'scheduled') {
-                this.sendWhatsAppBtn.textContent = 'Programado…';
-            } else {
-                this.sendWhatsAppBtn.textContent = 'En cola…';
-            }
+            this.sendWhatsAppBtn.textContent = 'Enviando…';
         } else {
             this.sendWhatsAppBtn.disabled = !hasReady;
             this.sendWhatsAppBtn.textContent = 'Enviar ahora';
         }
     }
 
-    async enqueueBatch() {
+    async enqueueBatch(options = {}) {
         const selectedSessions = this.getSelectedSessionIds();
         if (selectedSessions.length === 0) {
             this.showStatus('Marca al menos una línea para programar el envío', 'error');
@@ -5313,9 +5364,14 @@ class CVAnalyzer {
             return;
         }
 
-        const scheduledLocal = this.scheduleAtInput.value;
-        const scheduledAt = scheduledLocal ? new Date(scheduledLocal).toISOString() : null;
+        const slot = options.slot || null;
+        const scheduledLocal = this.scheduleAtInput?.value;
+        const scheduledAt =
+            !slot && scheduledLocal ? new Date(scheduledLocal).toISOString() : null;
+
         this.enqueueBtn.disabled = true;
+        if (this.scheduleMorningBtn) this.scheduleMorningBtn.disabled = true;
+        if (this.scheduleAfternoonBtn) this.scheduleAfternoonBtn.disabled = true;
 
         try {
             const response = await fetch('/api/send-queue', {
@@ -5326,7 +5382,8 @@ class CVAnalyzer {
                     selectedSessions,
                     sessionWeights:
                         selectedSessions.length > 1 ? this.getSelectedSessionWeights() : undefined,
-                    scheduledAt
+                    scheduledAt,
+                    slot
                 })
             });
             const data = await response.json();
@@ -5341,12 +5398,15 @@ class CVAnalyzer {
             this.schedulePanelOpen = false;
             if (this.schedulePanel) this.schedulePanel.style.display = 'none';
             if (this.toggleScheduleBtn) this.toggleScheduleBtn.textContent = 'Programar…';
-            this.showStatus(
-                scheduledAt
-                    ? 'Envío programado'
-                    : 'Lote en cola. Pulsa “Iniciar envío” cuando quieras.',
-                'success'
-            );
+            const msg =
+                slot === 'morning'
+                    ? 'Lote programado para mañana por la mañana'
+                    : slot === 'afternoon'
+                      ? 'Lote programado para mañana por la tarde'
+                      : scheduledAt
+                        ? 'Envío programado'
+                        : 'Lote en cola. Pulsa “Iniciar” cuando quieras.';
+            this.showStatus(msg, 'success');
         } catch (error) {
             console.error('Error encolando lote:', error);
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
@@ -5382,13 +5442,17 @@ class CVAnalyzer {
         return this.trackSendProgress(batch.total || this.getReadyMessagesCount());
     }
 
-    async dispatchQueue() {
-        this.dispatchQueueBtn.disabled = true;
-        this.cancelQueueBtn.disabled = true;
+    async dispatchQueue(batchId = null) {
+        if (this.dispatchQueueBtn) this.dispatchQueueBtn.disabled = true;
+        if (this.cancelQueueBtn) this.cancelQueueBtn.disabled = true;
         this.sendJobCompleted = null;
 
         try {
-            const response = await fetch('/api/send-queue/dispatch', { method: 'POST' });
+            const response = await fetch('/api/send-queue/dispatch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ batchId: batchId || undefined })
+            });
             const data = await response.json();
             if (!response.ok) {
                 this.showStatus(data.error || 'No se pudo enviar', 'error');
@@ -5405,17 +5469,21 @@ class CVAnalyzer {
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
             await this.refreshSendQueue();
         } finally {
-            this.dispatchQueueBtn.disabled = false;
-            this.cancelQueueBtn.disabled = false;
+            if (this.dispatchQueueBtn) this.dispatchQueueBtn.disabled = false;
+            if (this.cancelQueueBtn) this.cancelQueueBtn.disabled = false;
         }
     }
 
-    async cancelQueue() {
-        this.dispatchQueueBtn.disabled = true;
-        this.cancelQueueBtn.disabled = true;
+    async cancelQueue(batchId = null) {
+        if (this.dispatchQueueBtn) this.dispatchQueueBtn.disabled = true;
+        if (this.cancelQueueBtn) this.cancelQueueBtn.disabled = true;
 
         try {
-            const response = await fetch('/api/send-queue/cancel', { method: 'POST' });
+            const response = await fetch('/api/send-queue/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ batchId: batchId || undefined })
+            });
             const data = await response.json();
             if (!response.ok) {
                 this.showStatus(data.error || 'No se pudo cancelar', 'error');
@@ -5425,14 +5493,14 @@ class CVAnalyzer {
 
             this.queueState = data;
             this.applyQueueUi(data);
-            this.showStatus('Cola cancelada', 'success');
+            this.showStatus('Lote cancelado', 'success');
         } catch (error) {
             console.error('Error cancelando cola:', error);
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
             await this.refreshSendQueue();
         } finally {
-            this.dispatchQueueBtn.disabled = false;
-            this.cancelQueueBtn.disabled = false;
+            if (this.dispatchQueueBtn) this.dispatchQueueBtn.disabled = false;
+            if (this.cancelQueueBtn) this.cancelQueueBtn.disabled = false;
         }
     }
 
@@ -5939,7 +6007,9 @@ class CVAnalyzer {
         if (confirm('¿Estás seguro de limpiar todos los datos?')) {
             try {
                 const queueResponse = await fetch('/api/send-queue/clear', {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ force: true })
                 });
                 const queueResult = await queueResponse.json();
                 if (!queueResponse.ok) {

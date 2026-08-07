@@ -76,7 +76,7 @@ function clearSendQueueTimer() {
 
 function armSendQueueTimer(retryDelayMs = null) {
   clearSendQueueTimer();
-  const batch = sendQueueStore.getBatch();
+  const batch = sendQueueStore.getNextScheduledBatch();
   if (!batch || batch.status !== sendQueueStore.STATUS.SCHEDULED || !batch.scheduledAt) {
     return;
   }
@@ -93,12 +93,9 @@ function armSendQueueTimer(retryDelayMs = null) {
     sendQueueTimer = null;
     sendQueueTimerBatchId = null;
 
-    const current = sendQueueStore.getBatch();
-    if (
-      !current ||
-      current.id !== armedBatchId ||
-      current.status !== sendQueueStore.STATUS.SCHEDULED
-    ) {
+    const current = sendQueueStore.getBatchById(armedBatchId);
+    if (!current || current.status !== sendQueueStore.STATUS.SCHEDULED) {
+      armSendQueueTimer();
       return;
     }
 
@@ -109,17 +106,18 @@ function armSendQueueTimer(retryDelayMs = null) {
     }
 
     try {
-      await dispatchQueuedBatch(null);
+      await dispatchQueuedBatch(null, armedBatchId);
     } catch (err) {
       console.error('send-queue timer dispatch:', err.message);
-      const pending = sendQueueStore.getBatch();
+      const pending = sendQueueStore.getBatchById(armedBatchId);
       if (
         err.status === 409 &&
         pending &&
-        pending.id === armedBatchId &&
         pending.status === sendQueueStore.STATUS.SCHEDULED
       ) {
         armSendQueueTimer(SEND_QUEUE_RETRY_MS);
+      } else {
+        armSendQueueTimer();
       }
     }
   }, delay);
@@ -512,11 +510,13 @@ function createMongoRecordHook() {
 }
 
 function markSendQueueJobFinished() {
-  const batch = sendQueueStore.getBatch();
-  if (!batch || batch.status !== sendQueueStore.STATUS.SENDING) return;
+  const batch = sendQueueStore.getSendingBatch();
+  if (!batch) return;
   try {
     sendQueueStore.markSent(batch.id);
     broadcastEvent('sendQueueFinished', { batchId: batch.id, status: 'sent' });
+    broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+    armSendQueueTimer();
   } catch (err) {
     console.error('send-queue markSent:', err.message);
   }
@@ -614,20 +614,30 @@ async function prepareCvsForSend(cvsFromClient) {
   return { finalCvsToSend, skippedAlreadyContacted, duplicates };
 }
 
-async function dispatchQueuedBatch(_user) {
-  if (!sendQueueStore.canDispatch()) {
-    const err = new Error('No hay lote pendiente para enviar');
-    err.status = 409;
-    throw err;
-  }
-  if (isAnySendingInProgress()) {
+async function dispatchQueuedBatch(_user, batchId = null) {
+  if (isAnySendingInProgress() || sendQueueStore.getSendingBatch()) {
     const err = new Error('Ya hay un envío de mensajes en curso');
     err.status = 409;
     throw err;
   }
 
+  const target =
+    batchId != null
+      ? sendQueueStore.getBatchById(batchId)
+      : sendQueueStore.pickNextDispatchBatch();
+
+  if (
+    !target ||
+    (target.status !== sendQueueStore.STATUS.QUEUED &&
+      target.status !== sendQueueStore.STATUS.SCHEDULED)
+  ) {
+    const err = new Error('No hay lote pendiente para enviar');
+    err.status = 409;
+    throw err;
+  }
+
   clearSendQueueTimer();
-  const batch = sendQueueStore.markSending();
+  const batch = sendQueueStore.markSending(target.id);
   const mongoRecordHook = createMongoRecordHook();
   const sessionIds = TEST_MODE
     ? batch.selectedSessions?.length
@@ -636,6 +646,7 @@ async function dispatchQueuedBatch(_user) {
     : batch.selectedSessions;
 
   broadcastEvent('sendQueueStarted', { batchId: batch.id, total: batch.total });
+  broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
   runWhatsAppSendJob({
     finalCvsToSend: batch.cvs,
     sessionIds,
@@ -643,6 +654,8 @@ async function dispatchQueuedBatch(_user) {
     skippedAlreadyContacted: [],
     mongoRecordHook,
     testMode: TEST_MODE
+  }).finally(() => {
+    armSendQueueTimer();
   });
 
   return batch;
@@ -1943,23 +1956,19 @@ app.post('/api/sessions/import-connected', requireSuper, async (req, res) => {
 
 app.get('/api/send-queue', (req, res) => {
   const state = sendQueueStore.getPublicState();
-  if (state.batch && !canControlSendQueueBatch(req.user, state.batch)) {
-    return res.json({
-      success: true,
-      batch: null,
-      canEnqueue: state.canEnqueue,
-      canDispatch: false,
-      buttonBurned: state.buttonBurned
-    });
-  }
-  res.json({ success: true, ...state });
+  const visibleBatches = (state.batches || []).filter((b) =>
+    canControlSendQueueBatch(req.user, b)
+  );
+  const filtered = {
+    ...state,
+    batches: visibleBatches,
+    batch: visibleBatches.find((b) => b.id === state.batch?.id) || visibleBatches[0] || null
+  };
+  res.json({ success: true, ...filtered });
 });
 
 app.post('/api/send-queue', async (req, res) => {
   try {
-    if (!sendQueueStore.canEnqueue()) {
-      return res.status(409).json({ error: 'Ya hay un lote en cola o enviándose' });
-    }
     const selectedSessions =
       Array.isArray(req.body?.selectedSessions) && req.body.selectedSessions.length > 0
         ? req.body.selectedSessions.map(String)
@@ -1983,17 +1992,22 @@ app.post('/api/send-queue', async (req, res) => {
       });
     }
 
+    const slot =
+      req.body?.slot === 'morning' || req.body?.slot === 'afternoon'
+        ? req.body.slot
+        : null;
+
     const batch = sendQueueStore.enqueue({
       cvs: prepared.finalCvsToSend,
       selectedSessions,
       sessionWeights: req.body?.sessionWeights || null,
-      scheduledAt: req.body?.scheduledAt || null
+      scheduledAt: slot ? null : req.body?.scheduledAt || null,
+      slot
     });
-    if (batch.status === sendQueueStore.STATUS.SCHEDULED) armSendQueueTimer();
-    else clearSendQueueTimer();
+    armSendQueueTimer();
 
     broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
-    res.status(201).json({ success: true, ...sendQueueStore.getPublicState() });
+    res.status(201).json({ success: true, batch, ...sendQueueStore.getPublicState() });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
@@ -2001,11 +2015,14 @@ app.post('/api/send-queue', async (req, res) => {
 
 app.post('/api/send-queue/dispatch', async (req, res) => {
   try {
-    const batch = sendQueueStore.getBatch();
-    if (batch?.selectedSessions?.length) {
-      if (!forbidUnlessControlSessions(batch.selectedSessions, req, res)) return;
+    const batchId = req.body?.batchId || null;
+    const target = batchId
+      ? sendQueueStore.getBatchById(batchId)
+      : sendQueueStore.pickNextDispatchBatch();
+    if (target?.selectedSessions?.length) {
+      if (!forbidUnlessControlSessions(target.selectedSessions, req, res)) return;
     }
-    const started = await dispatchQueuedBatch(req.user);
+    const started = await dispatchQueuedBatch(req.user, batchId);
     res.status(202).json({
       success: true,
       started: true,
@@ -2019,12 +2036,15 @@ app.post('/api/send-queue/dispatch', async (req, res) => {
 
 app.post('/api/send-queue/cancel', (req, res) => {
   try {
-    const current = sendQueueStore.getBatch();
+    const batchId = req.body?.batchId || null;
+    const current = batchId
+      ? sendQueueStore.getBatchById(batchId)
+      : sendQueueStore.getBatch();
     if (current?.selectedSessions?.length) {
       if (!forbidUnlessControlSessions(current.selectedSessions, req, res)) return;
     }
-    clearSendQueueTimer();
-    const batch = sendQueueStore.cancel();
+    const batch = sendQueueStore.cancel(batchId);
+    armSendQueueTimer();
     broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
     res.json({ success: true, batch, ...sendQueueStore.getPublicState() });
   } catch (err) {
@@ -2034,17 +2054,43 @@ app.post('/api/send-queue/cancel', (req, res) => {
 
 app.post('/api/send-queue/clear', (req, res) => {
   try {
-    const batch = sendQueueStore.getBatch();
-    if (batch?.selectedSessions?.length) {
-      if (!forbidUnlessControlSessions(batch.selectedSessions, req, res)) return;
+    const force = Boolean(req.body?.force);
+    const sending = sendQueueStore.getSendingBatch();
+
+    if (sending?.selectedSessions?.length) {
+      if (!forbidUnlessControlSessions(sending.selectedSessions, req, res)) return;
     }
-    if (batch?.status === sendQueueStore.STATUS.SENDING || isAnySendingInProgress()) {
+
+    // Job vivo: nunca limpiar
+    if (isAnySendingInProgress()) {
       return res.status(409).json({
         error: 'No se puede limpiar la cola durante un envío'
       });
     }
-    sendQueueStore.clearBatch();
+
+    // sending en disco sin job = huérfano; force o auto-recovery
+    if (sending && !force) {
+      return res.status(409).json({
+        error:
+          'Hay un lote marcado como enviando sin job activo. Usa force:true para desbloquearlo.',
+        orphanSending: true,
+        batchId: sending.id
+      });
+    }
+
+    sendQueueStore.clearBatch({ force: Boolean(sending) || force });
     clearSendQueueTimer();
+    const state = sendQueueStore.getPublicState();
+    broadcastEvent('sendQueueUpdated', state);
+    res.json({ success: true, ...state });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/send-queue/clear-terminal', (req, res) => {
+  try {
+    sendQueueStore.clearTerminalBatches();
     const state = sendQueueStore.getPublicState();
     broadcastEvent('sendQueueUpdated', state);
     res.json({ success: true, ...state });
@@ -2056,21 +2102,13 @@ app.post('/api/send-queue/clear', (req, res) => {
 // Ruta para enviar mensajes por WhatsApp
 app.post('/send-whatsapp', async (req, res) => {
   try {
-    const queuedBatch = sendQueueStore.getBatch();
-    if (queuedBatch && sendQueueStore.isActive(queuedBatch)) {
+    const sendingBatch = sendQueueStore.getSendingBatch();
+    if (sendingBatch || isAnySendingInProgress()) {
       return res.status(409).json({
-        error: 'Hay un lote en cola o enviándose. Cancélalo o espera.',
-        batch: canControlSendQueueBatch(req.user, queuedBatch) ? queuedBatch : null
-      });
-    }
-
-    if (isAnySendingInProgress()) {
-      return res.status(409).json({
-        error: 'Ya hay un envío de mensajes en curso',
-        sendJob: {
-          total: lastSendJob.total,
-          sessionIds: lastSendJob.sessionIds
-        }
+        error: 'Hay un envío en curso. Espera a que termine o usa la cola.',
+        batch: sendingBatch && canControlSendQueueBatch(req.user, sendingBatch)
+          ? sendingBatch
+          : null
       });
     }
 
@@ -3980,6 +4018,14 @@ process.on('SIGTERM', async () => {
 
 // Iniciar servidor
 sessionsStore.migrateFromEnvIfEmpty();
+{
+  const recovered = sendQueueStore.recoverOrphanSending();
+  if (recovered > 0) {
+    console.log(
+      `⚠️ Cola: ${recovered} lote(s) en sending sin job vivo → marcados como sent (huérfanos)`
+    );
+  }
+}
 armSendQueueTimer();
 
 app.listen(PORT, () => {

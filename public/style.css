@@ -239,6 +239,14 @@ section h2 {
     text-align: center;
 }
 
+.schedule-slot-actions {
+    flex-basis: 100%;
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
 .send-queue-panel {
     margin: 12px auto 16px;
     max-width: 640px;
@@ -269,6 +277,38 @@ section h2 {
     margin: 8px 0;
     color: #475569;
     font-size: 13px;
+}
+
+.send-queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.send-queue-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: #fff;
+}
+
+.send-queue-item-info {
+    flex: 1;
+    min-width: 180px;
+    font-size: 13px;
+    color: #334155;
+}
+
+.send-queue-item-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
 }
 
 .send-queue-actions {

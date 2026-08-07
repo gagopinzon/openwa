@@ -343,13 +343,21 @@
             </div>
 
             <div class="queue-controls" id="schedulePanel" style="display: none;">
-                <label for="scheduleAtInput">Fecha y hora:</label>
+                <div class="schedule-slot-actions">
+                    <button type="button" id="scheduleMorningBtn" class="btn btn-secondary">
+                        Mañana 10:30
+                    </button>
+                    <button type="button" id="scheduleAfternoonBtn" class="btn btn-secondary">
+                        Tarde 16:00
+                    </button>
+                </div>
+                <label for="scheduleAtInput">O fecha y hora:</label>
                 <input type="datetime-local" id="scheduleAtInput">
                 <button id="enqueueBtn" class="btn btn-secondary" disabled>
                     Programar envío
                 </button>
                 <p class="queue-controls-hint">
-                    Guarda el lote para enviarlo más tarde. Si dejas la fecha vacía, queda en cola hasta que pulses “Iniciar envío”.
+                    Puedes encolar varios lotes (mañana y tarde). Si un envío sigue en curso a la hora programada, el siguiente espera y se dispara al terminar.
                 </p>
             </div>
 
@@ -358,8 +366,9 @@
                     <strong>Cola de envío</strong>
                     <span id="sendQueueStatus" class="send-queue-status"></span>
                 </div>
-                <p id="sendQueueMeta" class="send-queue-meta"></p>
-                <div class="send-queue-actions">
+                <div id="sendQueueList" class="send-queue-list"></div>
+                <p id="sendQueueMeta" class="send-queue-meta" style="display: none;"></p>
+                <div class="send-queue-actions" id="sendQueueLegacyActions" style="display: none;">
                     <button type="button" id="dispatchQueueBtn" class="btn btn-success btn-sm">
                         Iniciar envío
                     </button>
