@@ -615,6 +615,13 @@ section h2 {
     color: #059669;
 }
 
+.estado.ya-contactado {
+    color: #b45309;
+    background: #fffbeb;
+    border-radius: 4px;
+    padding: 4px 6px;
+}
+
 .estado.error {
     color: #dc2626;
 }

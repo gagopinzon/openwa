@@ -2712,10 +2712,35 @@ class CVAnalyzer {
         return this.cvsData.filter(
             (cv) =>
                 cv.procesado &&
+                !cv.alreadyContacted &&
                 cv.mensajeIA &&
                 cv.mensajeIA.trim() !== '' &&
                 cv.telefono !== 'No encontrado'
         ).length;
+    }
+
+    getEligibleForGenerationCount() {
+        return this.cvsData.filter(
+            (cv) =>
+                cv.procesado &&
+                !cv.alreadyContacted &&
+                cv.nombre !== 'Error al procesar'
+        ).length;
+    }
+
+    formatContactedAt(iso) {
+        if (!iso) return '';
+        try {
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return '';
+            return d.toLocaleDateString('es-MX', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric'
+            });
+        } catch {
+            return '';
+        }
     }
 
     toggleSchedulePanel() {
@@ -3746,8 +3771,14 @@ class CVAnalyzer {
             if (result.success) {
                 this.cvsData = result.cvs;
                 this.displayResults();
-                this.showStatus(result.message, 'success');
-                this.generateMessagesBtn.disabled = false;
+                const skipped = result.alreadyContactedCount || 0;
+                const eligible = this.getEligibleForGenerationCount();
+                let msg = result.message;
+                if (skipped > 0) {
+                    msg += ` · ${skipped} ya contactado(s) (sin IA)`;
+                }
+                this.showStatus(msg, skipped > 0 && eligible === 0 ? 'info' : 'success');
+                this.generateMessagesBtn.disabled = eligible === 0;
             } else {
                 this.showStatus(`Error: ${result.message}`, 'error');
             }
@@ -3767,15 +3798,34 @@ class CVAnalyzer {
             const row = document.createElement('tr');
             row.className = 'fade-in';
 
-            const estadoClass = cv.procesado ? 'procesado' : 'error';
-            const estadoText = cv.procesado ? 'Procesado' : 'Error';
+            const estadoClass = cv.alreadyContacted
+                ? 'ya-contactado'
+                : cv.procesado
+                  ? 'procesado'
+                  : 'error';
+            const contactedLabel = cv.alreadyContacted
+                ? this.formatContactedAt(cv.contactedAt)
+                : '';
+            const estadoText = cv.alreadyContacted
+                ? contactedLabel
+                    ? `Ya contactado (${contactedLabel})`
+                    : 'Ya contactado'
+                : cv.procesado
+                  ? 'Procesado'
+                  : 'Error';
 
             const mensajeId = `mensaje-${index}`;
             const saludoTexto = cv.saludo || '';
-            const mensajeTexto = cv.mensajeIA || 'Pendiente de generar...';
-            const mensajeCompleto = saludoTexto
-                ? `${saludoTexto}\n\n${mensajeTexto}`
-                : mensajeTexto;
+            const mensajeTexto = cv.alreadyContacted
+                ? contactedLabel
+                    ? `No se genera mensaje: este número ya fue contactado el ${contactedLabel}.`
+                    : 'No se genera mensaje: este número ya fue contactado.'
+                : cv.mensajeIA || 'Pendiente de generar...';
+            const mensajeCompleto = cv.alreadyContacted
+                ? mensajeTexto
+                : saludoTexto
+                  ? `${saludoTexto}\n\n${mensajeTexto}`
+                  : mensajeTexto;
             const mensajeParaMostrar = this.resolveMessageForDisplay(mensajeCompleto);
 
             // Escapar HTML para seguridad pero preservar saltos de línea
@@ -3816,7 +3866,7 @@ class CVAnalyzer {
                     </div>
                 </td>
                 <td class="acciones-cell">
-                    <button class="btn-edit-mensaje" data-index="${index}" data-mensaje-id="${mensajeId}" title="Editar mensaje">
+                    <button class="btn-edit-mensaje" data-index="${index}" data-mensaje-id="${mensajeId}" title="Editar mensaje" ${cv.alreadyContacted ? 'disabled' : ''}>
                         ✏️ Editar
                     </button>
                     <button class="btn-save-mensaje" data-index="${index}" data-mensaje-id="${mensajeId}" style="display: none;" title="Guardar cambios">
@@ -3848,6 +3898,15 @@ class CVAnalyzer {
             const editWrap = row.querySelector(`#edit-wrap-${mensajeId}`);
             const saludoInput = row.querySelector(`#saludo-edit-${mensajeId}`);
             const editTextarea = row.querySelector(`#edit-${mensajeId}`);
+
+            const agendarBtn = row.querySelector('.btn-agendar');
+            if (agendarBtn && !agendarBtn.disabled) {
+                agendarBtn.addEventListener('click', () => this.openAgendarModal(index));
+            }
+
+            if (cv.alreadyContacted) {
+                return;
+            }
 
             editBtn.addEventListener('click', () => {
                 displayDiv.style.display = 'none';
@@ -3894,11 +3953,6 @@ class CVAnalyzer {
                 saveBtn.style.display = 'none';
                 cancelBtn.style.display = 'none';
             });
-
-            const agendarBtn = row.querySelector('.btn-agendar');
-            if (agendarBtn && !agendarBtn.disabled) {
-                agendarBtn.addEventListener('click', () => this.openAgendarModal(index));
-            }
         });
 
         this.resultsSection.style.display = 'block';
@@ -5036,18 +5090,36 @@ class CVAnalyzer {
         // Función para guardar cambios
         const saveEdit = () => {
             if (isCancelling) return;
-            
+
             const newValue = inputElement.value.trim();
+            if (fieldName === 'telefono') {
+                this.persistTelefonoEdit(index, newValue, {
+                    displayDiv,
+                    inputElement,
+                    escapeHtml,
+                    onSaved: (value) => {
+                        savedValue = value;
+                    },
+                    onCancelRestore: () => {
+                        inputElement.value = savedValue;
+                        displayDiv.innerHTML = escapeHtml(savedValue) || '(vacío)';
+                        displayDiv.style.display = 'block';
+                        inputElement.style.display = 'none';
+                    }
+                });
+                return;
+            }
+
             savedValue = newValue;
-            
+
             // Actualizar en cvsData
             this.cvsData[index][fieldName] = newValue;
-            
+
             // Actualizar display
             displayDiv.innerHTML = escapeHtml(newValue) || '(vacío)';
             displayDiv.style.display = 'block';
             inputElement.style.display = 'none';
-            
+
             this.showStatus(`${fieldName.charAt(0).toUpperCase() + fieldName.slice(1)} guardado correctamente`, 'success');
         };
 
@@ -5101,9 +5173,78 @@ class CVAnalyzer {
         displayDiv.title = 'Doble clic para editar';
     }
 
+    /**
+     * Persiste el teléfono en servidor y revalida historial de contactos.
+     */
+    async persistTelefonoEdit(index, telefono, { displayDiv, inputElement, escapeHtml, onSaved, onCancelRestore }) {
+        const previous = this.cvsData[index]?.telefono || '';
+        if (!telefono) {
+            this.showStatus('El teléfono no puede estar vacío', 'error');
+            if (onCancelRestore) onCancelRestore();
+            return;
+        }
+
+        if (telefono === previous) {
+            displayDiv.innerHTML = escapeHtml(telefono) || '(vacío)';
+            displayDiv.style.display = 'block';
+            inputElement.style.display = 'none';
+            if (onSaved) onSaved(telefono);
+            return;
+        }
+
+        displayDiv.innerHTML = escapeHtml(telefono) || '(vacío)';
+        displayDiv.style.display = 'block';
+        inputElement.style.display = 'none';
+        this.showStatus('Verificando teléfono en historial…', 'info');
+
+        try {
+            const response = await fetch('/cvs/update-phone', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ index, telefono })
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || result.message || 'No se pudo actualizar el teléfono');
+            }
+
+            if (Array.isArray(result.cvs)) {
+                this.cvsData = result.cvs;
+            } else if (result.cv) {
+                this.cvsData[index] = result.cv;
+            }
+
+            if (onSaved) onSaved(telefono);
+            this.displayResults();
+            this.generateMessagesBtn.disabled = this.getEligibleForGenerationCount() === 0;
+
+            if (result.alreadyContacted) {
+                this.showStatus(
+                    'Teléfono ya contactado: no se generará IA ni se enviará a este número',
+                    'info'
+                );
+            } else {
+                this.showStatus('Teléfono actualizado; disponible para contactar', 'success');
+            }
+        } catch (error) {
+            console.error('persistTelefonoEdit:', error);
+            if (this.cvsData[index]) this.cvsData[index].telefono = previous;
+            if (onCancelRestore) onCancelRestore();
+            this.showStatus(`Error actualizando teléfono: ${error.message}`, 'error');
+        }
+    }
+
     async generateMessages() {
         if (this.cvsData.length === 0) {
             this.showStatus('No hay CVs procesados', 'error');
+            return;
+        }
+
+        if (this.getEligibleForGenerationCount() === 0) {
+            this.showStatus(
+                'No hay CVs nuevos para generar: todos ya fueron contactados o no son válidos',
+                'info'
+            );
             return;
         }
 
@@ -5123,6 +5264,11 @@ class CVAnalyzer {
 
             const result = await response.json();
 
+            if (Array.isArray(result.cvs)) {
+                this.cvsData = result.cvs;
+                this.displayResults();
+            }
+
             if (response.status === 409) {
                 this.showStatus('Ya hay una generación en curso. Espera a que termine.', 'info');
                 await this.waitForGenerationComplete(result.generation?.total || this.cvsData.length);
@@ -5135,6 +5281,13 @@ class CVAnalyzer {
                 return;
             }
 
+            if (result.alreadyContactedCount > 0) {
+                this.showStatus(
+                    `Omitiendo ${result.alreadyContactedCount} ya contactado(s); generando ${result.total}…`,
+                    'info'
+                );
+            }
+
             this.progressText.textContent = `0 / ${result.total}`;
             await this.waitForGenerationComplete(result.total);
         } catch (error) {
@@ -5142,7 +5295,7 @@ class CVAnalyzer {
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
         } finally {
             this.hideLoading();
-            this.generateMessagesBtn.disabled = false;
+            this.generateMessagesBtn.disabled = this.getEligibleForGenerationCount() === 0;
         }
     }
 
@@ -5512,6 +5665,7 @@ class CVAnalyzer {
     async sendWhatsApp() {
         const cvsToSend = this.cvsData.filter(cv =>
             cv.procesado &&
+            !cv.alreadyContacted &&
             cv.mensajeIA &&
             cv.mensajeIA.trim() !== '' &&
             cv.telefono !== 'No encontrado'

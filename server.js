@@ -606,6 +606,7 @@ async function prepareCvsForSend(cvsFromClient) {
   const cvsToSend = cvsToProcess.filter(
     (cv) =>
       cv.procesado &&
+      !cv.alreadyContacted &&
       cv.mensajeIA &&
       cv.mensajeIA.trim() !== '' &&
       cv.telefono !== 'No encontrado'
@@ -1120,6 +1121,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           cvFileName: saved.cvFileName,
           saludo: '',
           mensajeIA: '', // Se llenará después
+          alreadyContacted: false,
+          contactedAt: null,
           procesado: true,
           savedAt: new Date().toISOString()
         };
@@ -1137,9 +1140,27 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           cvFileName: null,
           saludo: '',
           mensajeIA: '',
+          alreadyContacted: false,
+          contactedAt: null,
           procesado: false,
           error: error.message
         });
+      }
+    }
+
+    // Verificar historial antes de generar IA / mostrar en UI
+    let alreadyContactedCount = 0;
+    if (contactHistory.mongoUriConfigured()) {
+      try {
+        cvsData = await contactHistory.annotateAlreadyContacted(cvsData);
+        alreadyContactedCount = cvsData.filter((cv) => cv.alreadyContacted).length;
+        if (alreadyContactedCount > 0) {
+          console.log(
+            `📇 ${alreadyContactedCount} CV(s) ya contactados (no se generará IA ni se enviarán).`
+          );
+        }
+      } catch (err) {
+        console.warn('⚠️ contactHistory annotate en upload omitido:', err.message);
       }
     }
 
@@ -1149,6 +1170,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
     res.json({
       success: true,
       message: `Se procesaron ${cvsData.length} CVs exitosamente`,
+      alreadyContactedCount,
       cvs: cvsData
     });
 
@@ -1177,11 +1199,40 @@ app.post('/generate-messages', async (req, res) => {
       });
     }
 
-    const validCVs = cvsData.filter(cv => cv.procesado && cv.nombre !== 'Error al procesar');
+    // Revalidar historial por si hubo contactos entre upload y generate
+    if (contactHistory.mongoUriConfigured()) {
+      try {
+        cvsData = await contactHistory.annotateAlreadyContacted(cvsData);
+        persistCvsData();
+      } catch (err) {
+        console.warn('⚠️ contactHistory annotate en generate omitido:', err.message);
+      }
+    }
+
+    const alreadySkipped = cvsData.filter(
+      (cv) => cv.procesado && cv.nombre !== 'Error al procesar' && cv.alreadyContacted
+    );
+    const validCVs = cvsData.filter(
+      (cv) =>
+        cv.procesado &&
+        cv.nombre !== 'Error al procesar' &&
+        !cv.alreadyContacted
+    );
+
+    if (alreadySkipped.length > 0) {
+      console.log(
+        `📇 Generación: se omiten ${alreadySkipped.length} CV(s) ya contactados.`
+      );
+    }
 
     if (validCVs.length === 0) {
       return res.status(400).json({
-        error: 'No hay CVs válidos para generar mensajes'
+        error:
+          alreadySkipped.length > 0
+            ? 'Todos los CVs válidos ya fueron contactados; no hay mensajes de IA que generar.'
+            : 'No hay CVs válidos para generar mensajes',
+        alreadyContactedCount: alreadySkipped.length,
+        cvs: cvsData
       });
     }
 
@@ -1200,7 +1251,12 @@ app.post('/generate-messages', async (req, res) => {
       success: true,
       started: true,
       total: validCVs.length,
-      message: `Generación iniciada para ${validCVs.length} CVs`
+      alreadyContactedCount: alreadySkipped.length,
+      cvs: cvsData,
+      message: `Generación iniciada para ${validCVs.length} CVs` +
+        (alreadySkipped.length > 0
+          ? ` (${alreadySkipped.length} ya contactados omitidos)`
+          : '')
     });
 
     (async () => {
@@ -1228,6 +1284,8 @@ app.post('/generate-messages', async (req, res) => {
 
         broadcastEvent('generationComplete', {
           total: cvsWithMessages.length,
+          alreadyContactedCount: alreadySkipped.length,
+          cvs: cvsData,
           message: `Se generaron mensajes de IA para ${cvsWithMessages.length} CVs`
         });
       } catch (error) {
@@ -1261,6 +1319,66 @@ app.get('/cvs-status', (req, res) => {
     success: true,
     cvs: cvsData
   });
+});
+
+/**
+ * Actualiza el teléfono de un CV, revalida historial y limpia IA si ya fue contactado.
+ * Body: { index?: number, archivoOriginal?: string, telefono: string }
+ */
+app.post('/cvs/update-phone', async (req, res) => {
+  try {
+    const telefono = req.body?.telefono != null ? String(req.body.telefono).trim() : '';
+    if (!telefono) {
+      return res.status(400).json({ error: 'Teléfono requerido' });
+    }
+
+    let index = Number.isInteger(req.body?.index) ? req.body.index : parseInt(req.body?.index, 10);
+    if (!Number.isInteger(index) || index < 0 || index >= cvsData.length) {
+      const archivo = req.body?.archivoOriginal;
+      if (archivo) {
+        index = cvsData.findIndex((cv) => cv.archivoOriginal === archivo);
+      } else {
+        index = -1;
+      }
+    }
+
+    if (index < 0 || index >= cvsData.length) {
+      return res.status(404).json({ error: 'CV no encontrado' });
+    }
+
+    const status = await contactHistory.lookupContactStatus(telefono);
+    const cv = cvsData[index];
+    cv.telefono = telefono;
+    cv.alreadyContacted = Boolean(status.alreadyContacted);
+    cv.contactedAt = status.contactedAt || null;
+
+    if (cv.alreadyContacted) {
+      cv.saludo = '';
+      cv.mensajeIA = '';
+    }
+
+    persistCvsData();
+
+    console.log(
+      cv.alreadyContacted
+        ? `📇 Teléfono ${telefono} ya en historial (${cv.nombre || cv.archivoOriginal})`
+        : `📇 Teléfono ${telefono} libre para contactar (${cv.nombre || cv.archivoOriginal})`
+    );
+
+    res.json({
+      success: true,
+      cv,
+      alreadyContacted: cv.alreadyContacted,
+      contactedAt: cv.contactedAt,
+      cvs: cvsData
+    });
+  } catch (error) {
+    console.error('Error en /cvs/update-phone:', error);
+    res.status(500).json({
+      error: 'Error actualizando teléfono',
+      message: error.message
+    });
+  }
 });
 
 // Ruta para obtener configuración del sistema

@@ -123,7 +123,12 @@ async function filterOutAlreadyContacted(cvsArray) {
       toSend.push(cv);
       continue;
     }
-    const doc = existingByNorm.get(norm);
+    let doc = existingByNorm.get(norm);
+    if (!doc) {
+      // Variaciones MX (52/521/últimos 10) no siempre coinciden con $in exacto
+      doc = await findContactByPhoneFuzzy(norm);
+      if (doc) existingByNorm.set(norm, doc);
+    }
     if (doc) {
       skippedAlreadyContacted.push({
         nombre: cv.nombre,
@@ -136,6 +141,73 @@ async function filterOutAlreadyContacted(cvsArray) {
   }
 
   return { toSend, skippedAlreadyContacted };
+}
+
+/**
+ * Anota cada CV con alreadyContacted / contactedAt según historial.
+ * No muta los objetos originales.
+ * @param {Array} cvsArray
+ * @returns {Promise<Array>}
+ */
+async function annotateAlreadyContacted(cvsArray) {
+  if (!Array.isArray(cvsArray) || cvsArray.length === 0) return [];
+
+  if (!mongoUriConfigured()) {
+    return cvsArray.map((cv) => ({
+      ...cv,
+      alreadyContacted: false,
+      contactedAt: null
+    }));
+  }
+
+  const { skippedAlreadyContacted } = await filterOutAlreadyContacted(cvsArray);
+  const skippedByNorm = new Map();
+  for (const s of skippedAlreadyContacted) {
+    const n = normalizePhone(s.telefono);
+    if (n) skippedByNorm.set(n, s);
+  }
+
+  return cvsArray.map((cv) => {
+    const norm = normalizePhone(cv.telefono);
+    const skip = norm ? skippedByNorm.get(norm) : null;
+    if (skip) {
+      return {
+        ...cv,
+        alreadyContacted: true,
+        contactedAt: skip.contactedAt
+          ? new Date(skip.contactedAt).toISOString()
+          : null
+      };
+    }
+    return {
+      ...cv,
+      alreadyContacted: false,
+      contactedAt: null
+    };
+  });
+}
+
+/**
+ * Estado de un teléfono concreto respecto al historial.
+ * @param {string} telefono
+ * @returns {Promise<{ alreadyContacted: boolean, contactedAt: string|null, normalizedPhone: string }>}
+ */
+async function lookupContactStatus(telefono) {
+  const normalizedPhone = normalizePhone(telefono);
+  if (!normalizedPhone || !mongoUriConfigured()) {
+    return { alreadyContacted: false, contactedAt: null, normalizedPhone };
+  }
+
+  const doc = await findContactByPhoneFuzzy(normalizedPhone);
+  if (!doc) {
+    return { alreadyContacted: false, contactedAt: null, normalizedPhone };
+  }
+
+  return {
+    alreadyContacted: true,
+    contactedAt: doc.contactedAt ? new Date(doc.contactedAt).toISOString() : null,
+    normalizedPhone
+  };
 }
 
 /**
@@ -464,6 +536,8 @@ module.exports = {
   phonesMatch,
   mongoUriConfigured,
   filterOutAlreadyContacted,
+  annotateAlreadyContacted,
+  lookupContactStatus,
   recordSuccessfulContact,
   getContactByPhone,
   isKnownContact,
