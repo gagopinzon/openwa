@@ -678,6 +678,40 @@ section h2 {
     color: #065f46;
 }
 
+.results-send-progress {
+    margin: 16px 0 20px;
+    padding: 16px 18px;
+    background: #f0fdf4;
+    border: 1px solid #86efac;
+    border-radius: 12px;
+}
+
+.results-send-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 10px;
+    color: #166534;
+    font-size: 0.95rem;
+}
+
+.results-send-progress-pct {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: #15803d;
+    font-variant-numeric: tabular-nums;
+}
+
+.results-progress-bar {
+    height: 12px;
+    margin-bottom: 10px;
+    background: #dcfce7;
+}
+
+.results-progress-bar .progress-fill {
+    background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+
 .current-message {
     background: #f8faff;
     padding: 20px;

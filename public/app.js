@@ -31,10 +31,12 @@ class CVAnalyzer {
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
+        this.initAndroidGatewayPanel();
         this.loadConfig().then(async () => {
             await this.loadSessions();
             await this.refreshCvsFromServer({ silent: true });
             await this.refreshSendQueue();
+            await this.refreshAndroidDevices({ silent: true });
             if (this.isSuperUser() || this.getControllableSessions().length > 0) {
                 this.loadAutoReplyStatus();
                 this.loadAutoReplyConfig();
@@ -48,6 +50,60 @@ class CVAnalyzer {
             this.loadDisponibilidadCalendar({ silent: true });
         });
         window.cvAnalyzer = this;
+    }
+
+    getSendChannel() {
+        const el = document.getElementById('sendChannelSelect');
+        return el && el.value === 'android' ? 'android' : 'openwa';
+    }
+
+    initAndroidGatewayPanel() {
+        this.refreshAndroidDevicesBtn = document.getElementById('refreshAndroidDevicesBtn');
+        this.androidDevicesList = document.getElementById('androidDevicesList');
+        this.androidGatewayHint = document.getElementById('androidGatewayHint');
+        if (this.refreshAndroidDevicesBtn) {
+            this.refreshAndroidDevicesBtn.addEventListener('click', () =>
+                this.refreshAndroidDevices({ silent: false })
+            );
+        }
+    }
+
+    async refreshAndroidDevices({ silent = true } = {}) {
+        if (!this.androidDevicesList) return;
+        try {
+            const res = await fetch('/api/android/devices');
+            const data = await res.json();
+            if (!res.ok) {
+                if (!silent) this.showStatus(data.error || 'No se pudieron cargar dispositivos Android', 'error');
+                this.androidDevicesList.innerHTML =
+                    `<p style="color:#b45309;">${data.error || 'Sin acceso o gateway no listo'}</p>`;
+                return;
+            }
+            const onlineIds = new Set((data.online || []).map((d) => d.id));
+            const devices = data.devices || [];
+            if (!devices.length) {
+                this.androidDevicesList.innerHTML =
+                    '<p style="color:#64748b;">Ningún celular registrado aún. Instala la app agente y regístrala.</p>';
+            } else {
+                this.androidDevicesList.innerHTML = devices
+                    .map((d) => {
+                        const on = onlineIds.has(d.id);
+                        return `<div style="padding:8px 0;border-bottom:1px solid #e2e8f0;">
+                            <strong>${this.escapeHtml(d.label || d.id)}</strong>
+                            <span style="margin-left:8px;color:${on ? '#15803d' : '#94a3b8'};">${on ? 'online' : 'offline'}</span>
+                            <div style="color:#64748b;font-size:12px;">id: ${this.escapeHtml(d.id)} · sesión: ${this.escapeHtml(d.logicalSessionId || '—')} · visto: ${this.escapeHtml(d.lastSeenAt || '—')}</div>
+                        </div>`;
+                    })
+                    .join('');
+            }
+            if (this.androidGatewayHint) {
+                const minMin = Math.round((data.config?.minIntervalMs || 180000) / 60000);
+                this.androidGatewayHint.textContent =
+                    `Online: ${(data.online || []).length}/${devices.length}. Intervalo mín. entre envíos por celular: ~${minMin} min.`;
+            }
+        } catch (err) {
+            if (!silent) this.showStatus(err.message, 'error');
+        }
     }
 
     initializeElements() {
@@ -99,6 +155,13 @@ class CVAnalyzer {
         this.progressText = document.getElementById('progressText');
         this.progressSuccessText = document.getElementById('progressSuccessText');
         this.progressSuccessCount = document.getElementById('progressSuccessCount');
+        this.resultsSendProgress = document.getElementById('resultsSendProgress');
+        this.resultsProgressFill = document.getElementById('resultsProgressFill');
+        this.resultsProgressText = document.getElementById('resultsProgressText');
+        this.resultsProgressSuccess = document.getElementById('resultsProgressSuccess');
+        this.resultsProgressPct = document.getElementById('resultsProgressPct');
+        this.sendJobTotal = 0;
+        this.sendCompletedCount = 0;
         this.sendSuccessCount = 0;
         this.currentMessage = document.getElementById('currentMessage');
         this.logContainer = document.getElementById('logContainer');
@@ -5539,7 +5602,8 @@ class CVAnalyzer {
                     sessionWeights:
                         selectedSessions.length > 1 ? this.getSelectedSessionWeights() : undefined,
                     scheduledAt,
-                    slot
+                    slot,
+                    channel: this.getSendChannel()
                 })
             });
             const data = await response.json();
@@ -5738,7 +5802,8 @@ class CVAnalyzer {
                     cvs: this.cvsData,
                     selectedSessions,
                     sessionWeights:
-                        selectedSessions.length > 1 ? weightValidation.weights : undefined
+                        selectedSessions.length > 1 ? weightValidation.weights : undefined,
+                    channel: this.getSendChannel()
                 })
             });
 
@@ -5839,6 +5904,17 @@ class CVAnalyzer {
 
                 if (status.inProgress || status.anyInProgress) {
                     seenInProgress = true;
+                    if (
+                        status.completedCount != null ||
+                        status.successCount != null ||
+                        status.total != null
+                    ) {
+                        this.updateSendProgressBar({
+                            completed: status.completedCount,
+                            total: status.total != null ? status.total : total,
+                            successCount: status.successCount
+                        });
+                    }
                     continue;
                 }
 
@@ -6077,13 +6153,15 @@ class CVAnalyzer {
 
         const total = results.length;
         const okCount = results.filter((r) => r.success).length;
-        this.setSendSuccessCount(okCount);
+        this.updateSendProgressBar({
+            completed: total,
+            total,
+            successCount: okCount
+        });
         let sentCount = 0;
         results.forEach((result) => {
             sentCount++;
-            const progress = (sentCount / total) * 100;
-            this.progressFill.style.width = `${progress}%`;
-            this.progressText.textContent = `${sentCount} / ${total}`;
+            this.updateSendProgressBar({ completed: sentCount, total });
             const sessionLabel = result.sessionId ? this.getSessionLabel(result.sessionId) : '';
             const viaSession = sessionLabel ? ` · ${sessionLabel}` : '';
             this.currentMessage.innerHTML = `
@@ -6110,18 +6188,51 @@ class CVAnalyzer {
         if (this.progressSuccessCount) {
             this.progressSuccessCount.textContent = String(this.sendSuccessCount);
         }
+        if (this.resultsProgressSuccess) {
+            this.resultsProgressSuccess.textContent = String(this.sendSuccessCount);
+        }
+    }
+
+    /**
+     * Actualiza barras de progreso (Resultados + sección Enviando) por mensajes completados / total.
+     */
+    updateSendProgressBar({ completed, total, successCount } = {}) {
+        if (total != null && Number.isFinite(Number(total))) {
+            this.sendJobTotal = Math.max(0, Number(total));
+        }
+        if (completed != null && Number.isFinite(Number(completed))) {
+            this.sendCompletedCount = Math.max(0, Number(completed));
+        }
+        if (successCount != null) {
+            this.setSendSuccessCount(successCount);
+        }
+
+        const jobTotal = this.sendJobTotal || 0;
+        const done = Math.min(this.sendCompletedCount || 0, jobTotal || this.sendCompletedCount || 0);
+        const pct = jobTotal > 0 ? Math.min(100, (done / jobTotal) * 100) : 0;
+        const pctLabel = `${Math.round(pct)}%`;
+        const label = `${done} / ${jobTotal}`;
+
+        if (this.progressFill) this.progressFill.style.width = `${pct}%`;
+        if (this.progressText) this.progressText.textContent = label;
+        if (this.resultsProgressFill) this.resultsProgressFill.style.width = `${pct}%`;
+        if (this.resultsProgressText) this.resultsProgressText.textContent = label;
+        if (this.resultsProgressPct) this.resultsProgressPct.textContent = pctLabel;
+    }
+
+    showResultsSendProgress(visible) {
+        if (!this.resultsSendProgress) return;
+        this.resultsSendProgress.style.display = visible ? 'block' : 'none';
     }
 
     showProgress(total) {
+        this.sendJobTotal = total;
+        this.sendCompletedCount = 0;
         this.progressSection.style.display = 'block';
-        this.progressFill.style.width = '0%';
-        this.progressText.textContent = `0 / ${total}`;
-        this.setSendSuccessCount(0);
+        this.showResultsSendProgress(true);
+        this.updateSendProgressBar({ completed: 0, total, successCount: 0 });
         this.currentMessage.innerHTML = 'Preparando envío...';
         this.logContainer.innerHTML = '';
-
-        // Los controles ya se muestran en showSendingControls() antes de llamar a showProgress
-        // this.showSendingControls(); // Ya se muestra antes
 
         // Ocultar vista previa del mensaje inicialmente
         this.hideMessagePreview();
@@ -6147,15 +6258,15 @@ class CVAnalyzer {
             }
 
             const result = results[current];
-            const progress = ((current + 1) / total) * 100;
-
             // Reproducir sonido cuando está listo para enviar el siguiente mensaje
             if (current > 0) {
                 this.playNotificationSound();
             }
-
-            this.progressFill.style.width = `${progress}%`;
-            this.progressText.textContent = `${current + 1} / ${total}`;
+            this.updateSendProgressBar({
+                completed: current + 1,
+                total,
+                successCount: results.slice(0, current + 1).filter((r) => r.success).length
+            });
             const sessionLabel = result.sessionId ? this.getSessionLabel(result.sessionId) : '';
             const viaSession = sessionLabel ? ` · ${sessionLabel}` : '';
             this.currentMessage.innerHTML = `
@@ -6661,13 +6772,7 @@ class CVAnalyzer {
                 if (data.mensajeIA) {
                     this.showMessagePreview(data.mensajeIA, data.sessionId, data.saludo);
                 }
-                if (this.progressText && data.total) {
-                    this.progressText.textContent = `${data.current} / ${data.total}`;
-                    const progress = (data.current / data.total) * 100;
-                    if (this.progressFill) {
-                        this.progressFill.style.width = `${progress}%`;
-                    }
-                }
+                // No avanzar la barra aquí: data.current es índice global, no completados.
             }
         });
 
@@ -6701,13 +6806,6 @@ class CVAnalyzer {
                     sessionCurrent: data.sessionCurrent,
                     sessionTotal: data.sessionTotal
                 });
-                if (this.progressText && data.total) {
-                    this.progressText.textContent = `${data.current} / ${data.total}`;
-                    const progress = (data.current / data.total) * 100;
-                    if (this.progressFill) {
-                        this.progressFill.style.width = `${progress}%`;
-                    }
-                }
             } else if (data.phase === 'done') {
                 this.updateSessionCard(data.sessionId, {
                     phase: 'done',
@@ -6733,11 +6831,20 @@ class CVAnalyzer {
 
         this.eventSource.addEventListener('sendSuccess', (event) => {
             const data = JSON.parse(event.data);
-            if (data.successCount != null) {
-                this.setSendSuccessCount(data.successCount);
-            } else if (data.success === true) {
-                this.setSendSuccessCount((this.sendSuccessCount || 0) + 1);
-            }
+            const completed =
+                data.completedCount != null
+                    ? data.completedCount
+                    : (this.sendCompletedCount || 0) + 1;
+            this.updateSendProgressBar({
+                completed,
+                total: data.total != null ? data.total : this.sendJobTotal,
+                successCount:
+                    data.successCount != null
+                        ? data.successCount
+                        : data.success === true
+                          ? (this.sendSuccessCount || 0) + 1
+                          : this.sendSuccessCount
+            });
             if (data.success === true && data.nombre) {
                 const sessionLabel = data.sessionId ? this.getSessionLabel(data.sessionId) : '';
                 this.addLogEntry(
@@ -6756,16 +6863,32 @@ class CVAnalyzer {
         this.eventSource.addEventListener('sendComplete', async (event) => {
             try {
                 const payload = JSON.parse(event.data || '{}');
-                if (payload.successCount != null) {
-                    this.setSendSuccessCount(payload.successCount);
+                if (payload.total != null || payload.completedCount != null || payload.successCount != null) {
+                    this.updateSendProgressBar({
+                        completed: payload.completedCount != null ? payload.completedCount : payload.total,
+                        total: payload.total != null ? payload.total : this.sendJobTotal,
+                        successCount: payload.successCount
+                    });
                 }
                 const res = await fetch('/send-job-status');
                 const status = await res.json();
                 this.sendJobCompleted = status;
-                if (status.successCount != null) {
-                    this.setSendSuccessCount(status.successCount);
-                } else if (Array.isArray(status.results)) {
-                    this.setSendSuccessCount(status.results.filter((r) => r.success).length);
+                if (status.total != null || status.completedCount != null || status.successCount != null) {
+                    this.updateSendProgressBar({
+                        completed:
+                            status.completedCount != null
+                                ? status.completedCount
+                                : Array.isArray(status.results)
+                                  ? status.results.length
+                                  : status.total,
+                        total: status.total != null ? status.total : this.sendJobTotal,
+                        successCount:
+                            status.successCount != null
+                                ? status.successCount
+                                : Array.isArray(status.results)
+                                  ? status.results.filter((r) => r.success).length
+                                  : undefined
+                    });
                 }
                 await this.syncWorkspaceAfterSend();
             } catch (error) {

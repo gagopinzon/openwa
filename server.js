@@ -42,6 +42,8 @@ const agendaPendingStore = require('./agendaPendingStore');
 const agendaOfferStore = require('./agendaOfferStore');
 const sendQueueStore = require('./sendQueueStore');
 const conversationPreviewStore = require('./conversationPreviewStore');
+const androidGatewayStore = require('./androidGatewayStore');
+const { runAndroidSendJob } = require('./androidSendService');
 const {
   isAuthEnabled,
   authMiddleware,
@@ -241,11 +243,12 @@ let generationState = {
   completedAt: null
 };
 
-/** @type {{ inProgress: boolean, total: number, successCount: number, sessionIds: string[], startedAt: number|null, completedAt: number|null, error: string|null, message: string|null, results: Array|null, skippedAlreadyContacted: Array, testMode: boolean }} */
+/** @type {{ inProgress: boolean, total: number, successCount: number, completedCount: number, sessionIds: string[], startedAt: number|null, completedAt: number|null, error: string|null, message: string|null, results: Array|null, skippedAlreadyContacted: Array, testMode: boolean }} */
 let lastSendJob = {
   inProgress: false,
   total: 0,
   successCount: 0,
+  completedCount: 0,
   sessionIds: [],
   startedAt: null,
   completedAt: null,
@@ -326,14 +329,18 @@ async function runWhatsAppSendJob({
   sessionWeights,
   skippedAlreadyContacted,
   mongoRecordHook,
-  testMode
+  testMode,
+  channel = 'openwa',
+  batchId = null
 }) {
   const controlId = getBulkControlId(sessionIds);
   const N = sessionIds.length;
+  const sendChannel = String(channel || 'openwa').toLowerCase() === 'android' ? 'android' : 'openwa';
 
   lastSendJob.inProgress = true;
   lastSendJob.total = finalCvsToSend.length;
   lastSendJob.successCount = 0;
+  lastSendJob.completedCount = 0;
   lastSendJob.sessionIds = sessionIds;
   lastSendJob.startedAt = Date.now();
   lastSendJob.completedAt = null;
@@ -342,12 +349,15 @@ async function runWhatsAppSendJob({
   lastSendJob.results = null;
   lastSendJob.skippedAlreadyContacted = skippedAlreadyContacted;
   lastSendJob.testMode = testMode;
+  lastSendJob.channel = sendChannel;
 
   const trackMessageResult = (row) => {
+    lastSendJob.completedCount = (lastSendJob.completedCount || 0) + 1;
     if (row && row.success) {
       lastSendJob.successCount = (lastSendJob.successCount || 0) + 1;
       broadcastEvent('sendSuccess', {
         successCount: lastSendJob.successCount,
+        completedCount: lastSendJob.completedCount,
         total: lastSendJob.total,
         nombre: row.nombre,
         telefono: row.telefono,
@@ -357,6 +367,7 @@ async function runWhatsAppSendJob({
     } else if (row) {
       broadcastEvent('sendSuccess', {
         successCount: lastSendJob.successCount || 0,
+        completedCount: lastSendJob.completedCount,
         total: lastSendJob.total,
         nombre: row.nombre,
         telefono: row.telefono,
@@ -406,6 +417,28 @@ async function runWhatsAppSendJob({
       lastSendJob.results = results;
       lastSendJob.successCount = results.filter((r) => r.success).length;
       lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes enviados (modo prueba)`;
+    } else if (sendChannel === 'android') {
+      console.log(
+        `📱 Envío Android con ${N} sesión(es) lógica(s): ${sessionIds.join(', ')}`
+      );
+      initSessionSendingState(controlId);
+      for (const sId of sessionIds) {
+        initSessionSendingState(sId);
+      }
+
+      const results = await runAndroidSendJob({
+        contacts: finalCvsToSend,
+        sessionIds,
+        batchId,
+        onMessageResult: trackMessageResult,
+        pollMs: 2000,
+        timeoutMs: 24 * 60 * 60 * 1000
+      });
+
+      resetBulkControlState(controlId, sessionIds);
+      lastSendJob.results = results;
+      lastSendJob.successCount = results.filter((r) => r.success).length;
+      lastSendJob.message = `Envío Android: ${lastSendJob.successCount}/${results.length} mensajes`;
     } else {
       console.log(`📱 Envío paralelo con ${N} sesión(es): ${sessionIds.join(', ')}`);
 
@@ -510,6 +543,7 @@ async function runWhatsAppSendJob({
       message: lastSendJob.message,
       total: finalCvsToSend.length,
       successCount: lastSendJob.successCount,
+      completedCount: lastSendJob.completedCount,
       testMode,
       removedFromWorkspace: workspaceCleanup.removed,
       remainingInWorkspace: workspaceCleanup.remaining
@@ -704,7 +738,9 @@ async function dispatchQueuedBatch(_user, batchId = null) {
     sessionWeights: batch.sessionWeights,
     skippedAlreadyContacted: [],
     mongoRecordHook,
-    testMode: TEST_MODE
+    testMode: TEST_MODE,
+    channel: batch.channel || 'openwa',
+    batchId: batch.id
   }).finally(() => {
     armSendQueueTimer();
   });
@@ -2170,7 +2206,8 @@ app.post('/api/send-queue', async (req, res) => {
       selectedSessions,
       sessionWeights: req.body?.sessionWeights || null,
       scheduledAt: slot ? null : req.body?.scheduledAt || null,
-      slot
+      slot,
+      channel: req.body?.channel === 'android' ? 'android' : 'openwa'
     });
     armSendQueueTimer();
 
@@ -2267,6 +2304,121 @@ app.post('/api/send-queue/clear-terminal', (req, res) => {
   }
 });
 
+function getAndroidGatewayToken() {
+  return String(process.env.ANDROID_GATEWAY_TOKEN || '').trim();
+}
+
+function requireAndroidToken(req, res) {
+  const expected = getAndroidGatewayToken();
+  if (!expected) {
+    res.status(503).json({
+      error: 'Android gateway no configurado. Define ANDROID_GATEWAY_TOKEN en .env'
+    });
+    return false;
+  }
+  const got = String(
+    req.headers['x-android-token'] || req.query.token || req.body?.token || ''
+  ).trim();
+  if (!got || got !== expected) {
+    res.status(401).json({ error: 'Token Android inválido' });
+    return false;
+  }
+  return true;
+}
+
+// --- Android gateway (agente en celular) ---
+app.get('/api/android/devices', (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    res.json({
+      success: true,
+      config: androidGatewayStore.getConfig(),
+      devices: androidGatewayStore.listDevices(),
+      online: androidGatewayStore.pickOnlineDevices({ maxAgeMs: 3 * 60 * 1000 })
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/android/jobs', (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    const jobs = androidGatewayStore.listJobs({
+      batchId: req.query.batchId || null,
+      status: req.query.status || null,
+      limit: Number(req.query.limit) || 100
+    });
+    res.json({ success: true, jobs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/android/devices/register', (req, res) => {
+  try {
+    if (!requireAndroidToken(req, res)) return;
+    const device = androidGatewayStore.registerDevice({
+      label: req.body?.label,
+      logicalSessionId: req.body?.logicalSessionId || null,
+      deviceId: req.body?.deviceId || null
+    });
+    res.json({ success: true, device, config: androidGatewayStore.getConfig() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/android/devices/:id/heartbeat', (req, res) => {
+  try {
+    if (!requireAndroidToken(req, res)) return;
+    const device = androidGatewayStore.heartbeat(req.params.id);
+    if (!device) return res.status(404).json({ error: 'device_not_found' });
+    res.json({ success: true, device });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/android/jobs/next', (req, res) => {
+  try {
+    if (!requireAndroidToken(req, res)) return;
+    const deviceId = String(req.query.deviceId || '').trim();
+    if (!deviceId) return res.status(400).json({ error: 'deviceId requerido' });
+    if (!androidGatewayStore.getDevice(deviceId)) {
+      return res.status(404).json({ error: 'device_not_found' });
+    }
+    const job = androidGatewayStore.claimNextJob({ deviceId });
+    res.json({ success: true, job: job || null, config: androidGatewayStore.getConfig() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/android/jobs/:id/result', (req, res) => {
+  try {
+    if (!requireAndroidToken(req, res)) return;
+    const deviceId = String(req.body?.deviceId || '').trim();
+    if (!deviceId) return res.status(400).json({ error: 'deviceId requerido' });
+    const job = androidGatewayStore.reportJobResult({
+      jobId: req.params.id,
+      deviceId,
+      ok: Boolean(req.body?.ok),
+      error: req.body?.error || null
+    });
+    res.json({ success: true, job });
+  } catch (err) {
+    const code = err.code || null;
+    const status =
+      code === 'job_not_found'
+        ? 404
+        : code === 'device_mismatch' || code === 'invalid_status'
+          ? 409
+          : 500;
+    res.status(status).json({ error: err.message, code });
+  }
+});
+
 // Ruta para enviar mensajes por WhatsApp
 app.post('/send-whatsapp', async (req, res) => {
   try {
@@ -2335,13 +2487,15 @@ app.post('/send-whatsapp', async (req, res) => {
       req.body.sessionWeights && typeof req.body.sessionWeights === 'object'
         ? req.body.sessionWeights
         : null;
+    const channel = req.body?.channel === 'android' ? 'android' : 'openwa';
 
     try {
       sendQueueStore.beginDirectSend({
         cvs: finalCvsToSend,
         selectedSessions: sessionIds,
         sessionWeights,
-        scheduledAt: null
+        scheduledAt: null,
+        channel
       });
     } catch (error) {
       if (error.status) {
@@ -2355,9 +2509,10 @@ app.post('/send-whatsapp', async (req, res) => {
       started: true,
       total: finalCvsToSend.length,
       sessionIds,
+      channel,
       skippedAlreadyContacted,
       testMode: TEST_MODE,
-      message: `Envío iniciado para ${finalCvsToSend.length} mensajes`
+      message: `Envío iniciado para ${finalCvsToSend.length} mensajes (${channel})`
     });
 
     runWhatsAppSendJob({
@@ -2366,7 +2521,8 @@ app.post('/send-whatsapp', async (req, res) => {
       sessionWeights,
       skippedAlreadyContacted,
       mongoRecordHook,
-      testMode: TEST_MODE
+      testMode: TEST_MODE,
+      channel
     });
   } catch (error) {
     console.error('Error enviando mensajes por WhatsApp:', error);
@@ -2387,6 +2543,7 @@ app.get('/send-job-status', (req, res) => {
     anyInProgress,
     total: lastSendJob.total,
     successCount: lastSendJob.successCount || 0,
+    completedCount: lastSendJob.completedCount || 0,
     sessionIds: lastSendJob.sessionIds,
     startedAt: lastSendJob.startedAt,
     completedAt: lastSendJob.completedAt,

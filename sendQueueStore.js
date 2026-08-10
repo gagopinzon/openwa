@@ -230,7 +230,7 @@ function getNextScheduledBatch() {
   return scheduled[0] || null;
 }
 
-function enqueue({ cvs, selectedSessions, sessionWeights, scheduledAt, slot, label }) {
+function enqueue({ cvs, selectedSessions, sessionWeights, scheduledAt, slot, label, channel }) {
   if (!canEnqueue()) {
     const err = new Error('No se puede encolar');
     err.status = 409;
@@ -271,6 +271,8 @@ function enqueue({ cvs, selectedSessions, sessionWeights, scheduledAt, slot, lab
   }
 
   const now = new Date().toISOString();
+  const sendChannel =
+    String(channel || '').trim().toLowerCase() === 'android' ? 'android' : 'openwa';
   const batch = {
     id: newId(),
     status: scheduledAtValue ? STATUS.SCHEDULED : STATUS.QUEUED,
@@ -282,6 +284,7 @@ function enqueue({ cvs, selectedSessions, sessionWeights, scheduledAt, slot, lab
       sessionWeights && typeof sessionWeights === 'object'
         ? { ...sessionWeights }
         : null,
+    channel: sendChannel,
     scheduledAt: scheduledAtValue,
     slot: slot === 'morning' || slot === 'afternoon' ? slot : null,
     label: slotLabel,

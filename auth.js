@@ -258,6 +258,11 @@ function isPublicPath(pathname) {
   if (pathname === '/api/webhooks/openwa') return true;
   // Panel descarga CVs con token firmado (sin cookie de sesión Msg)
   if (pathname.startsWith('/api/public/cv/')) return true;
+  // Agente Android (auth por ANDROID_GATEWAY_TOKEN)
+  if (pathname === '/api/android/devices/register') return true;
+  if (pathname === '/api/android/jobs/next') return true;
+  if (/^\/api\/android\/devices\/[^/]+\/heartbeat$/.test(pathname)) return true;
+  if (/^\/api\/android\/jobs\/[^/]+\/result$/.test(pathname)) return true;
   return false;
 }
 

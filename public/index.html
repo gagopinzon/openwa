@@ -64,6 +64,25 @@
                     No hay líneas configuradas. Agrega al menos una antes de enviar mensajes.
                 </p>
 
+                <section id="androidGatewaySection" style="margin-top: 24px;">
+                    <h3 style="font-size: 1rem; margin: 0 0 8px;">Gateway Android</h3>
+                    <p style="font-size: 13px; color: #64748b; margin-bottom: 10px;">
+                        Celulares con la app agente. El envío frío puede salir por Android en lugar de OpenWA.
+                    </p>
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px;">
+                        <label style="font-size: 13px;">
+                            Canal de envío:
+                            <select id="sendChannelSelect" class="form-select" style="padding: 6px; margin-left: 6px;">
+                                <option value="openwa">OpenWA (Web)</option>
+                                <option value="android">Android (celular)</option>
+                            </select>
+                        </label>
+                        <button type="button" id="refreshAndroidDevicesBtn" class="btn btn-secondary">Actualizar dispositivos</button>
+                    </div>
+                    <div id="androidDevicesList" class="line-users-list" style="font-size: 13px;"></div>
+                    <p id="androidGatewayHint" style="font-size: 12px; color: #64748b; margin-top: 8px;"></p>
+                </section>
+
                 <div id="accountsSection" style="display: none;">
                     <h3 style="font-size: 1rem; margin: 24px 0 8px;">Cuentas</h3>
                     <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
@@ -419,6 +438,22 @@
                 <button id="abortBtn" class="btn btn-danger">
                     🛑 Abortar
                 </button>
+            </div>
+
+            <div class="results-send-progress" id="resultsSendProgress" style="display: none;" aria-live="polite">
+                <div class="results-send-progress-header">
+                    <strong>Progreso de envío</strong>
+                    <span class="results-send-progress-pct" id="resultsProgressPct">0%</span>
+                </div>
+                <div class="progress-bar results-progress-bar">
+                    <div class="progress-fill" id="resultsProgressFill"></div>
+                </div>
+                <div class="progress-stats">
+                    <div class="progress-text" id="resultsProgressText">0 / 0</div>
+                    <div class="progress-success">
+                        Enviados con éxito: <strong id="resultsProgressSuccess">0</strong>
+                    </div>
+                </div>
             </div>
 
             <div class="status-message" id="statusMessage"></div>
