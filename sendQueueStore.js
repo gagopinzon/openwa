@@ -271,8 +271,9 @@ function enqueue({ cvs, selectedSessions, sessionWeights, scheduledAt, slot, lab
   }
 
   const now = new Date().toISOString();
+  const rawChannel = String(channel || 'auto').trim().toLowerCase();
   const sendChannel =
-    String(channel || '').trim().toLowerCase() === 'android' ? 'android' : 'openwa';
+    rawChannel === 'android' || rawChannel === 'openwa' ? rawChannel : 'auto';
   const batch = {
     id: newId(),
     status: scheduledAtValue ? STATUS.SCHEDULED : STATUS.QUEUED,

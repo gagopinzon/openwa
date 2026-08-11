@@ -3,8 +3,9 @@ const androidGatewayStore = require('./androidGatewayStore');
 /**
  * Encola jobs Android y espera a que todos terminen (sent/failed/expired).
  * @param {object} opts
- * @param {Array<{ nombre?: string, telefono: string, mensajeIA?: string, saludo?: string }>} opts.contacts
- * @param {string[]} opts.sessionIds
+ * @param {Array<{ nombre?: string, telefono: string, mensajeIA?: string, mensaje?: string, saludo?: string, deviceId?: string, sessionId?: string }>} [opts.contacts]
+ * @param {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, logicalSessionId?: string, meta?: object }>} [opts.assignments]
+ * @param {string[]} [opts.sessionIds]
  * @param {string|null} [opts.batchId]
  * @param {(row: object) => void} [opts.onMessageResult]
  * @param {number} [opts.pollMs]
@@ -12,44 +13,61 @@ const androidGatewayStore = require('./androidGatewayStore');
  */
 async function runAndroidSendJob({
   contacts,
+  assignments = null,
   sessionIds,
   batchId = null,
   onMessageResult = null,
   pollMs = 2000,
   timeoutMs = 24 * 60 * 60 * 1000
 } = {}) {
-  const devices = androidGatewayStore.pickOnlineDevices({
-    logicalSessionIds: sessionIds || [],
-    maxAgeMs: 3 * 60 * 1000
-  });
+  let jobs;
 
-  if (!devices.length) {
-    const err = new Error(
-      'No hay dispositivos Android online. Registra y deja la app agente en marcha.'
+  if (Array.isArray(assignments) && assignments.length > 0) {
+    jobs = androidGatewayStore.enqueueAssignedJobs(
+      assignments.map((a) => ({
+        telefono: a.telefono,
+        mensaje: a.mensaje || a.mensajeIA || '',
+        deviceId: a.deviceId,
+        nombre: a.nombre || null,
+        batchId,
+        logicalSessionId: a.logicalSessionId || a.sessionId || null,
+        meta: a.meta || null
+      }))
     );
-    err.code = 'no_android_devices';
-    throw err;
+  } else {
+    const devices = androidGatewayStore.pickOnlineDevices({
+      logicalSessionIds: sessionIds || [],
+      maxAgeMs: 3 * 60 * 1000
+    });
+
+    if (!devices.length) {
+      const err = new Error(
+        'No hay dispositivos Android online. Registra y deja la app agente en marcha.'
+      );
+      err.code = 'no_android_devices';
+      throw err;
+    }
+
+    const items = (contacts || []).map((c) => {
+      const mensaje = String(c.mensajeIA || c.mensaje || '').trim();
+      return {
+        telefono: String(c.telefono || '').trim(),
+        mensaje,
+        nombre: c.nombre || null,
+        batchId,
+        meta: {
+          saludo: c.saludo || null,
+          cvId: c.cvId || null,
+          archivoOriginal: c.archivoOriginal || null
+        }
+      };
+    });
+
+    jobs = androidGatewayStore.enqueueJobs(
+      items,
+      devices.map((d) => d.id)
+    );
   }
-
-  const items = (contacts || []).map((c) => {
-    const mensaje = String(c.mensajeIA || c.mensaje || '').trim();
-    return {
-      telefono: String(c.telefono || '').trim(),
-      mensaje,
-      nombre: c.nombre || null,
-      batchId,
-      meta: {
-        saludo: c.saludo || null,
-        cvId: c.cvId || null,
-        archivoOriginal: c.archivoOriginal || null
-      }
-    };
-  });
-
-  const jobs = androidGatewayStore.enqueueJobs(
-    items,
-    devices.map((d) => d.id)
-  );
 
   const jobIds = jobs.map((j) => j.id);
   const reported = new Set();
@@ -65,7 +83,7 @@ async function runAndroidSendJob({
       success: job.status === 'sent',
       nombre: job.nombre,
       telefono: job.telefono,
-      sessionId: device?.logicalSessionId || job.deviceId,
+      sessionId: job.meta?.logicalSessionId || device?.logicalSessionId || job.deviceId,
       error: job.error || null,
       channel: 'android',
       jobId: job.id

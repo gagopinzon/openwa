@@ -31,12 +31,13 @@ class CVAnalyzer {
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
+        this.androidDevices = [];
         this.initAndroidGatewayPanel();
         this.loadConfig().then(async () => {
+            await this.refreshAndroidDevices({ silent: true });
             await this.loadSessions();
             await this.refreshCvsFromServer({ silent: true });
             await this.refreshSendQueue();
-            await this.refreshAndroidDevices({ silent: true });
             if (this.isSuperUser() || this.getControllableSessions().length > 0) {
                 this.loadAutoReplyStatus();
                 this.loadAutoReplyConfig();
@@ -53,8 +54,8 @@ class CVAnalyzer {
     }
 
     getSendChannel() {
-        const el = document.getElementById('sendChannelSelect');
-        return el && el.value === 'android' ? 'android' : 'openwa';
+        // Por línea (outreachChannel). El lote usa modo auto.
+        return 'auto';
     }
 
     initAndroidGatewayPanel() {
@@ -138,6 +139,8 @@ class CVAnalyzer {
             }
             const onlineIds = new Set((data.online || []).map((d) => d.id));
             const devices = data.devices || [];
+            this.androidDevices = devices;
+            this.androidOnlineIds = onlineIds;
             if (!devices.length) {
                 this.androidDevicesList.innerHTML =
                     '<p style="color:#64748b;">Ningún celular registrado aún. Instala la app agente y regístrala.</p>';
@@ -172,6 +175,10 @@ class CVAnalyzer {
                 if (prev && online.some((d) => d.id === prev)) {
                     this.androidTestDeviceSelect.value = prev;
                 }
+            }
+            // Refrescar selects de vínculo en tarjetas de línea
+            if (this.isSuperUser()) {
+                this.renderLineUsersList();
             }
         } catch (err) {
             if (!silent) this.showStatus(err.message, 'error');
@@ -3306,6 +3313,12 @@ class CVAnalyzer {
                 const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
 
                 if (!isSuper) {
+                    const outreach =
+                        session.outreachChannel === 'android' ? 'Android (primer msg)' : 'OpenWA';
+                    const androidLabel = session.androidDeviceId
+                        ? (this.androidDevices || []).find((d) => d.id === session.androidDeviceId)?.label ||
+                          session.androidDeviceId
+                        : '—';
                     return `
                 <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
                     <div class="line-card-header">
@@ -3314,6 +3327,9 @@ class CVAnalyzer {
                             <span class="session-access-badge session-access-${access}">${accessLabel}</span>
                         </div>
                         <code class="line-card-code">${this.escapeHtml(session.openwaSessionId || '')}</code>
+                    </div>
+                    <div style="font-size:12px;color:#64748b;margin-top:8px;">
+                        Primer mensaje: ${this.escapeHtml(outreach)} · Celular: ${this.escapeHtml(androidLabel)}
                     </div>
                 </div>`;
                 }
@@ -3364,6 +3380,16 @@ class CVAnalyzer {
                             <button type="button" class="btn btn-secondary btn-sm add-line-user-btn" data-session-id="${this.escapeHtml(session.id)}">Agregar</button>
                         </div>`;
 
+                const deviceOptions = [
+                    '<option value="">— Sin celular Android —</option>',
+                    ...(this.androidDevices || []).map((d) => {
+                        const on = this.androidOnlineIds?.has?.(d.id);
+                        const selected = session.androidDeviceId === d.id ? 'selected' : '';
+                        return `<option value="${this.escapeHtml(d.id)}" ${selected}>${this.escapeHtml(d.label || d.id)}${on ? ' (online)' : ''}</option>`;
+                    })
+                ].join('');
+                const outreach = session.outreachChannel === 'android' ? 'android' : 'openwa';
+
                 return `
                 <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
                     <div class="line-card-header">
@@ -3381,6 +3407,21 @@ class CVAnalyzer {
                             <button type="button" class="btn btn-secondary btn-sm save-sender-btn" data-id="${this.escapeHtml(session.id)}">Guardar</button>
                             <button type="button" class="btn btn-secondary btn-sm sync-sender-btn" data-id="${this.escapeHtml(session.id)}" title="Obtener nombre desde WhatsApp">↻ WhatsApp</button>
                         </div>
+                        <div class="line-card-android" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+                            <label style="font-size:12px;color:#64748b;">Celular Android
+                                <select class="form-select line-android-device" data-id="${this.escapeHtml(session.id)}" style="display:block;margin-top:4px;min-width:200px;padding:6px;">
+                                    ${deviceOptions}
+                                </select>
+                            </label>
+                            <label style="font-size:12px;color:#64748b;">Primer mensaje
+                                <select class="form-select line-outreach-channel" data-id="${this.escapeHtml(session.id)}" style="display:block;margin-top:4px;padding:6px;">
+                                    <option value="openwa" ${outreach === 'openwa' ? 'selected' : ''}>OpenWA (Web)</option>
+                                    <option value="android" ${outreach === 'android' ? 'selected' : ''}>Android (celular)</option>
+                                </select>
+                            </label>
+                            <button type="button" class="btn btn-secondary btn-sm save-android-link-btn" data-id="${this.escapeHtml(session.id)}" style="align-self:flex-end;">Guardar vínculo</button>
+                        </div>
+                        <p style="font-size:11px;color:#94a3b8;margin:6px 0 0;">Respuestas / auto-reply siempre por OpenWA de esta línea.</p>
                     </div>
                     <div class="line-card-users">
                         <p class="line-card-users-label">Usuarios de esta línea</p>
@@ -3401,6 +3442,9 @@ class CVAnalyzer {
         });
         this.lineUsersList.querySelectorAll('.sync-sender-btn').forEach((btn) => {
             btn.addEventListener('click', () => this.syncSessionSenderName(btn.dataset.id));
+        });
+        this.lineUsersList.querySelectorAll('.save-android-link-btn').forEach((btn) => {
+            btn.addEventListener('click', () => this.saveSessionAndroidLink(btn.dataset.id));
         });
         this.lineUsersList.querySelectorAll('.line-user-access').forEach((select) => {
             select.addEventListener('change', () => {
@@ -3689,6 +3733,40 @@ class CVAnalyzer {
             if (this.cvsData && this.cvsData.length > 0) {
                 this.displayResults();
             }
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async saveSessionAndroidLink(sessionId) {
+        const root = this.lineUsersList || document;
+        const deviceSelect = root.querySelector(`.line-android-device[data-id="${sessionId}"]`);
+        const channelSelect = root.querySelector(`.line-outreach-channel[data-id="${sessionId}"]`);
+        const androidDeviceId = deviceSelect ? deviceSelect.value || null : null;
+        const outreachChannel = channelSelect?.value === 'android' ? 'android' : 'openwa';
+
+        if (outreachChannel === 'android' && !androidDeviceId) {
+            this.showStatus('Para primer mensaje por Android, vinculá un celular', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ androidDeviceId, outreachChannel })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || 'No se pudo guardar el vínculo');
+            }
+            await this.loadSessions();
+            await this.refreshAndroidDevices({ silent: true });
+            const label =
+                outreachChannel === 'android'
+                    ? 'Primer mensaje → Android'
+                    : 'Primer mensaje → OpenWA';
+            this.showStatus(`Línea actualizada: ${label}`, 'success');
         } catch (error) {
             this.showStatus(`Error: ${error.message}`, 'error');
         }

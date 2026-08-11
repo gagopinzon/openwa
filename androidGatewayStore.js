@@ -353,6 +353,76 @@ function areJobsTerminal(jobs) {
   );
 }
 
+function linkDeviceToLogicalSession(deviceId, logicalSessionId) {
+  const store = readStore();
+  const id = deviceId ? String(deviceId).trim() : '';
+  const sessionId = logicalSessionId ? String(logicalSessionId).trim() : null;
+
+  if (sessionId) {
+    for (const d of store.devices) {
+      if (d.logicalSessionId === sessionId && d.id !== id) {
+        d.logicalSessionId = null;
+      }
+    }
+  }
+
+  if (id) {
+    const device = store.devices.find((d) => d.id === id);
+    if (!device) {
+      const err = new Error('device_not_found');
+      err.code = 'device_not_found';
+      throw err;
+    }
+    device.logicalSessionId = sessionId;
+  }
+
+  writeStore(store);
+  return id ? { ...store.devices.find((d) => d.id === id) } : null;
+}
+
+/**
+ * Encola jobs ya asignados a deviceId concreto.
+ * @param {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, batchId?: string|null, logicalSessionId?: string|null, meta?: object }>} items
+ */
+function enqueueAssignedJobs(items) {
+  const store = readStore();
+  const now = new Date().toISOString();
+  const created = [];
+  const list = Array.isArray(items) ? items : [];
+
+  for (const item of list) {
+    const deviceId = String(item.deviceId || '').trim();
+    const device = store.devices.find((d) => d.id === deviceId);
+    if (!device) {
+      const err = new Error(`Dispositivo Android no encontrado: ${deviceId}`);
+      err.code = 'device_not_found';
+      throw err;
+    }
+    const job = {
+      id: newId(),
+      deviceId,
+      batchId: item.batchId || null,
+      telefono: String(item.telefono || '').trim(),
+      mensaje: String(item.mensaje || ''),
+      nombre: item.nombre ? String(item.nombre) : null,
+      status: JOB_STATUS.PENDING,
+      createdAt: now,
+      claimedAt: null,
+      finishedAt: null,
+      error: null,
+      meta: {
+        ...(item.meta || {}),
+        logicalSessionId: item.logicalSessionId || device.logicalSessionId || null
+      }
+    };
+    store.jobs.push(job);
+    created.push({ ...job });
+  }
+
+  writeStore(store);
+  return created;
+}
+
 module.exports = {
   JOB_STATUS,
   DEFAULT_MIN_INTERVAL_MS,
@@ -365,6 +435,8 @@ module.exports = {
   claimNextJob,
   reportJobResult,
   enqueueJobs,
+  enqueueAssignedJobs,
+  linkDeviceToLogicalSession,
   getJob,
   listJobs,
   pickOnlineDevices,

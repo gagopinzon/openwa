@@ -8,7 +8,7 @@ const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages, buildOutboundMessageParts } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
 const { sendRoundRobinBulk, ROUND_ROBIN_CONTROL_ID } = WhatsAppService;
-const { previewDistribution } = require('./sessionDistribution');
+const { previewDistribution, buildQueuesFromCounts } = require('./sessionDistribution');
 const sessionsStore = require('./sessionsStore');
 const {
   getSessionStatus,
@@ -330,12 +330,14 @@ async function runWhatsAppSendJob({
   skippedAlreadyContacted,
   mongoRecordHook,
   testMode,
-  channel = 'openwa',
+  channel = 'auto',
   batchId = null
 }) {
   const controlId = getBulkControlId(sessionIds);
   const N = sessionIds.length;
-  const sendChannel = String(channel || 'openwa').toLowerCase() === 'android' ? 'android' : 'openwa';
+  const sendChannelRaw = String(channel || 'auto').toLowerCase();
+  const sendChannel =
+    sendChannelRaw === 'android' || sendChannelRaw === 'openwa' ? sendChannelRaw : 'auto';
 
   lastSendJob.inProgress = true;
   lastSendJob.total = finalCvsToSend.length;
@@ -419,7 +421,7 @@ async function runWhatsAppSendJob({
       lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes enviados (modo prueba)`;
     } else if (sendChannel === 'android') {
       console.log(
-        `📱 Envío Android con ${N} sesión(es) lógica(s): ${sessionIds.join(', ')}`
+        `📱 Envío Android (forzado) con ${N} sesión(es): ${sessionIds.join(', ')}`
       );
       initSessionSendingState(controlId);
       for (const sId of sessionIds) {
@@ -440,22 +442,7 @@ async function runWhatsAppSendJob({
       lastSendJob.successCount = results.filter((r) => r.success).length;
       lastSendJob.message = `Envío Android: ${lastSendJob.successCount}/${results.length} mensajes`;
     } else {
-      console.log(`📱 Envío paralelo con ${N} sesión(es): ${sessionIds.join(', ')}`);
-
-      const services = sessionIds.map((sId) => {
-        let svc = whatsappServices.get(sId);
-        if (!svc) {
-          svc = new WhatsAppService(sId);
-          whatsappServices.set(sId, svc);
-        }
-        return svc;
-      });
-
-      for (const svc of services) {
-        if (!svc.isReady()) await svc.initWhatsApp();
-      }
-
-      const servicesBySessionId = new Map(sessionIds.map((sId, i) => [sId, services[i]]));
+      // auto | openwa → respetar outreachChannel por línea (openwa forzado = todas openwa)
       const contactsToSend = finalCvsToSend.map((cv) => ({
         nombre: cv.nombre,
         telefono: cv.telefono,
@@ -470,11 +457,66 @@ async function runWhatsAppSendJob({
         sessionWeights,
         contactsToSend.length
       );
+      const queues = buildQueuesFromCounts(sessionIds, contactsToSend, distribution.counts);
       const distributionLog = sessionIds.map((sId, i) => {
         const pct = Math.round(distribution.proportions[i] * 1000) / 10;
         return `${sId}: ${distribution.counts[i]} (${pct}%)`;
       });
       console.log(`📊 Distribución por cantidad → ${distributionLog.join(', ')}`);
+
+      /** @type {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, logicalSessionId: string }>} */
+      const androidAssignments = [];
+      /** @type {string[]} */
+      const openwaSessionIds = [];
+      /** @type {Map<string, typeof contactsToSend>} */
+      const openwaContactsBySession = new Map();
+
+      for (const sId of sessionIds) {
+        const session = sessionsStore.getSession(sId);
+        const useAndroid =
+          sendChannel === 'auto' &&
+          session &&
+          session.outreachChannel === 'android';
+        const queue = (queues.get(sId) || []).map((row) => row.contact);
+
+        if (useAndroid) {
+          const deviceId = session.androidDeviceId;
+          if (!deviceId) {
+            throw new Error(
+              `La línea "${session.label || sId}" tiene primer mensaje por Android pero no tiene celular vinculado.`
+            );
+          }
+          const online = androidGatewayStore
+            .pickOnlineDevices({ maxAgeMs: 3 * 60 * 1000 })
+            .some((d) => d.id === deviceId);
+          if (!online) {
+            throw new Error(
+              `El celular vinculado a "${session.label || sId}" no está online. Inicia WA Agent.`
+            );
+          }
+          for (const c of queue) {
+            androidAssignments.push({
+              telefono: c.telefono,
+              mensaje: String(c.mensajeIA || '').trim(),
+              deviceId,
+              nombre: c.nombre || null,
+              logicalSessionId: sId,
+              meta: {
+                cvId: c.cvId || null,
+                archivoOriginal: c.archivoOriginal || null,
+                saludo: c.saludo || null
+              }
+            });
+          }
+        } else {
+          openwaSessionIds.push(sId);
+          openwaContactsBySession.set(sId, queue);
+        }
+      }
+
+      console.log(
+        `📡 Canales → Android: ${androidAssignments.length}, OpenWA: ${[...openwaContactsBySession.values()].reduce((n, a) => n + a.length, 0)}`
+      );
 
       initSessionSendingState(controlId);
       for (const sId of sessionIds) {
@@ -484,38 +526,92 @@ async function runWhatsAppSendJob({
       const { onProgress, onWaitProgressBySession } = buildSendProgressHandlers(controlId);
       const checkControlsBySession = (sId) => makeSessionCheckControls(sId, controlId);
 
-      let results;
+      const tasks = [];
+
+      if (androidAssignments.length > 0) {
+        tasks.push(
+          runAndroidSendJob({
+            assignments: androidAssignments,
+            batchId,
+            onMessageResult: trackMessageResult,
+            pollMs: 2000,
+            timeoutMs: 24 * 60 * 60 * 1000
+          })
+        );
+      }
+
+      if (openwaSessionIds.length > 0) {
+        tasks.push(
+          (async () => {
+            const services = openwaSessionIds.map((sId) => {
+              let svc = whatsappServices.get(sId);
+              if (!svc) {
+                svc = new WhatsAppService(sId);
+                whatsappServices.set(sId, svc);
+              }
+              return svc;
+            });
+            for (const svc of services) {
+              if (!svc.isReady()) await svc.initWhatsApp();
+            }
+            const servicesBySessionId = new Map(
+              openwaSessionIds.map((sId, i) => [sId, services[i]])
+            );
+
+            // Aplanar contactos OpenWA en el orden de sesión (ya preasignados)
+            const openwaFlat = [];
+            for (const sId of openwaSessionIds) {
+              openwaFlat.push(...(openwaContactsBySession.get(sId) || []));
+            }
+
+            if (openwaSessionIds.length === 1) {
+              const singleCheck = makeSessionCheckControls(openwaSessionIds[0], null);
+              const onWaitProgress = onWaitProgressBySession(openwaSessionIds[0]);
+              return services[0].sendBulkMessages(
+                openwaFlat,
+                2,
+                onProgress,
+                singleCheck,
+                trackMessageResult,
+                onWaitProgress
+              );
+            }
+
+            // Pesos exactos = tamaño de cola ya asignada por línea
+            const openwaWeights = {};
+            for (const sId of openwaSessionIds) {
+              openwaWeights[sId] = (openwaContactsBySession.get(sId) || []).length;
+            }
+            return sendRoundRobinBulk(
+              servicesBySessionId,
+              openwaSessionIds,
+              openwaFlat,
+              onProgress,
+              checkControlsBySession,
+              trackMessageResult,
+              onWaitProgressBySession,
+              openwaWeights
+            );
+          })()
+        );
+      }
+
+      let results = [];
       try {
-        if (N === 1) {
-          const singleCheck = makeSessionCheckControls(sessionIds[0], null);
-          const onWaitProgress = onWaitProgressBySession(sessionIds[0]);
-          results = await services[0].sendBulkMessages(
-            contactsToSend,
-            2,
-            onProgress,
-            singleCheck,
-            trackMessageResult,
-            onWaitProgress
-          );
+        if (tasks.length === 0) {
+          results = [];
         } else {
-          results = await sendRoundRobinBulk(
-            servicesBySessionId,
-            sessionIds,
-            contactsToSend,
-            onProgress,
-            checkControlsBySession,
-            trackMessageResult,
-            onWaitProgressBySession,
-            sessionWeights
-          );
+          const parts = await Promise.all(tasks);
+          results = parts.flat();
         }
       } finally {
         resetBulkControlState(controlId, sessionIds);
       }
 
       lastSendJob.results = results;
+      lastSendJob.completedCount = results.length;
       lastSendJob.successCount = results.filter((r) => r.success).length;
-      lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes enviados`;
+      lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes (por línea: Android/OpenWA)`;
     }
 
     lastSendJob.completedAt = Date.now();
@@ -739,7 +835,7 @@ async function dispatchQueuedBatch(_user, batchId = null) {
     skippedAlreadyContacted: [],
     mongoRecordHook,
     testMode: TEST_MODE,
-    channel: batch.channel || 'openwa',
+    channel: batch.channel || 'auto',
     batchId: batch.id
   }).finally(() => {
     armSendQueueTimer();
@@ -2079,11 +2175,45 @@ app.post('/api/sessions', requireSuper, async (req, res) => {
 
 app.put('/api/sessions/:id', requireSuper, (req, res) => {
   try {
-    const session = sessionsStore.updateSession(req.params.id, {
+    const logicalId = req.params.id;
+    const patch = {
       label: req.body.label,
       openwaSessionId: req.body.openwaSessionId,
       senderName: req.body.senderName
-    });
+    };
+    if (Object.prototype.hasOwnProperty.call(req.body, 'androidDeviceId')) {
+      patch.androidDeviceId = req.body.androidDeviceId;
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'outreachChannel')) {
+      patch.outreachChannel = req.body.outreachChannel;
+    }
+
+    const session = sessionsStore.updateSession(logicalId, patch);
+
+    if (Object.prototype.hasOwnProperty.call(req.body, 'androidDeviceId')) {
+      try {
+        if (session.androidDeviceId) {
+          androidGatewayStore.linkDeviceToLogicalSession(
+            session.androidDeviceId,
+            logicalId
+          );
+        } else {
+          // Desvincular devices que apuntaban a esta línea
+          for (const d of androidGatewayStore.listDevices()) {
+            if (d.logicalSessionId === logicalId) {
+              androidGatewayStore.linkDeviceToLogicalSession(d.id, null);
+            }
+          }
+        }
+      } catch (linkErr) {
+        return res.status(400).json({
+          success: false,
+          error: `Línea guardada, pero no se pudo vincular Android: ${linkErr.message}`,
+          session
+        });
+      }
+    }
+
     res.json({ success: true, session });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
@@ -2207,7 +2337,10 @@ app.post('/api/send-queue', async (req, res) => {
       sessionWeights: req.body?.sessionWeights || null,
       scheduledAt: slot ? null : req.body?.scheduledAt || null,
       slot,
-      channel: req.body?.channel === 'android' ? 'android' : 'openwa'
+      channel:
+        req.body?.channel === 'android' || req.body?.channel === 'openwa'
+          ? req.body.channel
+          : 'auto'
     });
     armSendQueueTimer();
 
@@ -2541,7 +2674,10 @@ app.post('/send-whatsapp', async (req, res) => {
       req.body.sessionWeights && typeof req.body.sessionWeights === 'object'
         ? req.body.sessionWeights
         : null;
-    const channel = req.body?.channel === 'android' ? 'android' : 'openwa';
+    const channel =
+      req.body?.channel === 'android' || req.body?.channel === 'openwa'
+        ? req.body.channel
+        : 'auto';
 
     try {
       sendQueueStore.beginDirectSend({

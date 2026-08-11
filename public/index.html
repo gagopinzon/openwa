@@ -70,14 +70,10 @@
                         Celulares con la app agente. El envío frío puede salir por Android en lugar de OpenWA.
                     </p>
                     <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px;">
-                        <label style="font-size: 13px;">
-                            Canal de envío:
-                            <select id="sendChannelSelect" class="form-select" style="padding: 6px; margin-left: 6px;">
-                                <option value="openwa">OpenWA (Web)</option>
-                                <option value="android">Android (celular)</option>
-                            </select>
-                        </label>
                         <button type="button" id="refreshAndroidDevicesBtn" class="btn btn-secondary">Actualizar dispositivos</button>
+                        <span style="font-size: 12px; color: #64748b;">
+                            El canal del <strong>primer mensaje</strong> se elige por línea (Android u OpenWA). Las respuestas siguen por OpenWA.
+                        </span>
                     </div>
                     <div id="androidDevicesList" class="line-users-list" style="font-size: 13px;"></div>
                     <p id="androidGatewayHint" style="font-size: 12px; color: #64748b; margin-top: 8px;"></p>

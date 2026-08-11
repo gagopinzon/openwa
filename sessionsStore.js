@@ -4,7 +4,7 @@ const path = require('path');
 const DATA_DIR = path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'sessions.json');
 
-/** @typedef {{ id: string, label: string, openwaSessionId: string, senderName?: string, createdAt?: string }} StoredSession */
+/** @typedef {{ id: string, label: string, openwaSessionId: string, senderName?: string, androidDeviceId?: string|null, outreachChannel?: 'openwa'|'android', createdAt?: string }} StoredSession */
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -90,7 +90,24 @@ function migrateFromEnvIfEmpty() {
 
 function getAllSessions() {
   migrateFromEnvIfEmpty();
-  return readStore().sessions;
+  return readStore().sessions.map(normalizeSession);
+}
+
+function normalizeSession(session) {
+  if (!session || typeof session !== 'object') return session;
+  const outreachChannel =
+    String(session.outreachChannel || '').trim().toLowerCase() === 'android'
+      ? 'android'
+      : 'openwa';
+  const androidDeviceId =
+    session.androidDeviceId != null && String(session.androidDeviceId).trim()
+      ? String(session.androidDeviceId).trim()
+      : null;
+  return {
+    ...session,
+    outreachChannel,
+    androidDeviceId
+  };
 }
 
 function getLogicalSessionIds() {
@@ -175,7 +192,7 @@ function addSession(input) {
 
 /**
  * @param {string} logicalId
- * @param {{ label?: string, openwaSessionId?: string, senderName?: string }} patch
+ * @param {{ label?: string, openwaSessionId?: string, senderName?: string, androidDeviceId?: string|null, outreachChannel?: string }} patch
  */
 function updateSession(logicalId, patch) {
   const store = readStore();
@@ -209,8 +226,19 @@ function updateSession(logicalId, patch) {
     store.sessions[idx].senderName = senderName;
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, 'androidDeviceId')) {
+    const raw = patch.androidDeviceId;
+    store.sessions[idx].androidDeviceId =
+      raw == null || String(raw).trim() === '' ? null : String(raw).trim();
+  }
+
+  if (patch.outreachChannel != null) {
+    const ch = String(patch.outreachChannel).trim().toLowerCase();
+    store.sessions[idx].outreachChannel = ch === 'android' ? 'android' : 'openwa';
+  }
+
   writeStore(store);
-  return store.sessions[idx];
+  return normalizeSession(store.sessions[idx]);
 }
 
 function removeSession(logicalId) {
