@@ -5,6 +5,7 @@
     android:padding="16dp">
 
     <LinearLayout
+        android:id="@+id/mainLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical">
@@ -64,6 +65,34 @@
             android:hint="session1"
             android:inputType="text" />
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Versión de WhatsApp preferida"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/waVersionGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/rbNormal"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Normal"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/rbBusiness"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:text="Business" />
+        </RadioGroup>
+
         <Button
             android:id="@+id/saveBtn"
             android:layout_width="match_parent"
@@ -82,6 +111,12 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Abrir Accesibilidad" />
+
+        <Button
+            android:id="@+id/batteryBtn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Ignorar Optimización de Batería" />
 
         <Button
             android:id="@+id/startBtn"

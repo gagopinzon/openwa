@@ -16,12 +16,12 @@ function buildAndroidOutreachText(contact, logicalSessionId) {
     contact &&
     (contact.mensajeIA != null || contact.saludo != null || contact.nombre != null);
   if (hasParts && (contact.mensajeIA || contact.saludo)) {
-    const parts = buildOutboundMessageParts({
+    const [single] = buildOutboundMessageParts({
       saludo: contact.saludo,
       nombre: contact.nombre,
       mensajeIA: contact.mensajeIA || contact.mensaje || ''
     });
-    return parts.map((p) => applySenderName(p, senderName)).join('\n\n');
+    return applySenderName(single, senderName);
   }
   return applySenderName(String(contact?.mensaje || contact?.mensajeIA || ''), senderName);
 }

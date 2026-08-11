@@ -18,18 +18,22 @@ object Prefs {
 
     fun deviceId(ctx: Context): String = get(ctx).getString("deviceId", "")?.trim() ?: ""
 
+    fun preferredPackage(ctx: Context): String = get(ctx).getString("preferredPackage", "com.whatsapp") ?: "com.whatsapp"
+
     fun save(
         ctx: Context,
         serverUrl: String,
         token: String,
         label: String,
-        sessionId: String
+        sessionId: String,
+        preferredPackage: String = "com.whatsapp"
     ) {
         get(ctx).edit()
             .putString("serverUrl", serverUrl.trim().trimEnd('/'))
             .putString("token", token.trim())
             .putString("label", label.trim().ifEmpty { "Android" })
             .putString("sessionId", sessionId.trim())
+            .putString("preferredPackage", preferredPackage)
             .apply()
     }
 

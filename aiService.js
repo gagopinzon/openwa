@@ -15,15 +15,6 @@ const GREETING_TEMPLATES = [
   (name) => `Buen día ${name}`
 ];
 
-/** Saludos cortos sin nombre (mensajes intermedios del burst) */
-const EXTRA_GREETING_LINES = [
-  'Buen día',
-  '¿Cómo estás?',
-  'Espero que estés muy bien',
-  'Un gusto saludarte',
-  '¿Qué tal tu día?'
-];
-
 /**
  * Capitaliza un nombre: primera letra mayúscula, resto minúsculas.
  * @param {string} word
@@ -84,24 +75,10 @@ function splitSpeechParts(body) {
   return merged.length ? merged : [raw];
 }
 
-function pickExtraGreeting() {
-  return EXTRA_GREETING_LINES[Math.floor(Math.random() * EXTRA_GREETING_LINES.length)];
-}
-
-function joinSpeechFrom(parts, startIndex) {
-  return parts.slice(startIndex).join('\n\n');
-}
-
 /**
- * Arma 1–4 mensajes de WhatsApp de forma aleatoria a partir del saludo + speech.
- * Ejemplos:
- * - 1: "Hola Ana\n\n[speech completo]"
- * - 2: ["Hola Ana", speech]
- * - 3: ["Hola Ana", "Buen día", speech] o ["Hola Ana", p1, resto]
- * - 4: ["Hola Ana", "Buen día", p1, resto]
- *
+ * Arma 1 mensaje de WhatsApp: saludo + speech completo (un solo bubble).
  * @param {{ saludo?: string, nombre?: string, mensajeIA?: string }} contact
- * @returns {string[]}
+ * @returns {string[]} siempre length 1
  */
 function buildOutboundMessageParts(contact) {
   const saludo =
@@ -117,49 +94,7 @@ function buildOutboundMessageParts(contact) {
     .trim();
 
   if (!body) return [saludo];
-
-  const speechParts = splitSpeechParts(body);
-  const count = 1 + Math.floor(Math.random() * 4); // 1..4
-
-  if (count === 1) {
-    return [`${saludo}\n\n${body}`];
-  }
-
-  if (count === 2) {
-    return [saludo, body];
-  }
-
-  if (count === 3) {
-    const variants = [[saludo, pickExtraGreeting(), body]];
-    if (speechParts.length >= 2) {
-      variants.push([saludo, speechParts[0], joinSpeechFrom(speechParts, 1)]);
-    }
-    return variants[Math.floor(Math.random() * variants.length)];
-  }
-
-  // count === 4
-  const variants = [];
-  if (speechParts.length >= 2) {
-    variants.push([
-      saludo,
-      pickExtraGreeting(),
-      speechParts[0],
-      joinSpeechFrom(speechParts, 1)
-    ]);
-  }
-  if (speechParts.length >= 3) {
-    variants.push([
-      saludo,
-      speechParts[0],
-      speechParts[1],
-      joinSpeechFrom(speechParts, 2)
-    ]);
-  }
-  // Fallback si el speech no se parte bien: saludo + 2 líneas cortas + cuerpo
-  if (!variants.length) {
-    variants.push([saludo, pickExtraGreeting(), pickExtraGreeting(), body]);
-  }
-  return variants[Math.floor(Math.random() * variants.length)];
+  return [`${saludo}\n\n${body}`];
 }
 
 /**
@@ -269,13 +204,36 @@ function generateBasicMessage(nombre, experiencia) {
     puestoClave = 'Recursos Humanos';
   }
 
+  const openerVariants = [
+    (e) => `Vi tu perfil y me pareció muy sólido tu expertise ${e}.`,
+    (e) => `Revisé tu trayectoria y destaca tu expertise ${e}.`,
+    (e) => `Tu perfil se ve muy interesante; resalta tu expertise ${e}.`
+  ];
+  const bodyVariants = [
+    (p) =>
+      `En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en ${p} y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.`,
+    (p) =>
+      `En Pro Talent acompañamos a perfiles como el tuyo a crecer, vinculándolos con oportunidades clave en ${p} y reforzando su posicionamiento con estrategias que destacan resultados y liderazgo.`,
+    (p) =>
+      `Desde Pro Talent impulsamos a profesionales como tú, acercándolos a vacantes relevantes en ${p} y potenciando su posicionamiento con estrategias activas de resultados y liderazgo.`
+  ];
+  const ctaVariants = [
+    '¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?',
+    '¿Te gustaría una sesión gratuita de diagnóstico para revisar tu perfil y contarte cómo podemos apoyarte a dar el siguiente paso?',
+    '¿Qué te parecería una sesión gratuita de diagnóstico para analizar tu perfil y mostrarte cómo podemos ayudarte a avanzar?'
+  ];
+
+  const opener = openerVariants[Math.floor(Math.random() * openerVariants.length)](expertise);
+  const mid = bodyVariants[Math.floor(Math.random() * bodyVariants.length)](puestoClave);
+  const cta = ctaVariants[Math.floor(Math.random() * ctaVariants.length)];
+
   return {
     saludo: buildGreeting(nombre),
-    mensajeIA: `Vi tu perfil y me pareció muy sólido tu expertise ${expertise}.
+    mensajeIA: `${opener}
 
-En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en ${puestoClave} y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
+${mid}
 
-¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
+${cta}
 
 Atte:
 ${SENDER_PLACEHOLDER}`
@@ -304,57 +262,41 @@ ${experiencia}
 
 INSTRUCCIONES:
 1. Lee cuidadosamente la experiencia profesional
-2. Identifica el PUESTO CLAVE más relevante de la persona (ej: Gerencia de Producción, Supervisión de Calidad, Dirección de Operaciones, etc.)
-3. Identifica también un logro destacado, rol específico o industria para personalizar el expertise
-4. Genera un mensaje natural y conversacional
-5. Varía un poco el mensaje para que no sea repetitivo y se sienta natural
-6. Usa solo el primer nombre ("${firstName}"), evita usar apellidos
+2. Identifica el PUESTO CLAVE más relevante (ej: Gerencia de Producción, Supervisión de Calidad, Dirección de Operaciones)
+3. Identifica un logro, rol o industria para personalizar
+4. Usa solo el primer nombre ("${firstName}"), sin apellidos
+5. VARIACIÓN OBLIGATORIA: reescribe con otras palabras manteniendo la MISMA estructura e idea (4 bloques). No copies el texto plantilla palabra por palabra. Cambia verbos, adjetivos y formulaciones; conserva el sentido Pro Talent + diagnóstico gratuito.
 
-FORMATO EXACTO (debes seguir este formato estrictamente, sin texto extra):
-SALUDO: [elige UNA variante natural: "Hola ${firstName}" o "Qué tal ${firstName}" o "Buen día ${firstName}"]
+ESTRUCTURA FIJA DEL MENSAJE (4 bloques separados por línea en blanco):
+1) Reconocimiento del perfil / expertise (1-2 frases, personalizado, máx ~90 caracteres en la parte personalizada)
+2) Qué hace Pro Talent por perfiles como el suyo + vacantes en el PUESTO CLAVE
+3) Pregunta/CTA ofreciendo sesión gratuita de diagnóstico
+4) Firma exacta:
+Atte:
+${SENDER_PLACEHOLDER}
+
+FORMATO EXACTO (sin texto extra fuera de esto):
+SALUDO: [UNA variante: "Hola ${firstName}" | "Qué tal ${firstName}" | "Buen día ${firstName}"]
 MENSAJE:
-Vi tu perfil y me pareció muy sólido tu expertise [personaliza aquí con algo específico de su experiencia - máximo 60 caracteres].
+[bloque 1]
 
-En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en [PUESTO CLAVE IDENTIFICADO] y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
+[bloque 2]
 
-¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
+[bloque 3]
 
 Atte:
 ${SENDER_PLACEHOLDER}
 
 IMPORTANTE - SALUDO Y NOMBRE:
-- El SALUDO es un mensaje corto aparte (solo la línea de saludo, sin coma final obligatoria)
-- El MENSAJE NO debe empezar con "Hola", "Qué tal" ni mencionar el nombre de la persona
-- El nombre "${firstName}" solo puede aparecer en la línea SALUDO
+- SALUDO = solo esa línea corta
+- El MENSAJE NO debe empezar con Hola/Qué tal ni repetir el nombre
+- El nombre "${firstName}" solo en SALUDO
 
-IMPORTANTE - PUESTO CLAVE:
-- Debes identificar el puesto clave basándote en su experiencia
-- Ejemplos de puestos clave: "Gerencia de Producción", "Supervisión de Calidad", "Dirección de Operaciones", "Gerencia de Ventas", "Producción", "Operaciones", "Calidad", etc.
-- NO uses "dirección comercial" a menos que realmente sea su área
-- El puesto debe ser específico y relevante a su experiencia
-
-EJEMPLOS DE PERSONALIZACIÓN DEL EXPERTISE:
-- "tu expertise como Gerente de Producción en Graham Packaging"
-- "tu experiencia mejorando la eficiencia operativa en un 2%"
-- "tu trayectoria en manufactura de botellas de plástico"
-- "tu liderazgo en equipos de producción"
-- "tu experiencia en auditorías ISO y gestión de calidad"
-
-EJEMPLOS DE PUESTOS CLAVE (según experiencia):
-- Si es Gerente de Producción → "Gerencia de Producción"
-- Si es Supervisor de Calidad → "Supervisión de Calidad"
-- Si trabaja en Operaciones → "Operaciones"
-- Si es Director → "Dirección"
-- Si es de Ventas → "Ventas" o "Gerencia de Ventas"
-
-REGLAS IMPORTANTES:
-- Máximo 60 caracteres para la personalización del expertise
-- El puesto clave debe ser específico y relevante
-- Usa lenguaje natural y conversacional
-- Mantén el resto del mensaje exactamente igual al formato
-- GENERA SOLO UNA respuesta con SALUDO + MENSAJE, NO múltiples variaciones
-- NO uses separadores como "---" o "***"
-- NO generes múltiples versiones del mensaje`;
+IMPORTANTE - VARIACIÓN:
+- Sí varía redacción; no inventes otra estructura ni agregues bloques extra
+- No uses listas, emojis ni hashtags
+- GENERA UNA sola respuesta SALUDO + MENSAJE
+- NO uses separadores --- *** ni múltiples versiones`;
 
   try {
     const response = await axios.post(DEEPSEEK_API_URL, {
@@ -365,8 +307,8 @@ REGLAS IMPORTANTES:
           content: prompt
         }
       ],
-      temperature: 0.7,
-      max_tokens: 500
+      temperature: 0.95,
+      max_tokens: 550
     }, {
       headers: {
         'Authorization': `Bearer ${API_KEY}`,

@@ -5,15 +5,16 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.net.URLEncoder
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -22,19 +23,80 @@ class AgentPollService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val running = AtomicBoolean(false)
     private val busy = AtomicBoolean(false)
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIF_ID, buildNotification("Agente activo"))
         if (running.compareAndSet(false, true)) {
+            acquireWakeLock()
             executor.execute { pollLoop() }
+            scheduleKeepAlive(this)
         }
         return START_STICKY
     }
 
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (wakeLock == null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WaAgent::WakeLock")
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "WakeLock error", e)
+        }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Reiniciar el servicio si el usuario lo cierra desde "Recientes"
+        val restartServiceIntent = Intent(applicationContext, this.javaClass)
+        restartServiceIntent.setPackage(packageName)
+        val restartServicePendingIntent = PendingIntent.getService(
+            applicationContext, 1, restartServiceIntent,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val alarmService = applicationContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+        alarmService.set(
+            android.app.AlarmManager.RTC_WAKEUP,
+            System.currentTimeMillis() + 1000,
+            restartServicePendingIntent
+        )
+        super.onTaskRemoved(rootIntent)
+    }
+
+    private fun scheduleKeepAlive(context: Context) {
+        val alarmIntent = Intent(context, BootReceiver::class.java).apply {
+            action = "com.protalent.waagent.KEEP_ALIVE"
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context, 0, alarmIntent, PendingIntent.FLAG_IMMUTABLE
+        )
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setExactAndAllowWhileIdle(
+                android.app.AlarmManager.RTC_WAKEUP,
+                System.currentTimeMillis() + 5 * 60 * 1000,
+                pendingIntent
+            )
+        } else {
+            alarmManager.setExact(
+                android.app.AlarmManager.RTC_WAKEUP,
+                System.currentTimeMillis() + 5 * 60 * 1000,
+                pendingIntent
+            )
+        }
+    }
+
     override fun onDestroy() {
         running.set(false)
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
         WhatsAppAccessibilityService.cancel()
         super.onDestroy()
     }
@@ -86,12 +148,26 @@ class AgentPollService : Service() {
         stopSelf()
     }
 
+    private fun wakeUpScreen() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!pm.isInteractive) {
+            val wl = pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "WAAgent:WakeUp"
+            )
+            wl.acquire(3000) // Mantener encendida por 3 segundos para que cargue la UI
+        }
+    }
+
     private fun executeJob(api: ApiClient, deviceId: String, job: AgentJob) {
         val phone = job.telefono.replace(Regex("[^0-9]"), "")
         if (phone.isBlank() || job.mensaje.isBlank()) {
             api.reportResult(job.id, deviceId, false, "invalid_payload")
             return
         }
+
+        // Despertar la pantalla antes de empezar
+        wakeUpScreen()
 
         val latchOk = AtomicBoolean(false)
         val latchDone = AtomicBoolean(false)
@@ -104,16 +180,28 @@ class AgentPollService : Service() {
                 latchDone.set(true)
                 return@post
             }
-            WhatsAppAccessibilityService.armForSend(40_000L) { ok, error ->
-                latchOk.set(ok)
-                err = error
-                latchDone.set(true)
+
+            val preferred = Prefs.preferredPackage(this@AgentPollService)
+            val fallback = if (preferred == "com.whatsapp") "com.whatsapp.w4b" else "com.whatsapp"
+
+            // Intentamos con la versión preferida
+            tryWhatsApp(phone, job.mensaje, preferred) { ok, error ->
+                if (ok) {
+                    latchOk.set(true)
+                    latchDone.set(true)
+                } else {
+                    // Si falla la preferida, intentamos con la otra
+                    Log.i(TAG, "Preferred WhatsApp ($preferred) failed or timeout ($error), trying fallback ($fallback)...")
+                    tryWhatsApp(phone, job.mensaje, fallback) { ok2, error2 ->
+                        latchOk.set(ok2)
+                        err = error2
+                        latchDone.set(true)
+                    }
+                }
             }
-            // Pequeña pausa para que el servicio quede armado antes de abrir WA
-            main.postDelayed({ openWhatsApp(phone, job.mensaje) }, 400)
         }
 
-        val deadline = System.currentTimeMillis() + 45_000L
+        val deadline = System.currentTimeMillis() + 90_000L // Tiempo total para ambos intentos
         while (!latchDone.get() && System.currentTimeMillis() < deadline) {
             Thread.sleep(200)
         }
@@ -125,22 +213,34 @@ class AgentPollService : Service() {
         api.reportResult(job.id, deviceId, latchOk.get(), err)
     }
 
-    private fun openWhatsApp(phone: String, text: String) {
-        val encoded = URLEncoder.encode(text, "UTF-8")
-        val uri = Uri.parse("https://api.whatsapp.com/send?phone=$phone&text=$encoded")
-        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            setPackage(resolveWhatsAppPackage())
-        }
-        startActivity(intent)
-    }
-
-    private fun resolveWhatsAppPackage(): String {
+    private fun tryWhatsApp(phone: String, text: String, packageName: String, onFinish: (Boolean, String?) -> Unit) {
         val pm = packageManager
-        return when {
-            pm.getLaunchIntentForPackage("com.whatsapp") != null -> "com.whatsapp"
-            pm.getLaunchIntentForPackage("com.whatsapp.w4b") != null -> "com.whatsapp.w4b"
-            else -> "com.whatsapp"
+        val intent = pm.getLaunchIntentForPackage(packageName)
+        if (intent == null) {
+            onFinish(false, "package_not_installed")
+            return
+        }
+
+        Log.i(TAG, "Attempting to open WhatsApp package: $packageName for phone: $phone")
+
+        WhatsAppAccessibilityService.armForSend(35_000L) { ok, error ->
+            onFinish(ok, error)
+        }
+
+        val encoded = java.net.URLEncoder.encode(text, "UTF-8")
+        // Usamos el esquema nativo whatsapp:// que es más directo que el https://
+        val uri = Uri.parse("whatsapp://send?phone=$phone&text=$encoded")
+        val sendIntent = Intent(Intent.ACTION_VIEW, uri).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // Esto fuerza a que SÓLO esta app pueda responder al mensaje
+            setPackage(packageName)
+        }
+
+        try {
+            startActivity(sendIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start WhatsApp intent", e)
+            onFinish(false, "intent_failed")
         }
     }
 
