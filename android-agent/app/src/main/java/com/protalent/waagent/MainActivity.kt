@@ -73,6 +73,12 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
 
+        // Recordatorio visible si Accesibilidad no está activa
+        val a11yOn = WhatsAppAccessibilityService.isServiceConnected()
+        if (!a11yOn) {
+            status.append("\n⚠️ Activa Accesibilidad → WA Agent o no podrá pulsar Enviar")
+        }
+
         findViewById<Button>(R.id.startBtn).setOnClickListener {
             Prefs.save(
                 this,

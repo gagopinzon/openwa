@@ -6,6 +6,6 @@
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_desc"
-    android:notificationTimeout="100"
+    android:notificationTimeout="50"
     android:packageNames="com.whatsapp,com.whatsapp.w4b"
     android:settingsActivity="com.protalent.waagent.MainActivity" />

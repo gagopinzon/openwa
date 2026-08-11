@@ -61,10 +61,67 @@ class CVAnalyzer {
         this.refreshAndroidDevicesBtn = document.getElementById('refreshAndroidDevicesBtn');
         this.androidDevicesList = document.getElementById('androidDevicesList');
         this.androidGatewayHint = document.getElementById('androidGatewayHint');
+        this.androidTestSendPanel = document.getElementById('androidTestSendPanel');
+        this.androidTestDeviceSelect = document.getElementById('androidTestDeviceSelect');
+        this.androidTestPhone = document.getElementById('androidTestPhone');
+        this.androidTestSendBtn = document.getElementById('androidTestSendBtn');
+        this.androidTestSendStatus = document.getElementById('androidTestSendStatus');
         if (this.refreshAndroidDevicesBtn) {
             this.refreshAndroidDevicesBtn.addEventListener('click', () =>
                 this.refreshAndroidDevices({ silent: false })
             );
+        }
+        if (this.androidTestSendBtn) {
+            this.androidTestSendBtn.addEventListener('click', () => this.sendAndroidTestMessage());
+        }
+    }
+
+    setAndroidTestStatus(message, type = 'info') {
+        if (!this.androidTestSendStatus) return;
+        this.androidTestSendStatus.style.display = message ? 'block' : 'none';
+        this.androidTestSendStatus.textContent = message || '';
+        this.androidTestSendStatus.style.color =
+            type === 'error' ? '#b91c1c' : type === 'success' ? '#15803d' : '#64748b';
+    }
+
+    async sendAndroidTestMessage() {
+        if (!this.isSuperUser()) {
+            this.setAndroidTestStatus('Solo el admin puede probar líneas', 'error');
+            return;
+        }
+        const deviceId = this.androidTestDeviceSelect?.value || '';
+        const telefono = (this.androidTestPhone?.value || '').trim();
+        if (!deviceId) {
+            this.setAndroidTestStatus('Selecciona un celular online', 'error');
+            return;
+        }
+        if (!telefono) {
+            this.setAndroidTestStatus('Escribe el teléfono destino', 'error');
+            return;
+        }
+
+        this.androidTestSendBtn.disabled = true;
+        this.setAndroidTestStatus('Encolando prueba…', 'info');
+        try {
+            const res = await fetch('/api/android/test-send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ deviceId, telefono })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                this.setAndroidTestStatus(data.error || 'Error al encolar prueba', 'error');
+                return;
+            }
+            this.setAndroidTestStatus(
+                data.message || `Prueba encolada (${data.job?.id || ''}). Revisá el celular.`,
+                'success'
+            );
+            this.showStatus('Prueba ProTalent encolada en Android', 'success');
+        } catch (err) {
+            this.setAndroidTestStatus(err.message, 'error');
+        } finally {
+            this.androidTestSendBtn.disabled = false;
         }
     }
 
@@ -100,6 +157,21 @@ class CVAnalyzer {
                 const minMin = Math.round((data.config?.minIntervalMs || 180000) / 60000);
                 this.androidGatewayHint.textContent =
                     `Online: ${(data.online || []).length}/${devices.length}. Intervalo mín. entre envíos por celular: ~${minMin} min.`;
+            }
+            if (this.androidTestDeviceSelect) {
+                const prev = this.androidTestDeviceSelect.value;
+                const online = data.online || [];
+                this.androidTestDeviceSelect.innerHTML =
+                    '<option value="">— Celular online —</option>' +
+                    online
+                        .map(
+                            (d) =>
+                                `<option value="${this.escapeHtml(d.id)}">${this.escapeHtml(d.label || d.id)}</option>`
+                        )
+                        .join('');
+                if (prev && online.some((d) => d.id === prev)) {
+                    this.androidTestDeviceSelect.value = prev;
+                }
             }
         } catch (err) {
             if (!silent) this.showStatus(err.message, 'error');
@@ -336,6 +408,9 @@ class CVAnalyzer {
 
         if (this.accountsSection) {
             this.accountsSection.style.display = isSuper ? 'block' : 'none';
+        }
+        if (this.androidTestSendPanel) {
+            this.androidTestSendPanel.style.display = isSuper ? 'block' : 'none';
         }
         if (this.sessionsAddForm) {
             this.sessionsAddForm.style.display = isSuper ? 'flex' : 'none';

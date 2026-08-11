@@ -2419,6 +2419,60 @@ app.post('/api/android/jobs/:id/result', (req, res) => {
   }
 });
 
+const DEFAULT_ANDROID_TEST_MESSAGE =
+  'Hola, este es un mensaje de prueba de ProTalent Connections. Si lo recibiste, la línea Android está funcionando correctamente.';
+
+app.post('/api/android/test-send', requireSuper, (req, res) => {
+  try {
+    const deviceId = String(req.body?.deviceId || '').trim();
+    const telefono = String(req.body?.telefono || '').replace(/\D/g, '');
+    const mensaje = String(req.body?.mensaje || DEFAULT_ANDROID_TEST_MESSAGE).trim();
+
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Selecciona un celular vinculado' });
+    }
+    if (telefono.length < 10) {
+      return res.status(400).json({ error: 'Teléfono destino inválido (mín. 10 dígitos)' });
+    }
+    if (!mensaje) {
+      return res.status(400).json({ error: 'Mensaje vacío' });
+    }
+
+    const device = androidGatewayStore.getDevice(deviceId);
+    if (!device) {
+      return res.status(404).json({ error: 'Dispositivo no encontrado' });
+    }
+
+    const online = androidGatewayStore.pickOnlineDevices({ maxAgeMs: 3 * 60 * 1000 });
+    if (!online.some((d) => d.id === deviceId)) {
+      return res.status(409).json({
+        error: 'Ese celular no está online. Abre WA Agent e Iniciar agente.'
+      });
+    }
+
+    const [job] = androidGatewayStore.enqueueJobs(
+      [
+        {
+          telefono,
+          mensaje,
+          nombre: 'Prueba ProTalent',
+          meta: { test: true, bypassInterval: true, source: 'admin_test' }
+        }
+      ],
+      [deviceId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Prueba encolada. El celular debería abrir WhatsApp en unos segundos.',
+      job,
+      device: { id: device.id, label: device.label }
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code || null });
+  }
+});
+
 // Ruta para enviar mensajes por WhatsApp
 app.post('/send-whatsapp', async (req, res) => {
   try {

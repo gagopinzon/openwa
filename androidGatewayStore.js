@@ -171,11 +171,31 @@ function claimNextJob({ deviceId } = {}) {
   }
 
   if (!deviceCanClaim(device, store, now)) {
+    // Aún permitir jobs de prueba admin (bypassInterval)
+    const testJob = store.jobs.find(
+      (j) =>
+        j.deviceId === id &&
+        j.status === JOB_STATUS.PENDING &&
+        (j.meta?.bypassInterval === true || j.meta?.test === true)
+    );
+    if (!testJob) {
+      writeStore(store);
+      return null;
+    }
+    testJob.status = JOB_STATUS.CLAIMED;
+    testJob.claimedAt = new Date(now).toISOString();
     writeStore(store);
-    return null;
+    return { ...testJob };
   }
 
-  const job = store.jobs.find((j) => j.deviceId === id && j.status === JOB_STATUS.PENDING);
+  // Preferir jobs de prueba pendientes
+  const job =
+    store.jobs.find(
+      (j) =>
+        j.deviceId === id &&
+        j.status === JOB_STATUS.PENDING &&
+        (j.meta?.test === true || j.meta?.bypassInterval === true)
+    ) || store.jobs.find((j) => j.deviceId === id && j.status === JOB_STATUS.PENDING);
   if (!job) {
     writeStore(store);
     return null;

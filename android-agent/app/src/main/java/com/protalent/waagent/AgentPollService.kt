@@ -98,15 +98,22 @@ class AgentPollService : Service() {
         var err: String? = null
 
         main.post {
-            WhatsAppAccessibilityService.armForSend(25_000L) { ok, error ->
+            if (!WhatsAppAccessibilityService.isServiceConnected()) {
+                latchOk.set(false)
+                err = "accessibility_not_enabled"
+                latchDone.set(true)
+                return@post
+            }
+            WhatsAppAccessibilityService.armForSend(40_000L) { ok, error ->
                 latchOk.set(ok)
                 err = error
                 latchDone.set(true)
             }
-            openWhatsApp(phone, job.mensaje)
+            // Pequeña pausa para que el servicio quede armado antes de abrir WA
+            main.postDelayed({ openWhatsApp(phone, job.mensaje) }, 400)
         }
 
-        val deadline = System.currentTimeMillis() + 30_000L
+        val deadline = System.currentTimeMillis() + 45_000L
         while (!latchDone.get() && System.currentTimeMillis() < deadline) {
             Thread.sleep(200)
         }
