@@ -386,6 +386,11 @@ class CVAnalyzer {
 
     renderLinePillHtml(session, opts = {}) {
         const meta = this.lineChannelMeta(session);
+        const conn = this.connectionBadgeForSession(session.id);
+        const offline =
+            !this.testMode &&
+            this.openwaConnectionBySession?.[session.id] &&
+            this.openwaConnectionBySession[session.id].connected === false;
         const userId = opts.userId || '';
         const access = opts.access || '';
         const assignSelect =
@@ -414,14 +419,17 @@ class CVAnalyzer {
                 : '';
 
         return `
-            <div class="line-pill"
+            <div class="line-pill${offline ? ' is-offline' : ''}"
                 draggable="true"
                 data-session-id="${this.escapeHtml(session.id)}"
                 data-from-user-id="${this.escapeHtml(userId)}"
                 data-pill-mode="${this.escapeHtml(opts.mode || '')}">
                 <div class="line-pill-top line-pill-open">
                     <strong>${this.escapeHtml(session.label || session.id)}</strong>
-                    <span class="line-pill-channel ${meta.chipClass}">${meta.chipLabel}</span>
+                    <span class="line-pill-badges">
+                        <span class="${conn.className}" data-conn-badge="1">${this.escapeHtml(conn.text)}</span>
+                        <span class="line-pill-channel ${meta.chipClass}">${meta.chipLabel}</span>
+                    </span>
                 </div>
                 <div class="line-pill-sender line-pill-open">Remitente: ${this.escapeHtml(meta.sender)}</div>
                 ${assignSelect}
@@ -566,6 +574,7 @@ class CVAnalyzer {
                     const access = session.access || this.getSessionAccess(session.id) || 'view';
                     const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
                     const meta = this.lineChannelMeta(session);
+                    const conn = this.connectionBadgeForSession(session.id);
                     const androidLabel = session.androidDeviceId
                         ? (this.androidDevices || []).find((d) => d.id === session.androidDeviceId)?.label ||
                           session.androidDeviceId
@@ -575,6 +584,7 @@ class CVAnalyzer {
                     <div class="line-card-header">
                         <div class="line-card-title">
                             <strong>${this.escapeHtml(session.label || session.id)}</strong>
+                            <span class="${conn.className}" data-conn-badge="1">${this.escapeHtml(conn.text)}</span>
                             <span class="session-access-badge session-access-${access}">${accessLabel}</span>
                             <span class="line-pill-channel ${meta.chipClass}">${meta.chipLabel}</span>
                         </div>
@@ -586,6 +596,8 @@ class CVAnalyzer {
                 </div>`;
                 })
                 .join('');
+            this.refreshOpenWAConnectionStatuses({ silent: true });
+            this.startConnectionStatusPolling();
             return;
         }
 
@@ -647,6 +659,8 @@ class CVAnalyzer {
 
         this.lineUsersList.innerHTML = `<div class="lines-kanban-board">${columnsHtml.join('')}</div>`;
         this.attachKanbanBoardEvents();
+        this.refreshOpenWAConnectionStatuses({ silent: true });
+        this.startConnectionStatusPolling();
     }
 
     initPanelProfile() {
@@ -3100,12 +3114,45 @@ class CVAnalyzer {
         }
 
         this.updateSessionWeightUI();
+        this.applyConnectionStatusToLinePills();
+    }
+
+    applyConnectionStatusToLinePills() {
+        if (!this.lineUsersList) return;
+        this.lineUsersList.querySelectorAll('[data-session-id]').forEach((el) => {
+            const sessionId = el.dataset.sessionId;
+            if (!sessionId) return;
+            const info = this.connectionBadgeForSession(sessionId);
+            let badge = el.querySelector('[data-conn-badge]');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.dataset.connBadge = '1';
+                const top = el.querySelector('.line-pill-badges, .line-card-title');
+                if (top) top.prepend(badge);
+                else el.prepend(badge);
+            }
+            badge.textContent = info.text;
+            badge.className = info.className;
+            badge.dataset.connBadge = '1';
+
+            if (el.classList.contains('line-pill')) {
+                const offline =
+                    !this.testMode &&
+                    this.openwaConnectionBySession?.[sessionId] &&
+                    this.openwaConnectionBySession[sessionId].connected === false;
+                el.classList.toggle('is-offline', Boolean(offline));
+            }
+        });
     }
 
     startConnectionStatusPolling() {
         if (this._connectionStatusPollTimer) return;
         this._connectionStatusPollTimer = setInterval(() => {
-            if (!this.resultsSection || this.resultsSection.style.display === 'none') return;
+            const resultsVisible =
+                this.resultsSection && this.resultsSection.style.display !== 'none';
+            const linesVisible =
+                this.linesPanel && this.linesPanel.style.display !== 'none';
+            if (!resultsVisible && !linesVisible) return;
             this.refreshOpenWAConnectionStatuses({ silent: true, force: true });
         }, 45000);
     }

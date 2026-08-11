@@ -2428,6 +2428,19 @@ footer p {
     color: #0f172a;
 }
 
+.line-pill-badges {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    justify-content: flex-end;
+}
+
+.line-pill.is-offline {
+    border-color: #fecaca;
+    background: #fff7f7;
+}
+
 .line-pill-channel {
     font-size: 10px;
     padding: 2px 6px;
