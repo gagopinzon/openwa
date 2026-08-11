@@ -1,10 +1,36 @@
 const androidGatewayStore = require('./androidGatewayStore');
+const sessionsStore = require('./sessionsStore');
+const { applySenderName } = require('./messageSignature');
+const { buildOutboundMessageParts } = require('./aiService');
+
+/**
+ * Arma el texto de outreach para Android (saludo + cuerpo) con remitente de la línea.
+ * @param {{ saludo?: string, nombre?: string, mensajeIA?: string, mensaje?: string }} contact
+ * @param {string|null} logicalSessionId
+ */
+function buildAndroidOutreachText(contact, logicalSessionId) {
+  const senderName = logicalSessionId
+    ? sessionsStore.getSessionSenderName(logicalSessionId)
+    : '';
+  const hasParts =
+    contact &&
+    (contact.mensajeIA != null || contact.saludo != null || contact.nombre != null);
+  if (hasParts && (contact.mensajeIA || contact.saludo)) {
+    const parts = buildOutboundMessageParts({
+      saludo: contact.saludo,
+      nombre: contact.nombre,
+      mensajeIA: contact.mensajeIA || contact.mensaje || ''
+    });
+    return parts.map((p) => applySenderName(p, senderName)).join('\n\n');
+  }
+  return applySenderName(String(contact?.mensaje || contact?.mensajeIA || ''), senderName);
+}
 
 /**
  * Encola jobs Android y espera a que todos terminen (sent/failed/expired).
  * @param {object} opts
  * @param {Array<{ nombre?: string, telefono: string, mensajeIA?: string, mensaje?: string, saludo?: string, deviceId?: string, sessionId?: string }>} [opts.contacts]
- * @param {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, logicalSessionId?: string, meta?: object }>} [opts.assignments]
+ * @param {Array<{ telefono: string, mensaje?: string, mensajeIA?: string, deviceId: string, nombre?: string, logicalSessionId?: string, saludo?: string, meta?: object }>} [opts.assignments]
  * @param {string[]} [opts.sessionIds]
  * @param {string|null} [opts.batchId]
  * @param {(row: object) => void} [opts.onMessageResult]
@@ -24,15 +50,28 @@ async function runAndroidSendJob({
 
   if (Array.isArray(assignments) && assignments.length > 0) {
     jobs = androidGatewayStore.enqueueAssignedJobs(
-      assignments.map((a) => ({
-        telefono: a.telefono,
-        mensaje: a.mensaje || a.mensajeIA || '',
-        deviceId: a.deviceId,
-        nombre: a.nombre || null,
-        batchId,
-        logicalSessionId: a.logicalSessionId || a.sessionId || null,
-        meta: a.meta || null
-      }))
+      assignments.map((a) => {
+        const logicalSessionId = a.logicalSessionId || a.sessionId || null;
+        const mensaje = buildAndroidOutreachText(
+          {
+            telefono: a.telefono,
+            nombre: a.nombre,
+            saludo: a.saludo || a.meta?.saludo,
+            mensajeIA: a.mensajeIA || a.mensaje || a.meta?.mensajeIA,
+            mensaje: a.mensaje
+          },
+          logicalSessionId
+        );
+        return {
+          telefono: a.telefono,
+          mensaje,
+          deviceId: a.deviceId,
+          nombre: a.nombre || null,
+          batchId,
+          logicalSessionId,
+          meta: a.meta || null
+        };
+      })
     );
   } else {
     const devices = androidGatewayStore.pickOnlineDevices({
@@ -48,8 +87,13 @@ async function runAndroidSendJob({
       throw err;
     }
 
-    const items = (contacts || []).map((c) => {
-      const mensaje = String(c.mensajeIA || c.mensaje || '').trim();
+    const items = (contacts || []).map((c, index) => {
+      const logicalSessionId =
+        c.sessionId ||
+        (Array.isArray(sessionIds) && sessionIds.length
+          ? sessionIds[index % sessionIds.length]
+          : null);
+      const mensaje = buildAndroidOutreachText(c, logicalSessionId);
       return {
         telefono: String(c.telefono || '').trim(),
         mensaje,
@@ -58,7 +102,8 @@ async function runAndroidSendJob({
         meta: {
           saludo: c.saludo || null,
           cvId: c.cvId || null,
-          archivoOriginal: c.archivoOriginal || null
+          archivoOriginal: c.archivoOriginal || null,
+          logicalSessionId
         }
       };
     });
@@ -129,5 +174,6 @@ async function runAndroidSendJob({
 }
 
 module.exports = {
-  runAndroidSendJob
+  runAndroidSendJob,
+  buildAndroidOutreachText
 };

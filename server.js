@@ -497,14 +497,16 @@ async function runWhatsAppSendJob({
           for (const c of queue) {
             androidAssignments.push({
               telefono: c.telefono,
-              mensaje: String(c.mensajeIA || '').trim(),
+              mensajeIA: c.mensajeIA,
+              saludo: c.saludo,
               deviceId,
               nombre: c.nombre || null,
               logicalSessionId: sId,
               meta: {
                 cvId: c.cvId || null,
                 archivoOriginal: c.archivoOriginal || null,
-                saludo: c.saludo || null
+                saludo: c.saludo || null,
+                mensajeIA: c.mensajeIA || null
               }
             });
           }
@@ -2583,13 +2585,29 @@ app.post('/api/android/test-send', requireSuper, (req, res) => {
       });
     }
 
+    let finalMessage = mensaje;
+    if (device.logicalSessionId) {
+      const senderName = sessionsStore.getSessionSenderName(device.logicalSessionId);
+      if (senderName && !/Atte:/i.test(finalMessage)) {
+        finalMessage = `${finalMessage}\n\nAtte:\n${senderName}`;
+      } else if (senderName) {
+        const { applySenderName } = require('./messageSignature');
+        finalMessage = applySenderName(finalMessage, senderName);
+      }
+    }
+
     const [job] = androidGatewayStore.enqueueJobs(
       [
         {
           telefono,
-          mensaje,
+          mensaje: finalMessage,
           nombre: 'Prueba ProTalent',
-          meta: { test: true, bypassInterval: true, source: 'admin_test' }
+          meta: {
+            test: true,
+            bypassInterval: true,
+            source: 'admin_test',
+            logicalSessionId: device.logicalSessionId || null
+          }
         }
       ],
       [deviceId]

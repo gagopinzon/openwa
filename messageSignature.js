@@ -26,6 +26,9 @@ function applySenderName(message, senderName) {
   if (!name) return message;
 
   let result = message.split(SENDER_PLACEHOLDER).join(name);
+  // Variantes por si el modelo o la UI dejaron texto literal
+  result = result.split('{{sender_name}}').join(name);
+  result = result.split('{{Sender Name}}').join(name);
 
   const legacyPattern = new RegExp(
     `(\\nAtte:\\s*\\n)\\s*${LEGACY_SENDER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`,
@@ -34,6 +37,9 @@ function applySenderName(message, senderName) {
   if (legacyPattern.test(result)) {
     result = result.replace(legacyPattern, `$1${name}`);
   }
+
+  result = result.replace(/(\nAtte:\s*\n)\s*Sender\s*name\s*$/i, `$1${name}`);
+  result = result.replace(/(\nAtte:\s*\n)\s*Remitente\s*$/i, `$1${name}`);
 
   return result;
 }
