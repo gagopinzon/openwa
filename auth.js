@@ -253,16 +253,34 @@ function filterSessionsForUser(user, sessions, minAccess = 'view') {
 }
 
 function isPublicPath(pathname) {
-  if (pathname === '/login') return true;
-  if (pathname === '/api/auth/login') return true;
-  if (pathname === '/api/webhooks/openwa') return true;
+  const pathOnly = String(pathname || '').split('?')[0].replace(/\/+$/, '') || '/';
+  if (pathOnly === '/login') return true;
+  if (pathOnly === '/api/auth/login') return true;
+  if (pathOnly === '/api/webhooks/openwa') return true;
   // Panel descarga CVs con token firmado (sin cookie de sesión Msg)
-  if (pathname.startsWith('/api/public/cv/')) return true;
-  // Agente Android (auth por ANDROID_GATEWAY_TOKEN)
-  if (pathname === '/api/android/devices/register') return true;
-  if (pathname === '/api/android/jobs/next') return true;
-  if (/^\/api\/android\/devices\/[^/]+\/heartbeat$/.test(pathname)) return true;
-  if (/^\/api\/android\/jobs\/[^/]+\/result$/.test(pathname)) return true;
+  if (pathOnly.startsWith('/api/public/cv/')) return true;
+  // Agente Android (auth por ANDROID_GATEWAY_TOKEN en la ruta)
+  if (pathOnly === '/api/android/devices/register') return true;
+  if (pathOnly === '/api/android/jobs/next') return true;
+  if (/^\/api\/android\/devices\/[^/]+\/heartbeat$/.test(pathOnly)) return true;
+  if (/^\/api\/android\/jobs\/[^/]+\/result$/.test(pathOnly)) return true;
+  return false;
+}
+
+function isAndroidAgentRequest(req) {
+  const pathOnly = String(req.path || '').split('?')[0].replace(/\/+$/, '') || '/';
+  const original = String(req.originalUrl || '').split('?')[0].replace(/\/+$/, '') || '/';
+  if (isPublicPath(pathOnly) || isPublicPath(original)) return true;
+  // Solo rutas de agente (no el listado del panel)
+  const token = String(req.headers['x-android-token'] || '').trim();
+  if (!token) return false;
+  const agentPaths = [
+    '/api/android/devices/register',
+    '/api/android/jobs/next'
+  ];
+  if (agentPaths.includes(pathOnly) || agentPaths.some((p) => original.endsWith(p))) return true;
+  if (/^\/api\/android\/devices\/[^/]+\/heartbeat$/.test(pathOnly)) return true;
+  if (/^\/api\/android\/jobs\/[^/]+\/result$/.test(pathOnly)) return true;
   return false;
 }
 
@@ -271,7 +289,9 @@ function authMiddleware(req, res, next) {
     req.user = getRequestUser(req);
     return next();
   }
-  if (isPublicPath(req.path)) return next();
+  if (isPublicPath(req.path) || isPublicPath(req.originalUrl) || isAndroidAgentRequest(req)) {
+    return next();
+  }
 
   const user = getRequestUser(req);
   if (user) {
