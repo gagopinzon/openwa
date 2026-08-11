@@ -321,6 +321,332 @@ class CVAnalyzer {
         this.usersFormStatus = document.getElementById('usersFormStatus');
         this.sessionsAddForm = document.getElementById('sessionsAddForm');
         this.autoReplyPanel = document.getElementById('autoReplyPanel');
+        this.lineEditModal = document.getElementById('lineEditModal');
+        this.lineEditModalSessionId = null;
+        if (this.lineEditModal) {
+            this.lineEditModal.querySelectorAll('[data-line-modal-close]').forEach((el) => {
+                el.addEventListener('click', () => this.closeLineEditModal());
+            });
+            const saveSender = document.getElementById('lineEditSaveSenderBtn');
+            const syncSender = document.getElementById('lineEditSyncSenderBtn');
+            const saveAndroid = document.getElementById('lineEditSaveAndroidBtn');
+            const removeBtn = document.getElementById('lineEditRemoveBtn');
+            if (saveSender) {
+                saveSender.addEventListener('click', () => {
+                    if (this.lineEditModalSessionId) {
+                        this.saveSessionSenderName(this.lineEditModalSessionId);
+                    }
+                });
+            }
+            if (syncSender) {
+                syncSender.addEventListener('click', async () => {
+                    if (!this.lineEditModalSessionId) return;
+                    await this.syncSessionSenderName(this.lineEditModalSessionId);
+                    this.openLineEditModal(this.lineEditModalSessionId);
+                });
+            }
+            if (saveAndroid) {
+                saveAndroid.addEventListener('click', () => {
+                    if (this.lineEditModalSessionId) {
+                        this.saveSessionAndroidLink(this.lineEditModalSessionId);
+                    }
+                });
+            }
+            if (removeBtn) {
+                removeBtn.addEventListener('click', async () => {
+                    if (!this.lineEditModalSessionId) return;
+                    const id = this.lineEditModalSessionId;
+                    await this.removeSession(id);
+                    this.closeLineEditModal();
+                });
+            }
+        }
+    }
+
+    lineChannelMeta(session) {
+        const isAndroid = session.outreachChannel === 'android';
+        return {
+            isAndroid,
+            chipClass: isAndroid ? 'is-android' : 'is-openwa',
+            chipLabel: isAndroid ? 'Android' : 'OpenWA',
+            sender: session.senderName || session.label || '—'
+        };
+    }
+
+    usersAssignedToSession(sessionId, users) {
+        return (users || []).filter((u) => {
+            const level = u.permissions && u.permissions[sessionId];
+            return level === 'view' || level === 'control';
+        });
+    }
+
+    isSessionUnassigned(sessionId, users) {
+        return this.usersAssignedToSession(sessionId, users).length === 0;
+    }
+
+    renderLinePillHtml(session, opts = {}) {
+        const meta = this.lineChannelMeta(session);
+        const userId = opts.userId || '';
+        const access = opts.access || '';
+        const assignSelect =
+            opts.mode === 'unassigned' && (opts.users || []).length
+                ? `<div class="line-pill-actions">
+                        <select class="form-select line-assign-user" data-session-id="${this.escapeHtml(session.id)}">
+                            <option value="">+ Asignar…</option>
+                            ${(opts.users || [])
+                                .map(
+                                    (u) =>
+                                        `<option value="${this.escapeHtml(u.id)}">${this.escapeHtml(u.username)}</option>`
+                                )
+                                .join('')}
+                        </select>
+                   </div>`
+                : '';
+        const accessRow =
+            opts.mode === 'assigned'
+                ? `<div class="line-pill-actions">
+                        <select class="form-select line-user-access" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(userId)}">
+                            <option value="control" ${access === 'control' ? 'selected' : ''}>Controlar</option>
+                            <option value="view" ${access === 'view' ? 'selected' : ''}>Solo ver</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary btn-sm remove-line-user-btn" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(userId)}" title="Quitar de este usuario">×</button>
+                   </div>`
+                : '';
+
+        return `
+            <div class="line-pill"
+                draggable="true"
+                data-session-id="${this.escapeHtml(session.id)}"
+                data-from-user-id="${this.escapeHtml(userId)}"
+                data-pill-mode="${this.escapeHtml(opts.mode || '')}">
+                <div class="line-pill-top line-pill-open">
+                    <strong>${this.escapeHtml(session.label || session.id)}</strong>
+                    <span class="line-pill-channel ${meta.chipClass}">${meta.chipLabel}</span>
+                </div>
+                <div class="line-pill-sender line-pill-open">Remitente: ${this.escapeHtml(meta.sender)}</div>
+                ${assignSelect}
+                ${accessRow}
+            </div>`;
+    }
+
+    openLineEditModal(sessionId) {
+        if (!this.lineEditModal || !sessionId) return;
+        const session = (this.configuredSessions || []).find((s) => s.id === sessionId);
+        if (!session) return;
+        this.lineEditModalSessionId = sessionId;
+        const title = document.getElementById('lineEditModalTitle');
+        const openwaEl = document.getElementById('lineEditOpenwaId');
+        const senderInput = document.getElementById('lineEditSenderInput');
+        const deviceSelect = document.getElementById('lineEditAndroidDevice');
+        const channelSelect = document.getElementById('lineEditOutreachChannel');
+        if (title) title.textContent = `Editar línea: ${session.label || session.id}`;
+        if (openwaEl) openwaEl.textContent = session.openwaSessionId || session.id;
+        if (senderInput) {
+            senderInput.value = session.senderName || session.label || '';
+            senderInput.dataset.id = sessionId;
+        }
+        if (deviceSelect) {
+            deviceSelect.dataset.id = sessionId;
+            deviceSelect.innerHTML = [
+                '<option value="">— Sin celular Android —</option>',
+                ...(this.androidDevices || []).map((d) => {
+                    const on = this.androidOnlineIds?.has?.(d.id);
+                    const selected = session.androidDeviceId === d.id ? 'selected' : '';
+                    return `<option value="${this.escapeHtml(d.id)}" ${selected}>${this.escapeHtml(d.label || d.id)}${on ? ' (online)' : ''}</option>`;
+                })
+            ].join('');
+        }
+        if (channelSelect) {
+            channelSelect.dataset.id = sessionId;
+            channelSelect.value = session.outreachChannel === 'android' ? 'android' : 'openwa';
+        }
+        this.lineEditModal.hidden = false;
+    }
+
+    closeLineEditModal() {
+        if (this.lineEditModal) this.lineEditModal.hidden = true;
+        this.lineEditModalSessionId = null;
+    }
+
+    attachKanbanBoardEvents() {
+        if (!this.lineUsersList) return;
+
+        this.lineUsersList.querySelectorAll('.line-pill').forEach((pill) => {
+            pill.addEventListener('dragstart', (event) => {
+                const sessionId = pill.dataset.sessionId || '';
+                const fromUserId = pill.dataset.fromUserId || '';
+                event.dataTransfer.setData(
+                    'application/x-line-pill',
+                    JSON.stringify({ sessionId, fromUserId })
+                );
+                event.dataTransfer.effectAllowed = 'copyMove';
+                pill.classList.add('is-dragging');
+            });
+            pill.addEventListener('dragend', () => pill.classList.remove('is-dragging'));
+            pill.querySelectorAll('.line-pill-open').forEach((el) => {
+                el.addEventListener('click', (event) => {
+                    if (event.target.closest('select,button')) return;
+                    this.openLineEditModal(pill.dataset.sessionId);
+                });
+            });
+        });
+
+        this.lineUsersList.querySelectorAll('.lines-kanban-column').forEach((col) => {
+            col.addEventListener('dragover', (event) => {
+                event.preventDefault();
+                col.classList.add('is-drop-target');
+            });
+            col.addEventListener('dragleave', () => col.classList.remove('is-drop-target'));
+            col.addEventListener('drop', (event) => {
+                event.preventDefault();
+                col.classList.remove('is-drop-target');
+                let payload = {};
+                try {
+                    payload = JSON.parse(event.dataTransfer.getData('application/x-line-pill') || '{}');
+                } catch {
+                    payload = {};
+                }
+                const sessionId = payload.sessionId;
+                if (!sessionId) return;
+                const fromUserId = payload.fromUserId || '';
+                const toUserId = col.dataset.userId || '';
+                const isUnassigned = col.dataset.column === 'unassigned';
+
+                if (isUnassigned) {
+                    if (fromUserId) this.setUserLineAccess(fromUserId, sessionId, '');
+                    return;
+                }
+                if (!toUserId) return;
+                if (fromUserId === toUserId) return;
+                this.setUserLineAccess(toUserId, sessionId, 'control');
+            });
+        });
+
+        this.lineUsersList.querySelectorAll('.line-assign-user').forEach((select) => {
+            select.addEventListener('change', () => {
+                const userId = select.value;
+                if (!userId) return;
+                this.setUserLineAccess(userId, select.dataset.sessionId, 'control');
+            });
+        });
+        this.lineUsersList.querySelectorAll('.line-user-access').forEach((select) => {
+            select.addEventListener('change', () => {
+                this.setUserLineAccess(select.dataset.userId, select.dataset.sessionId, select.value);
+            });
+        });
+        this.lineUsersList.querySelectorAll('.remove-line-user-btn').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                this.setUserLineAccess(btn.dataset.userId, btn.dataset.sessionId, '');
+            });
+        });
+    }
+
+    renderLineUsersList() {
+        if (!this.lineUsersList) return;
+        const sessions = this.configuredSessions || [];
+        const users = this.managedUsers || [];
+        const isSuper = this.isSuperUser();
+
+        if (!sessions.length) {
+            this.lineUsersList.innerHTML = isSuper
+                ? '<p style="font-size:13px;color:#64748b;">Aún no hay líneas. Agrégalas con el picker de OpenWA abajo.</p>'
+                : '<p style="font-size:13px;color:#64748b;">No tienes líneas asignadas.</p>';
+            return;
+        }
+
+        if (!isSuper) {
+            const intro = document.getElementById('linesPanelIntro');
+            if (intro) {
+                intro.innerHTML =
+                    'Tus líneas de WhatsApp. <strong>Controlar</strong> = enviar/responder; <strong>Solo ver</strong> = consulta.';
+            }
+            this.lineUsersList.innerHTML = sessions
+                .map((session) => {
+                    const access = session.access || this.getSessionAccess(session.id) || 'view';
+                    const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
+                    const meta = this.lineChannelMeta(session);
+                    const androidLabel = session.androidDeviceId
+                        ? (this.androidDevices || []).find((d) => d.id === session.androidDeviceId)?.label ||
+                          session.androidDeviceId
+                        : '—';
+                    return `
+                <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
+                    <div class="line-card-header">
+                        <div class="line-card-title">
+                            <strong>${this.escapeHtml(session.label || session.id)}</strong>
+                            <span class="session-access-badge session-access-${access}">${accessLabel}</span>
+                            <span class="line-pill-channel ${meta.chipClass}">${meta.chipLabel}</span>
+                        </div>
+                        <code class="line-card-code">${this.escapeHtml(session.openwaSessionId || '')}</code>
+                    </div>
+                    <div style="font-size:12px;color:#64748b;margin-top:8px;">
+                        Remitente: ${this.escapeHtml(meta.sender)} · Celular: ${this.escapeHtml(androidLabel)}
+                    </div>
+                </div>`;
+                })
+                .join('');
+            return;
+        }
+
+        const unassigned = sessions.filter((s) => this.isSessionUnassigned(s.id, users));
+        const columnsHtml = [
+            `<div class="lines-kanban-column is-unassigned" data-column="unassigned" data-user-id="">
+                <p class="lines-kanban-column-title">Sin asignar <span class="count">(${unassigned.length})</span></p>
+                <div class="lines-kanban-pills">
+                    ${
+                        unassigned.length
+                            ? unassigned
+                                  .map((s) =>
+                                      this.renderLinePillHtml(s, {
+                                          mode: 'unassigned',
+                                          users
+                                      })
+                                  )
+                                  .join('')
+                            : '<div class="lines-kanban-empty">Todas las líneas ya tienen dueño</div>'
+                    }
+                </div>
+            </div>`
+        ];
+
+        for (const user of users) {
+            const assigned = sessions
+                .map((session) => {
+                    const access = user.permissions && user.permissions[session.id];
+                    if (access !== 'view' && access !== 'control') return null;
+                    return { session, access };
+                })
+                .filter(Boolean);
+            columnsHtml.push(`
+            <div class="lines-kanban-column" data-column="user" data-user-id="${this.escapeHtml(user.id)}">
+                <p class="lines-kanban-column-title">${this.escapeHtml(user.username)} <span class="count">(${assigned.length})</span></p>
+                <div class="lines-kanban-pills">
+                    ${
+                        assigned.length
+                            ? assigned
+                                  .map(({ session, access }) =>
+                                      this.renderLinePillHtml(session, {
+                                          mode: 'assigned',
+                                          userId: user.id,
+                                          access
+                                      })
+                                  )
+                                  .join('')
+                            : '<div class="lines-kanban-empty">Suelta aquí una línea</div>'
+                    }
+                </div>
+            </div>`);
+        }
+
+        if (!users.length) {
+            columnsHtml.push(
+                `<div class="lines-kanban-column"><p class="lines-kanban-empty">Crea un usuario abajo para asignarle líneas.</p></div>`
+            );
+        }
+
+        this.lineUsersList.innerHTML = `<div class="lines-kanban-board">${columnsHtml.join('')}</div>`;
+        this.attachKanbanBoardEvents();
     }
 
     initPanelProfile() {
@@ -3294,185 +3620,6 @@ class CVAnalyzer {
         }
     }
 
-    renderLineUsersList() {
-        if (!this.lineUsersList) return;
-        const sessions = this.configuredSessions || [];
-        const users = this.managedUsers || [];
-        const isSuper = this.isSuperUser();
-
-        if (!sessions.length) {
-            this.lineUsersList.innerHTML = isSuper
-                ? '<p style="font-size:13px;color:#64748b;">Aún no hay líneas. Agrégalas con el picker de OpenWA abajo.</p>'
-                : '<p style="font-size:13px;color:#64748b;">No tienes líneas asignadas.</p>';
-            return;
-        }
-
-        this.lineUsersList.innerHTML = sessions
-            .map((session) => {
-                const access = session.access || this.getSessionAccess(session.id) || 'view';
-                const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
-
-                if (!isSuper) {
-                    const outreach =
-                        session.outreachChannel === 'android' ? 'Android (primer msg)' : 'OpenWA';
-                    const androidLabel = session.androidDeviceId
-                        ? (this.androidDevices || []).find((d) => d.id === session.androidDeviceId)?.label ||
-                          session.androidDeviceId
-                        : '—';
-                    return `
-                <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
-                    <div class="line-card-header">
-                        <div class="line-card-title">
-                            <strong>${this.escapeHtml(session.label || session.id)}</strong>
-                            <span class="session-access-badge session-access-${access}">${accessLabel}</span>
-                        </div>
-                        <code class="line-card-code">${this.escapeHtml(session.openwaSessionId || '')}</code>
-                    </div>
-                    <div style="font-size:12px;color:#64748b;margin-top:8px;">
-                        Primer mensaje: ${this.escapeHtml(outreach)} · Celular: ${this.escapeHtml(androidLabel)}
-                    </div>
-                </div>`;
-                }
-
-                const assigned = users
-                    .filter((u) => u.permissions && (u.permissions[session.id] === 'view' || u.permissions[session.id] === 'control'))
-                    .map((u) => ({ user: u, access: u.permissions[session.id] }));
-                const unassigned = users.filter(
-                    (u) => !u.permissions || !u.permissions[session.id]
-                );
-
-                const assignedHtml = assigned.length
-                    ? assigned
-                          .map(
-                              ({ user, access: userAccess }) => `
-                        <div class="line-user-row" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}">
-                            <span class="line-user-name">${this.escapeHtml(user.username)}</span>
-                            <select class="form-select line-user-access" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}">
-                                <option value="view" ${userAccess === 'view' ? 'selected' : ''}>Solo ver</option>
-                                <option value="control" ${userAccess === 'control' ? 'selected' : ''}>Controlar</option>
-                            </select>
-                            <button type="button" class="btn btn-secondary btn-sm remove-line-user-btn" data-session-id="${this.escapeHtml(session.id)}" data-user-id="${this.escapeHtml(user.id)}" title="Quitar de esta línea">Quitar</button>
-                        </div>`
-                          )
-                          .join('')
-                    : '<p class="line-users-empty">Nadie asignado a esta línea.</p>';
-
-                const addRow =
-                    users.length === 0
-                        ? '<p class="line-users-empty">Crea un usuario abajo para poder asignarlo.</p>'
-                        : unassigned.length === 0
-                          ? '<p class="line-users-empty">Todos los usuarios ya están en esta línea.</p>'
-                          : `
-                        <div class="line-user-add">
-                            <select class="form-select line-add-user" data-session-id="${this.escapeHtml(session.id)}">
-                                <option value="">— Usuario —</option>
-                                ${unassigned
-                                    .map(
-                                        (u) =>
-                                            `<option value="${this.escapeHtml(u.id)}">${this.escapeHtml(u.username)}</option>`
-                                    )
-                                    .join('')}
-                            </select>
-                            <select class="form-select line-add-access" data-session-id="${this.escapeHtml(session.id)}">
-                                <option value="control">Controlar</option>
-                                <option value="view">Solo ver</option>
-                            </select>
-                            <button type="button" class="btn btn-secondary btn-sm add-line-user-btn" data-session-id="${this.escapeHtml(session.id)}">Agregar</button>
-                        </div>`;
-
-                const deviceOptions = [
-                    '<option value="">— Sin celular Android —</option>',
-                    ...(this.androidDevices || []).map((d) => {
-                        const on = this.androidOnlineIds?.has?.(d.id);
-                        const selected = session.androidDeviceId === d.id ? 'selected' : '';
-                        return `<option value="${this.escapeHtml(d.id)}" ${selected}>${this.escapeHtml(d.label || d.id)}${on ? ' (online)' : ''}</option>`;
-                    })
-                ].join('');
-                const outreach = session.outreachChannel === 'android' ? 'android' : 'openwa';
-
-                return `
-                <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
-                    <div class="line-card-header">
-                        <div class="line-card-title">
-                            <strong>${this.escapeHtml(session.label || session.id)}</strong>
-                            <span class="line-card-meta">${assigned.length} usuario${assigned.length === 1 ? '' : 's'}</span>
-                        </div>
-                        <button type="button" class="btn btn-danger btn-sm remove-session-btn" data-id="${this.escapeHtml(session.id)}">Quitar línea</button>
-                    </div>
-                    <div class="line-card-config">
-                        <code class="line-card-code">${this.escapeHtml(session.openwaSessionId || '')}</code>
-                        <div class="line-card-sender">
-                            <span class="line-card-sender-label">Remitente</span>
-                            <input type="text" class="session-sender-input form-select" data-id="${this.escapeHtml(session.id)}" value="${this.escapeHtml(session.senderName || session.label || '')}" placeholder="Nombre en WhatsApp">
-                            <button type="button" class="btn btn-secondary btn-sm save-sender-btn" data-id="${this.escapeHtml(session.id)}">Guardar</button>
-                            <button type="button" class="btn btn-secondary btn-sm sync-sender-btn" data-id="${this.escapeHtml(session.id)}" title="Obtener nombre desde WhatsApp">↻ WhatsApp</button>
-                        </div>
-                        <div class="line-card-android" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-                            <label style="font-size:12px;color:#64748b;">Celular Android
-                                <select class="form-select line-android-device" data-id="${this.escapeHtml(session.id)}" style="display:block;margin-top:4px;min-width:200px;padding:6px;">
-                                    ${deviceOptions}
-                                </select>
-                            </label>
-                            <label style="font-size:12px;color:#64748b;">Primer mensaje
-                                <select class="form-select line-outreach-channel" data-id="${this.escapeHtml(session.id)}" style="display:block;margin-top:4px;padding:6px;">
-                                    <option value="openwa" ${outreach === 'openwa' ? 'selected' : ''}>OpenWA (Web)</option>
-                                    <option value="android" ${outreach === 'android' ? 'selected' : ''}>Android (celular)</option>
-                                </select>
-                            </label>
-                            <button type="button" class="btn btn-secondary btn-sm save-android-link-btn" data-id="${this.escapeHtml(session.id)}" style="align-self:flex-end;">Guardar vínculo</button>
-                        </div>
-                        <p style="font-size:11px;color:#94a3b8;margin:6px 0 0;">Respuestas / auto-reply siempre por OpenWA de esta línea.</p>
-                    </div>
-                    <div class="line-card-users">
-                        <p class="line-card-users-label">Usuarios de esta línea</p>
-                        <div class="line-users-assigned">${assignedHtml}</div>
-                        ${addRow}
-                    </div>
-                </div>`;
-            })
-            .join('');
-
-        if (!isSuper) return;
-
-        this.lineUsersList.querySelectorAll('.remove-session-btn').forEach((btn) => {
-            btn.addEventListener('click', () => this.removeSession(btn.dataset.id));
-        });
-        this.lineUsersList.querySelectorAll('.save-sender-btn').forEach((btn) => {
-            btn.addEventListener('click', () => this.saveSessionSenderName(btn.dataset.id));
-        });
-        this.lineUsersList.querySelectorAll('.sync-sender-btn').forEach((btn) => {
-            btn.addEventListener('click', () => this.syncSessionSenderName(btn.dataset.id));
-        });
-        this.lineUsersList.querySelectorAll('.save-android-link-btn').forEach((btn) => {
-            btn.addEventListener('click', () => this.saveSessionAndroidLink(btn.dataset.id));
-        });
-        this.lineUsersList.querySelectorAll('.line-user-access').forEach((select) => {
-            select.addEventListener('change', () => {
-                this.setUserLineAccess(select.dataset.userId, select.dataset.sessionId, select.value);
-            });
-        });
-        this.lineUsersList.querySelectorAll('.remove-line-user-btn').forEach((btn) => {
-            btn.addEventListener('click', () => {
-                this.setUserLineAccess(btn.dataset.userId, btn.dataset.sessionId, '');
-            });
-        });
-        this.lineUsersList.querySelectorAll('.add-line-user-btn').forEach((btn) => {
-            btn.addEventListener('click', () => {
-                const card = btn.closest('.line-card');
-                if (!card) return;
-                const userSelect = card.querySelector('.line-add-user');
-                const accessSelect = card.querySelector('.line-add-access');
-                const userId = userSelect ? userSelect.value : '';
-                const access = accessSelect ? accessSelect.value : 'control';
-                if (!userId) {
-                    this.showStatus('Elige un usuario para agregar', 'error');
-                    return;
-                }
-                this.setUserLineAccess(userId, btn.dataset.sessionId, access);
-            });
-        });
-    }
-
     async setUserLineAccess(userId, sessionId, access) {
         if (!this.isSuperUser() || !userId || !sessionId) return;
         const user = (this.managedUsers || []).find((u) => u.id === userId);
@@ -3565,7 +3712,7 @@ class CVAnalyzer {
             if (this.newUserPassword) this.newUserPassword.value = '';
             if (this.newUserGerenteEmail) this.newUserGerenteEmail.value = '';
             if (this.usersFormStatus) {
-                this.usersFormStatus.textContent = `Usuario "${username}" creado. Asígnale líneas arriba.`;
+                this.usersFormStatus.textContent = `Usuario "${username}" creado. Asígnale líneas en el tablero de arriba.`;
                 this.usersFormStatus.style.color = '#15803d';
             }
             await this.loadUsers();
@@ -3710,8 +3857,11 @@ class CVAnalyzer {
     }
 
     async saveSessionSenderName(sessionId) {
+        const modalInput = document.getElementById('lineEditSenderInput');
         const root = this.lineUsersList || document;
-        const input = root.querySelector(`.session-sender-input[data-id="${sessionId}"]`);
+        const input =
+            (modalInput && this.lineEditModalSessionId === sessionId && modalInput) ||
+            root.querySelector(`.session-sender-input[data-id="${sessionId}"]`);
         const senderName = input ? input.value.trim() : '';
         if (!senderName) {
             this.showStatus('Escribe un nombre de remitente', 'error');
@@ -3729,6 +3879,9 @@ class CVAnalyzer {
                 throw new Error(data.error || 'No se pudo guardar');
             }
             await this.loadSessions();
+            if (this.lineEditModalSessionId === sessionId) {
+                this.openLineEditModal(sessionId);
+            }
             this.showStatus(`Remitente actualizado: ${senderName}`, 'success');
             if (this.cvsData && this.cvsData.length > 0) {
                 this.displayResults();
@@ -3739,9 +3892,15 @@ class CVAnalyzer {
     }
 
     async saveSessionAndroidLink(sessionId) {
+        const modalDevice = document.getElementById('lineEditAndroidDevice');
+        const modalChannel = document.getElementById('lineEditOutreachChannel');
         const root = this.lineUsersList || document;
-        const deviceSelect = root.querySelector(`.line-android-device[data-id="${sessionId}"]`);
-        const channelSelect = root.querySelector(`.line-outreach-channel[data-id="${sessionId}"]`);
+        const deviceSelect =
+            (modalDevice && this.lineEditModalSessionId === sessionId && modalDevice) ||
+            root.querySelector(`.line-android-device[data-id="${sessionId}"]`);
+        const channelSelect =
+            (modalChannel && this.lineEditModalSessionId === sessionId && modalChannel) ||
+            root.querySelector(`.line-outreach-channel[data-id="${sessionId}"]`);
         const androidDeviceId = deviceSelect ? deviceSelect.value || null : null;
         const outreachChannel = channelSelect?.value === 'android' ? 'android' : 'openwa';
 
@@ -3762,6 +3921,9 @@ class CVAnalyzer {
             }
             await this.loadSessions();
             await this.refreshAndroidDevices({ silent: true });
+            if (this.lineEditModalSessionId === sessionId) {
+                this.openLineEditModal(sessionId);
+            }
             const label =
                 outreachChannel === 'android'
                     ? 'Primer mensaje → Android'

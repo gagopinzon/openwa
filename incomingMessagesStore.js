@@ -42,18 +42,78 @@ function persist() {
 }
 
 /**
+ * Normaliza ids de WhatsApp/OpenWA (string u objeto con `_serialized`).
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+function normalizeMessageId(raw) {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'string' || typeof raw === 'number') {
+    const s = String(raw).trim();
+    return s || null;
+  }
+  if (typeof raw === 'object') {
+    if (raw._serialized) return String(raw._serialized).trim() || null;
+    if (raw.id != null && (typeof raw.id === 'string' || typeof raw.id === 'number')) {
+      return String(raw.id).trim() || null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Busca un mensaje ya guardado (misma entrega o mismo mensaje WA).
+ * @param {object[]} messages
+ * @param {object} entry
+ * @returns {object|null}
+ */
+function findExisting(messages, entry) {
+  const id = entry.id || null;
+  if (id && messages.some((m) => m.id === id)) {
+    return messages.find((m) => m.id === id) || null;
+  }
+
+  const messageId = normalizeMessageId(entry.messageId);
+  const openwaSessionId = entry.openwaSessionId || null;
+  if (messageId && openwaSessionId) {
+    const byMsg = messages.find(
+      (m) =>
+        m.openwaSessionId === openwaSessionId && normalizeMessageId(m.messageId) === messageId
+    );
+    if (byMsg) return byMsg;
+  }
+
+  // Fallback cuando OpenWA no manda id estable: misma línea + chat + cuerpo + timestamp.
+  const chatId = entry.chatId || null;
+  const body = entry.body || '';
+  const timestamp = entry.timestamp || null;
+  if (openwaSessionId && chatId && body && timestamp) {
+    const byFp = messages.find(
+      (m) =>
+        m.openwaSessionId === openwaSessionId &&
+        m.chatId === chatId &&
+        m.body === body &&
+        m.timestamp === timestamp
+    );
+    if (byFp) return byFp;
+  }
+
+  return null;
+}
+
+/**
  * @param {object} entry
  * @returns {object}
  */
 function add(entry) {
   const messages = load();
+  const existing = findExisting(messages, entry);
+  if (existing) return existing;
+
+  const messageId = normalizeMessageId(entry.messageId);
   const id =
     entry.id ||
-    `${entry.openwaSessionId || 's'}_${entry.messageId || entry.telefono || 'x'}_${Date.now()}`;
-
-  if (messages.some((m) => m.id === id)) {
-    return messages.find((m) => m.id === id);
-  }
+    `${entry.openwaSessionId || 's'}_${messageId || entry.telefono || 'x'}_${Date.now()}`;
 
   const record = {
     id,
@@ -63,7 +123,7 @@ function add(entry) {
     telefono: entry.telefono || '',
     contactName: entry.contactName || null,
     body: entry.body || '',
-    messageId: entry.messageId || null,
+    messageId,
     chatId: entry.chatId || null,
     fromMe: Boolean(entry.fromMe),
     isGroup: Boolean(entry.isGroup),
@@ -80,10 +140,16 @@ function add(entry) {
   return record;
 }
 
+function reloadFromDisk() {
+  cache = null;
+  return load();
+}
+
 /**
  * @param {{ limit?: number, sessionId?: string }} [opts]
  */
 function list(opts = {}) {
+  compactDuplicates();
   let messages = load();
   if (opts.sessionId) {
     const sid = String(opts.sessionId);
@@ -93,6 +159,31 @@ function list(opts = {}) {
   }
   const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 100, 1), MAX_MESSAGES);
   return messages.slice(0, limit);
+}
+
+/**
+ * Elimina filas históricas duplicadas (mismo messageId+sesión o misma huella).
+ * @returns {{ removed: number }}
+ */
+function compactDuplicates() {
+  const messages = load();
+  if (!messages.length) return { removed: 0 };
+
+  const kept = [];
+  let removed = 0;
+  for (const m of messages) {
+    const hit = findExisting(kept, m);
+    if (hit) {
+      removed += 1;
+      continue;
+    }
+    kept.push(m);
+  }
+  if (removed > 0) {
+    cache = kept;
+    persist();
+  }
+  return { removed };
 }
 
 function clear() {
@@ -146,5 +237,8 @@ module.exports = {
   clear,
   removeByChatOrPhone,
   update,
+  reloadFromDisk,
+  normalizeMessageId,
+  compactDuplicates,
   MAX_MESSAGES
 };

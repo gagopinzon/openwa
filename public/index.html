@@ -47,8 +47,9 @@
             <section class="lines-panel" id="linesPanel" style="margin-top: 24px; text-align: left;">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Líneas</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;" id="linesPanelIntro">
-                    Cada línea de WhatsApp: configuración OpenWA y quién la maneja.
+                    Arrastra cada línea a la casilla del usuario que la llevará.
                     <strong>Controlar</strong> = enviar/responder; <strong>Solo ver</strong> = consulta.
+                    Clic en una pastilla para editar remitente y Android.
                 </p>
                 <div id="lineUsersList" class="line-users-list"></div>
                 <div class="sessions-add-form" id="sessionsAddForm" style="display: none; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px;">
@@ -68,6 +69,7 @@
                     <h3 style="font-size: 1rem; margin: 0 0 8px;">Gateway Android</h3>
                     <p style="font-size: 13px; color: #64748b; margin-bottom: 10px;">
                         Celulares con la app agente. El envío frío puede salir por Android en lugar de OpenWA.
+                        El vínculo a cada línea se edita al hacer clic en la pastilla de la línea.
                     </p>
                     <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px;">
                         <button type="button" id="refreshAndroidDevicesBtn" class="btn btn-secondary">Actualizar dispositivos</button>
@@ -97,7 +99,7 @@
                 <div id="accountsSection" style="display: none;">
                     <h3 style="font-size: 1rem; margin: 24px 0 8px;">Cuentas</h3>
                     <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                        Crear, editar correo/contraseña o eliminar usuarios. La asignación a líneas se hace arriba.
+                        Crear, editar correo/contraseña o eliminar usuarios. Las líneas se asignan en el tablero de arriba.
                     </p>
                     <div id="usersList" class="users-list"></div>
                     <form id="createUserForm" class="users-create-form">
@@ -112,6 +114,45 @@
                         <button type="submit" class="btn btn-primary" style="margin-top: 10px;">Crear usuario</button>
                         <p id="usersFormStatus" class="users-form-status"></p>
                     </form>
+                </div>
+
+                <div id="lineEditModal" class="line-edit-modal" hidden>
+                    <div class="line-edit-modal-backdrop" data-line-modal-close="1"></div>
+                    <div class="line-edit-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="lineEditModalTitle">
+                        <div class="line-edit-modal-header">
+                            <h3 id="lineEditModalTitle">Editar línea</h3>
+                            <button type="button" class="line-edit-modal-x" data-line-modal-close="1" aria-label="Cerrar">×</button>
+                        </div>
+                        <div class="line-edit-modal-body">
+                            <p class="line-edit-modal-meta">
+                                <code id="lineEditOpenwaId"></code>
+                            </p>
+                            <label class="line-edit-label">Remitente
+                                <input type="text" id="lineEditSenderInput" class="form-select session-sender-input" placeholder="Nombre en WhatsApp">
+                            </label>
+                            <div class="line-edit-row">
+                                <button type="button" id="lineEditSaveSenderBtn" class="btn btn-secondary btn-sm">Guardar remitente</button>
+                                <button type="button" id="lineEditSyncSenderBtn" class="btn btn-secondary btn-sm">↻ WhatsApp</button>
+                            </div>
+                            <label class="line-edit-label">Celular Android
+                                <select id="lineEditAndroidDevice" class="form-select line-android-device"></select>
+                            </label>
+                            <label class="line-edit-label">Primer mensaje
+                                <select id="lineEditOutreachChannel" class="form-select line-outreach-channel">
+                                    <option value="openwa">OpenWA (Web)</option>
+                                    <option value="android">Android (celular)</option>
+                                </select>
+                            </label>
+                            <p class="line-edit-hint">Respuestas / auto-reply siempre por OpenWA de esta línea.</p>
+                            <div class="line-edit-row">
+                                <button type="button" id="lineEditSaveAndroidBtn" class="btn btn-secondary btn-sm">Guardar vínculo</button>
+                            </div>
+                        </div>
+                        <div class="line-edit-modal-footer">
+                            <button type="button" id="lineEditRemoveBtn" class="btn btn-danger btn-sm">Quitar línea</button>
+                            <button type="button" class="btn btn-secondary btn-sm" data-line-modal-close="1">Cerrar</button>
+                        </div>
+                    </div>
                 </div>
             </section>
 

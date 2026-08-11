@@ -13,6 +13,7 @@ const {
   sendChatState,
   createWebhook,
   deleteWebhook,
+  listWebhooks,
   getSessionStatus,
   isConnectedStatus,
   getContact
@@ -306,6 +307,28 @@ function parseWebhookPayload(body) {
 }
 
 /**
+ * Normaliza ids de WhatsApp/OpenWA (string u objeto con `_serialized`).
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+function normalizeWhatsAppMessageId(raw) {
+  return incomingMessagesStore.normalizeMessageId(raw);
+}
+
+/**
+ * Id estable de bandeja = mensaje WhatsApp, no la clave de cada entrega HTTP.
+ * @param {object} extracted
+ * @returns {string}
+ */
+function stableInboxId(extracted) {
+  const messageId = normalizeWhatsAppMessageId(extracted.messageId);
+  if (messageId && extracted.openwaSessionId) {
+    return `inbox_${extracted.openwaSessionId}_${messageId}`;
+  }
+  return `inbox_${extracted.openwaSessionId || 's'}_${extracted.chatId || extracted.telefono || 'x'}_${extracted.timestamp}_${String(extracted.body || '').slice(0, 24)}`;
+}
+
+/**
  * Extrae un mensaje entrante del payload de OpenWA (sin auto-respuesta).
  * @param {object} payload
  * @returns {object|null}
@@ -328,7 +351,7 @@ function extractIncomingMessage(payload) {
   const chatId = msg.from || msg.chatId || msg.sender || '';
   const normalizedPhone = resolveIncomingPhone(msg);
   const logicalSession = findLogicalSessionByOpenwaId(openwaSessionId);
-  const messageId = msg.id || msg.messageId || null;
+  const messageId = normalizeWhatsAppMessageId(msg.id || msg.messageId || null);
 
   return {
     openwaSessionId: openwaSessionId || null,
@@ -356,14 +379,20 @@ function captureIncomingMessage({ payload, broadcastEvent = null, idempotencyKey
   if (!extracted) return null;
   if (extracted.fromMe) return null;
 
-  const id =
-    idempotencyKey ||
-    payload.idempotencyKey ||
-    payload.deliveryId ||
-    `inbox_${extracted.openwaSessionId || 's'}_${extracted.messageId || extracted.body.slice(0, 24)}_${extracted.timestamp}`;
+  // idempotencyKey solo sirve para auto-respuesta; la bandeja usa id estable del mensaje WA.
+  void idempotencyKey;
+  const id = stableInboxId(extracted);
+  const before = incomingMessagesStore.list({ limit: incomingMessagesStore.MAX_MESSAGES });
+  const already = before.some((m) => m.id === id) ||
+    before.some(
+      (m) =>
+        extracted.messageId &&
+        m.openwaSessionId === extracted.openwaSessionId &&
+        incomingMessagesStore.normalizeMessageId(m.messageId) === extracted.messageId
+    );
 
   const record = incomingMessagesStore.add({ ...extracted, id });
-  if (broadcastEvent) {
+  if (broadcastEvent && !already) {
     broadcastEvent('incomingMessage', record);
   }
   return record;
@@ -473,11 +502,14 @@ async function handleIncomingWebhook({
     known = true;
   }
 
-  const dedupeKey =
-    idempotencyKey ||
-    payload.idempotencyKey ||
-    payload.deliveryId ||
-    `msg_${openwaSessionId}_${msg.id || msg.messageId || body.slice(0, 32)}`;
+  const waMessageId = normalizeWhatsAppMessageId(msg.id || msg.messageId || null);
+  // Preferir id del mensaje WA: varias entregas/webhooks no deben reabrir auto-respuesta.
+  const dedupeKey = waMessageId
+    ? `msg_${openwaSessionId}_${waMessageId}`
+    : idempotencyKey ||
+      payload.idempotencyKey ||
+      payload.deliveryId ||
+      `msg_${openwaSessionId}_${body.slice(0, 32)}`;
   if (!markIdempotent(dedupeKey)) {
     return { handled: false, reason: 'duplicate' };
   }
@@ -794,6 +826,59 @@ function extractWebhookId(created) {
   return String(raw);
 }
 
+/**
+ * True si el webhook de OpenWA apunta a nuestra URL pública.
+ * @param {object} wh
+ * @param {string} targetUrl
+ */
+function webhookMatchesUrl(wh, targetUrl) {
+  if (!wh || !targetUrl) return false;
+  const url = String(wh.url || wh.webhookUrl || wh.callbackUrl || '').trim();
+  if (!url) return false;
+  return url.replace(/\/$/, '') === String(targetUrl).replace(/\/$/, '');
+}
+
+/**
+ * Borra webhooks previos de esta URL (evita N entregas del mismo mensaje).
+ * @param {string} openwaSessionId
+ * @param {string} webhookUrl
+ * @param {string|null} [knownId]
+ */
+async function removeExistingWebhooksForUrl(openwaSessionId, webhookUrl, knownId = null) {
+  const deleted = new Set();
+  if (knownId) {
+    try {
+      await deleteWebhook(openwaSessionId, knownId);
+      deleted.add(String(knownId));
+      console.log(`[auto-reply] deleted known webhook ${knownId} for ${openwaSessionId}`);
+    } catch (err) {
+      console.warn(`[auto-reply] delete known webhook ${knownId} failed: ${err.message}`);
+    }
+  }
+
+  let listed = [];
+  try {
+    listed = await listWebhooks(openwaSessionId);
+  } catch (err) {
+    console.warn(`[auto-reply] listWebhooks ${openwaSessionId}: ${err.message}`);
+    return [...deleted];
+  }
+
+  for (const wh of listed) {
+    const id = wh && (wh.id || wh.webhookId || wh._id);
+    if (!id || deleted.has(String(id))) continue;
+    if (!webhookMatchesUrl(wh, webhookUrl)) continue;
+    try {
+      await deleteWebhook(openwaSessionId, id);
+      deleted.add(String(id));
+      console.log(`[auto-reply] deleted orphan webhook ${id} for ${openwaSessionId}`);
+    } catch (err) {
+      console.warn(`[auto-reply] delete orphan webhook ${id} failed: ${err.message}`);
+    }
+  }
+  return [...deleted];
+}
+
 async function activateWebhooks() {
   const webhookUrl = autoReplyStore.getWebhookUrl();
   if (!webhookUrl) {
@@ -814,6 +899,7 @@ async function activateWebhooks() {
     }`
   );
 
+  const prevIds = autoReplyStore.getConfig().webhookIdsBySession || {};
   const results = [];
   for (const session of sessions) {
     const openwaSessionId = session.openwaSessionId;
@@ -831,6 +917,12 @@ async function activateWebhooks() {
         });
         continue;
       }
+
+      await removeExistingWebhooksForUrl(
+        openwaSessionId,
+        webhookUrl,
+        prevIds[session.id] || null
+      );
 
       const created = await createWebhook(openwaSessionId, {
         url: webhookUrl,
@@ -898,24 +990,40 @@ async function activateWebhooks() {
 async function deactivateWebhooks() {
   const cfg = autoReplyStore.getConfig();
   const webhookIds = cfg.webhookIdsBySession || {};
+  const webhookUrl = autoReplyStore.getWebhookUrl();
   const results = [];
 
   console.log(
     `[auto-reply] deactivateWebhooks start ids=${JSON.stringify(webhookIds)}`
   );
 
-  for (const [logicalSessionId, webhookId] of Object.entries(webhookIds)) {
-    const session = sessionsStore.getSession(logicalSessionId);
-    if (!session || !webhookId) continue;
+  const sessions = sessionsStore.getAllSessions();
+  for (const session of sessions) {
+    const openwaSessionId = session.openwaSessionId;
+    if (!openwaSessionId) continue;
+    const knownId = webhookIds[session.id] || null;
     try {
-      await deleteWebhook(session.openwaSessionId, webhookId);
-      console.log(`[auto-reply] deleted webhook ${webhookId} for ${logicalSessionId}`);
-      results.push({ logicalSessionId, webhookId, success: true });
-    } catch (err) {
-      console.error(
-        `[auto-reply] delete webhook failed ${logicalSessionId}/${webhookId}: ${err.message}`
+      const deleted = await removeExistingWebhooksForUrl(
+        openwaSessionId,
+        webhookUrl,
+        knownId
       );
-      results.push({ logicalSessionId, webhookId, success: false, error: err.message });
+      results.push({
+        logicalSessionId: session.id,
+        openwaSessionId,
+        webhookId: knownId,
+        deletedIds: deleted,
+        success: true
+      });
+    } catch (err) {
+      console.error(`[auto-reply] deactivate failed ${session.id}: ${err.message}`);
+      results.push({
+        logicalSessionId: session.id,
+        openwaSessionId,
+        webhookId: knownId,
+        success: false,
+        error: err.message
+      });
     }
   }
 
@@ -966,6 +1074,7 @@ module.exports = {
   handleIncomingWebhook,
   captureIncomingMessage,
   extractIncomingMessage,
+  normalizeWhatsAppMessageId,
   activateWebhooks,
   deactivateWebhooks,
   getStatus,
