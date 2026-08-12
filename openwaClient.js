@@ -451,12 +451,6 @@ async function listChats(openwaSessionId, opts = {}) {
 }
 
 /**
- * Historial de un chat (live desde WhatsApp).
- * @param {string} openwaSessionId
- * @param {string} chatId
- * @param {{ limit?: number, fresh?: boolean }} [opts]
- */
-/**
  * Mensajes de protocolo/cifrado que OpenWA no interpreta (p.ej. type "unknown").
  * @param {{ type?: string, body?: string, mediaType?: string }|null} msg
  */
@@ -472,18 +466,65 @@ function isUnknownPlaceholderMessage(msg) {
   return body === '[unknown]';
 }
 
+function isViewableMediaType(type) {
+  const t = String(type || '')
+    .trim()
+    .toLowerCase();
+  return t === 'image' || t === 'sticker' || t === 'audio' || t === 'voice' || t === 'ptt';
+}
+
+function normalizeMediaPayload(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  const media = msg.media && typeof msg.media === 'object' ? msg.media : null;
+  const mimetype =
+    (media && media.mimetype) ||
+    msg.mimetype ||
+    msg.mimeType ||
+    null;
+  const data =
+    (media && (media.data || media.base64)) ||
+    msg.mediaData ||
+    msg.base64 ||
+    null;
+  const omitted = Boolean(media && media.omitted);
+  const filename = (media && media.filename) || msg.filename || null;
+  if (!mimetype && !data && !omitted && !msg.hasMedia) return null;
+  return {
+    mimetype: mimetype ? String(mimetype) : null,
+    filename: filename ? String(filename) : null,
+    data: data ? String(data) : null,
+    omitted,
+    sizeBytes:
+      media && media.sizeBytes != null
+        ? Number(media.sizeBytes)
+        : null
+  };
+}
+
+/**
+ * Historial de un chat (live desde WhatsApp).
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {{ limit?: number, fresh?: boolean, includeMedia?: boolean }} [opts]
+ */
 async function getChatHistory(openwaSessionId, chatId, opts = {}) {
   const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 100);
-  const cacheKey = `history:v3:${openwaSessionId}:${chatId}:${limit}`;
-  if (!opts.fresh) {
+  const includeMedia = Boolean(opts.includeMedia);
+  // No cachear historial con media (payload enorme / bytes sensibles en RAM).
+  const cacheKey = `history:v4:n:${openwaSessionId}:${chatId}:${limit}`;
+  if (!includeMedia && !opts.fresh) {
     const cached = getCached(cacheKey);
     if (cached) return cached;
   }
 
   const encoded = encodeURIComponent(String(chatId));
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (includeMedia) qs.set('includeMedia', 'true');
   const data = await openwaRequest(
     'GET',
-    `/sessions/${openwaSessionId}/messages/${encoded}/history?limit=${limit}`
+    `/sessions/${openwaSessionId}/messages/${encoded}/history?${qs.toString()}`,
+    undefined,
+    { timeout: includeMedia ? 120000 : 30000 }
   );
   const raw = Array.isArray(data) ? data : data.messages || data.data || [];
   const messages = raw
@@ -491,6 +532,7 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
       if (!msg || typeof msg !== 'object') return null;
       const body = String(msg.body || msg.text || msg.caption || '').trim();
       const type = String(msg.type || 'text');
+      const media = normalizeMediaPayload(msg);
       return {
         id: msg.id || msg.waMessageId || null,
         chatId: msg.chatId || chatId,
@@ -505,12 +547,62 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
           (msg.contact && (msg.contact.pushName || msg.contact.name)) ||
           msg.pushName ||
           msg.senderName ||
-          null
+          null,
+        hasMedia: Boolean(msg.hasMedia || (media && (media.data || media.mimetype))),
+        media
       };
     })
     .filter(Boolean)
     .filter((msg) => !isUnknownPlaceholderMessage(msg));
-  return setCached(cacheKey, messages);
+  if (!includeMedia) {
+    return setCached(cacheKey, messages);
+  }
+  return messages;
+}
+
+/**
+ * Descarga bytes de media ya persistidos/archivados en OpenWA.
+ * @returns {Promise<{ buffer: Buffer, mimetype: string }>}
+ */
+async function downloadMessageMedia(openwaSessionId, chatId, messageId) {
+  assertOpenWAConfigured();
+  const { baseUrl, apiKey } = getBaseConfig();
+  const encodedChat = encodeURIComponent(String(chatId));
+  const encodedMsg = encodeURIComponent(String(messageId));
+  const response = await axios({
+    method: 'GET',
+    url: `${baseUrl}/sessions/${openwaSessionId}/messages/${encodedChat}/${encodedMsg}/media`,
+    headers: { 'X-API-Key': apiKey },
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    validateStatus: () => true
+  });
+
+  if (response.status === 404) {
+    throw createOpenWAError('No hay media almacenada para este mensaje', { status: 404 });
+  }
+  if (response.status < 200 || response.status >= 300) {
+    let message = `OpenWA media error ${response.status}`;
+    try {
+      const text = Buffer.from(response.data || []).toString('utf8');
+      const parsed = JSON.parse(text);
+      message = parsed.message || parsed.error || message;
+    } catch {
+      /* ignore */
+    }
+    throw createOpenWAError(message, { status: response.status });
+  }
+
+  const contentType = String(
+    (response.headers && (response.headers['content-type'] || response.headers['Content-Type'])) ||
+      'application/octet-stream'
+  )
+    .split(';')[0]
+    .trim();
+  return {
+    buffer: Buffer.from(response.data || []),
+    mimetype: contentType || 'application/octet-stream'
+  };
 }
 
 /**
@@ -682,6 +774,8 @@ module.exports = {
   unblockContact,
   listChats,
   getChatHistory,
+  downloadMessageMedia,
+  isViewableMediaType,
   buildChatPreviewLines,
   searchMessages,
   invalidateOpenWACache,

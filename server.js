@@ -18,6 +18,8 @@ const {
   formatPhoneToChatId,
   listChats,
   getChatHistory,
+  downloadMessageMedia,
+  isViewableMediaType,
   buildChatPreviewLines,
   searchMessages,
   invalidateOpenWACache,
@@ -30,6 +32,12 @@ const {
   blockContact,
   unblockContact
 } = require('./openwaClient');
+const mediaCacheStore = require('./mediaCacheStore');
+const {
+  hydrateChatMedia,
+  resolveMessageMedia,
+  guessMimetypeFromType
+} = require('./conversationMediaService');
 const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
 const autoReplyStore = require('./autoReplyStore');
@@ -4047,9 +4055,22 @@ app.get('/api/conversations/:chatId/messages', async (req, res) => {
       return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
     }
 
-    const messages = await getChatHistory(session.openwaSessionId, chatId, {
-      limit: req.query.limit || 50
-    });
+    const includeMedia =
+      req.query.includeMedia === '1' ||
+      req.query.includeMedia === 'true' ||
+      req.query.includeMedia === true;
+
+    const limit = req.query.limit || 80;
+    let messages;
+    if (includeMedia) {
+      const hydrated = await hydrateChatMedia(session.openwaSessionId, chatId, limit);
+      messages = hydrated.messages || [];
+    } else {
+      messages = await getChatHistory(session.openwaSessionId, chatId, {
+        limit,
+        includeMedia: false
+      });
+    }
 
     // OpenWA suele devolver más antiguos primero; normalizamos a cronológico.
     const sorted = [...messages].sort((a, b) => {
@@ -4058,14 +4079,90 @@ app.get('/api/conversations/:chatId/messages', async (req, res) => {
       return ta - tb;
     });
 
+    const publicMessages = sorted.map((msg) => {
+      const type = String(msg.type || 'text');
+      const viewable = isViewableMediaType(type);
+      const hasCached =
+        Boolean(msg.id) &&
+        mediaCacheStore.has(session.openwaSessionId, chatId, msg.id);
+      const wantsMedia = viewable || Boolean(msg.hasMedia) || hasCached;
+      const mediaUrl =
+        wantsMedia && msg.id
+          ? `/api/conversations/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(String(msg.id))}/media?sessionId=${encodeURIComponent(session.id)}`
+          : null;
+      const body = String(msg.body || '');
+      const placeholder = `[${type}]`;
+      const cleanBody =
+        viewable && body.toLowerCase() === placeholder.toLowerCase() ? '' : body;
+
+      return {
+        id: msg.id,
+        chatId: msg.chatId || chatId,
+        from: msg.from,
+        to: msg.to,
+        body: cleanBody,
+        type,
+        fromMe: msg.fromMe,
+        isGroup: msg.isGroup,
+        timestamp: msg.timestamp,
+        contactName: msg.contactName,
+        hasMedia: wantsMedia,
+        mimetype: (msg.media && msg.media.mimetype) || null,
+        mediaUrl
+      };
+    });
+
     res.json({
       success: true,
       sessionId: session.id,
       sessionLabel: session.label || session.id,
       openwaSessionId: session.openwaSessionId,
       chatId,
-      messages: sorted
+      includeMedia: Boolean(includeMedia),
+      messages: publicMessages
     });
+  } catch (error) {
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/conversations/:chatId/messages/:messageId/media', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.query.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+
+    if (!forbidUnlessViewSession(session.id, req, res)) {
+      return;
+    }
+
+    const chatId = decodeURIComponent(req.params.chatId || '');
+    const messageId = decodeURIComponent(req.params.messageId || '');
+    if (!chatId || !messageId) {
+      return res.status(400).json({ success: false, error: 'chatId y messageId son obligatorios' });
+    }
+
+    const hit = await resolveMessageMedia(
+      session.openwaSessionId,
+      chatId,
+      messageId,
+      downloadMessageMedia
+    );
+
+    if (!hit || !hit.buffer || !hit.buffer.length) {
+      return res.status(404).json({
+        success: false,
+        error: 'Media no disponible (puede haber expirado en WhatsApp)'
+      });
+    }
+
+    res.setHeader('Content-Type', hit.mimetype || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.send(hit.buffer);
   } catch (error) {
     res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
   }

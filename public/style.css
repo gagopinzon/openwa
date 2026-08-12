@@ -1772,6 +1772,41 @@ footer p {
     word-break: break-word;
 }
 
+.conv-bubble .conv-media-link {
+    display: block;
+    margin: 0 0 6px;
+    white-space: normal;
+}
+
+.conv-bubble .conv-media-image {
+    display: block;
+    max-width: min(280px, 70vw);
+    max-height: 320px;
+    width: auto;
+    height: auto;
+    border-radius: 8px;
+    object-fit: contain;
+    background: #0f172a10;
+}
+
+.conv-bubble .conv-media-audio {
+    display: block;
+    width: min(260px, 70vw);
+    margin: 2px 0 6px;
+    white-space: normal;
+}
+
+.conv-bubble .conv-media-caption {
+    white-space: pre-wrap;
+}
+
+.conv-bubble .conv-media-pending {
+    display: inline-block;
+    font-size: 12px;
+    opacity: 0.75;
+    font-style: italic;
+}
+
 .conv-bubble.incoming {
     align-self: flex-start;
     background: #fff;

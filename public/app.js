@@ -2459,8 +2459,9 @@ class CVAnalyzer {
         const requestKey = `${active.sessionId}::${active.chatId}`;
 
         try {
+            const wantsMedia = !silent;
             const response = await fetch(
-                `/api/conversations/${encodeURIComponent(active.chatId)}/messages?sessionId=${encodeURIComponent(active.sessionId)}&limit=80`
+                `/api/conversations/${encodeURIComponent(active.chatId)}/messages?sessionId=${encodeURIComponent(active.sessionId)}&limit=80${wantsMedia ? '&includeMedia=1' : ''}`
             );
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo cargar el historial');
@@ -2474,24 +2475,36 @@ class CVAnalyzer {
                 return;
             }
 
-            const messages = (data.messages || []).filter(
+            let messages = (data.messages || []).filter(
                 (m) => !this.isUnknownConversationMessage(m)
             );
+            messages = this.mergeConversationMediaCache(requestKey, messages);
+
             this.renderConversationMessages(messages, { preserveScroll: silent });
 
             const previewLines = messages
-                .map((m) => String((m && m.body) || '').replace(/\s+/g, ' ').trim())
+                .map((m) => {
+                    if (this.isViewableConversationMedia(m)) {
+                        const type = String(m.type || 'media').toLowerCase();
+                        const caption = String((m && m.body) || '').replace(/\s+/g, ' ').trim();
+                        if (caption) return caption;
+                        if (type === 'image' || type === 'sticker') return '[imagen]';
+                        if (type === 'audio' || type === 'voice' || type === 'ptt') return '[audio]';
+                        return `[${type}]`;
+                    }
+                    return String((m && m.body) || '').replace(/\s+/g, ' ').trim();
+                })
                 .filter((line) => line && line.toLowerCase() !== '[unknown]')
                 .slice(-4)
                 .map((line) => (line.length > 140 ? `${line.slice(0, 140)}…` : line));
             if (previewLines.length) {
                 const lastMsg = [...messages]
                     .reverse()
-                    .find(
-                        (m) =>
-                            String((m && m.body) || '').trim() &&
-                            !this.isUnknownConversationMessage(m)
-                    );
+                    .find((m) => {
+                        if (this.isUnknownConversationMessage(m)) return false;
+                        if (this.isViewableConversationMedia(m)) return true;
+                        return Boolean(String((m && m.body) || '').trim());
+                    });
                 const lastFromMe = lastMsg ? Boolean(lastMsg.fromMe) : null;
                 const chat = (this.conversationsChats || []).find(
                     (c) =>
@@ -2523,6 +2536,87 @@ class CVAnalyzer {
             .toLowerCase() === '[unknown]';
     }
 
+    isViewableConversationMedia(msg) {
+        const type = String((msg && (msg.type || msg.mediaType)) || '')
+            .trim()
+            .toLowerCase();
+        return (
+            type === 'image' ||
+            type === 'sticker' ||
+            type === 'audio' ||
+            type === 'voice' ||
+            type === 'ptt'
+        );
+    }
+
+    mergeConversationMediaCache(threadKey, messages) {
+        if (!this._conversationMediaById) this._conversationMediaById = new Map();
+        const list = Array.isArray(messages) ? messages : [];
+        return list.map((msg) => {
+            if (!msg || !msg.id) return msg;
+            const cacheKey = `${threadKey}::${msg.id}`;
+            if (msg.mediaUrl) {
+                this._conversationMediaById.set(cacheKey, {
+                    mediaUrl: msg.mediaUrl,
+                    mimetype: msg.mimetype || null,
+                    hasMedia: true,
+                    type: msg.type
+                });
+                return msg;
+            }
+            const prev = this._conversationMediaById.get(cacheKey);
+            if (!prev) return msg;
+            return {
+                ...msg,
+                mediaUrl: prev.mediaUrl,
+                mimetype: msg.mimetype || prev.mimetype,
+                hasMedia: true
+            };
+        });
+    }
+
+    buildConversationMessageHtml(msg) {
+        const type = String(msg.type || 'text')
+            .trim()
+            .toLowerCase();
+        const mediaUrl = msg.mediaUrl ? String(msg.mediaUrl) : '';
+        const parts = [];
+
+        if (mediaUrl && (type === 'image' || type === 'sticker')) {
+            parts.push(
+                `<a class="conv-media-link" href="${this.escapeHtml(mediaUrl)}" target="_blank" rel="noopener noreferrer">` +
+                    `<img class="conv-media-image" src="${this.escapeHtml(mediaUrl)}" alt="imagen" loading="lazy" />` +
+                    `</a>`
+            );
+        } else if (mediaUrl && (type === 'audio' || type === 'voice' || type === 'ptt')) {
+            parts.push(
+                `<audio class="conv-media-audio" controls preload="metadata" src="${this.escapeHtml(mediaUrl)}"></audio>`
+            );
+        } else if (this.isViewableConversationMedia(msg) && !mediaUrl) {
+            parts.push(
+                `<span class="conv-media-pending">Cargando ${this.escapeHtml(type)}…</span>`
+            );
+        }
+
+        let body = String(msg.body || '').trim();
+        if (
+            this.isViewableConversationMedia(msg) &&
+            body &&
+            body.toLowerCase() === `[${type}]`
+        ) {
+            body = '';
+        }
+        if (body) {
+            parts.push(
+                `<div class="conv-media-caption">${this.escapeHtml(body)}</div>`
+            );
+        } else if (!parts.length) {
+            parts.push(this.escapeHtml(msg.body || ''));
+        }
+
+        return parts.join('');
+    }
+
     renderConversationMessages(messages, options = {}) {
         if (!this.conversationsThreadMessages) return;
         const preserveScroll = Boolean(options.preserveScroll);
@@ -2549,7 +2643,11 @@ class CVAnalyzer {
                 const time = this.formatConversationTime(msg.timestamp);
                 const messageId = msg.id ? String(msg.id) : '';
                 const canEdit =
-                    canControl && msg.fromMe && messageId && msg.type !== 'revoked';
+                    canControl &&
+                    msg.fromMe &&
+                    messageId &&
+                    msg.type !== 'revoked' &&
+                    !this.isViewableConversationMedia(msg);
                 const actions = canEdit
                     ? `<div class="bubble-actions">
                         <button type="button" class="bubble-action-btn" data-action="edit" data-message-id="${this.escapeHtml(messageId)}" data-body="${encodeURIComponent(msg.body || '')}">Editar</button>
@@ -2558,7 +2656,7 @@ class CVAnalyzer {
                     : '';
                 return `
                 <div class="conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}" data-message-id="${this.escapeHtml(messageId)}">
-                    ${this.escapeHtml(msg.body || '')}
+                    ${this.buildConversationMessageHtml(msg)}
                     ${time ? `<span class="bubble-time">${this.escapeHtml(time)}</span>` : ''}
                     ${actions}
                 </div>`;
