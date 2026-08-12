@@ -3119,30 +3119,32 @@ class CVAnalyzer {
 
     applyConnectionStatusToLinePills() {
         if (!this.lineUsersList) return;
-        this.lineUsersList.querySelectorAll('[data-session-id]').forEach((el) => {
-            const sessionId = el.dataset.sessionId;
-            if (!sessionId) return;
-            const info = this.connectionBadgeForSession(sessionId);
-            let badge = el.querySelector('[data-conn-badge]');
-            if (!badge) {
-                badge = document.createElement('span');
+        this.lineUsersList
+            .querySelectorAll('.line-pill[data-session-id], .line-card[data-session-id]')
+            .forEach((el) => {
+                const sessionId = el.dataset.sessionId;
+                if (!sessionId) return;
+                const info = this.connectionBadgeForSession(sessionId);
+                let badge = el.querySelector('[data-conn-badge]');
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.dataset.connBadge = '1';
+                    const top = el.querySelector('.line-pill-badges, .line-card-title');
+                    if (top) top.appendChild(badge);
+                    else return;
+                }
+                badge.textContent = info.text;
+                badge.className = info.className;
                 badge.dataset.connBadge = '1';
-                const top = el.querySelector('.line-pill-badges, .line-card-title');
-                if (top) top.prepend(badge);
-                else el.prepend(badge);
-            }
-            badge.textContent = info.text;
-            badge.className = info.className;
-            badge.dataset.connBadge = '1';
 
-            if (el.classList.contains('line-pill')) {
-                const offline =
-                    !this.testMode &&
-                    this.openwaConnectionBySession?.[sessionId] &&
-                    this.openwaConnectionBySession[sessionId].connected === false;
-                el.classList.toggle('is-offline', Boolean(offline));
-            }
-        });
+                if (el.classList.contains('line-pill')) {
+                    const offline =
+                        !this.testMode &&
+                        this.openwaConnectionBySession?.[sessionId] &&
+                        this.openwaConnectionBySession[sessionId].connected === false;
+                    el.classList.toggle('is-offline', Boolean(offline));
+                }
+            });
     }
 
     startConnectionStatusPolling() {

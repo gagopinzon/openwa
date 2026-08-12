@@ -2418,27 +2418,33 @@ footer p {
 
 .line-pill-top {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 6px;
 }
 
 .line-pill-top strong {
     font-size: 13px;
     color: #0f172a;
+    line-height: 1.2;
 }
 
 .line-pill-badges {
-    display: inline-flex;
+    display: flex;
     flex-wrap: wrap;
     gap: 4px;
     align-items: center;
-    justify-content: flex-end;
 }
 
 .line-pill.is-offline {
     border-color: #fecaca;
     background: #fff7f7;
+}
+
+.line-pill-actions .remove-line-user-btn {
+    min-width: 28px;
+    padding: 4px 8px;
+    flex: 0 0 auto;
 }
 
 .line-pill-channel {
@@ -2473,8 +2479,9 @@ footer p {
 }
 
 .line-pill-actions .form-select {
-    flex: 1;
-    min-width: 0;
+    flex: 1 1 110px;
+    min-width: 110px;
+    max-width: 100%;
     padding: 4px 6px;
     font-size: 11px;
 }
