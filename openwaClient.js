@@ -182,8 +182,19 @@ function invalidateOpenWACache({ openwaSessionId, chatId } = {}) {
   const historyPrefix = chatId
     ? `history:${openwaSessionId}:${chatId}:`
     : `history:${openwaSessionId}:`;
+  const historyVPrefix = chatId
+    ? `:${openwaSessionId}:${chatId}:`
+    : `:${openwaSessionId}:`;
   for (const key of openwaCache.keys()) {
-    if (key.startsWith(sessionPrefix) || key.startsWith(historyPrefix)) {
+    if (key.startsWith(sessionPrefix)) {
+      openwaCache.delete(key);
+      continue;
+    }
+    // history / history:v2 / history:v3
+    if (
+      key.startsWith(historyPrefix) ||
+      (key.startsWith('history:') && key.includes(historyVPrefix))
+    ) {
       openwaCache.delete(key);
     }
   }
@@ -445,9 +456,25 @@ async function listChats(openwaSessionId, opts = {}) {
  * @param {string} chatId
  * @param {{ limit?: number, fresh?: boolean }} [opts]
  */
+/**
+ * Mensajes de protocolo/cifrado que OpenWA no interpreta (p.ej. type "unknown").
+ * @param {{ type?: string, body?: string, mediaType?: string }|null} msg
+ */
+function isUnknownPlaceholderMessage(msg) {
+  if (!msg || typeof msg !== 'object') return false;
+  const type = String(msg.type || msg.mediaType || '')
+    .trim()
+    .toLowerCase();
+  if (type === 'unknown') return true;
+  const body = String(msg.body || '')
+    .trim()
+    .toLowerCase();
+  return body === '[unknown]';
+}
+
 async function getChatHistory(openwaSessionId, chatId, opts = {}) {
   const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 100);
-  const cacheKey = `history:v2:${openwaSessionId}:${chatId}:${limit}`;
+  const cacheKey = `history:v3:${openwaSessionId}:${chatId}:${limit}`;
   if (!opts.fresh) {
     const cached = getCached(cacheKey);
     if (cached) return cached;
@@ -481,7 +508,8 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
           null
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((msg) => !isUnknownPlaceholderMessage(msg));
   return setCached(cacheKey, messages);
 }
 
@@ -513,7 +541,9 @@ function resolveMessageFromMe(msg) {
  */
 function buildChatPreviewLines(messages, maxLines = 4) {
   const limit = Math.min(Math.max(parseInt(maxLines, 10) || 4, 1), 8);
-  const list = Array.isArray(messages) ? [...messages] : [];
+  const list = (Array.isArray(messages) ? [...messages] : []).filter(
+    (m) => !isUnknownPlaceholderMessage(m)
+  );
   list.sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
   const withBody = list.filter((m) => String((m && m.body) || '').trim());
   const lastMsg = withBody.length ? withBody[withBody.length - 1] : null;
@@ -527,7 +557,7 @@ function buildChatPreviewLines(messages, maxLines = 4) {
     const body = String((list[i] && list[i].body) || '')
       .replace(/\s+/g, ' ')
       .trim();
-    if (!body) continue;
+    if (!body || body.toLowerCase() === '[unknown]') continue;
     lines.unshift(body.length > 140 ? `${body.slice(0, 140)}…` : body);
   }
   return {

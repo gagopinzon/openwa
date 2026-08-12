@@ -63,7 +63,10 @@ function getMany(keys) {
 function upsert(key, data) {
   if (!key || !data) return null;
   const lines = Array.isArray(data.previewLines)
-    ? data.previewLines.map((l) => String(l || '').trim()).filter(Boolean).slice(-8)
+    ? data.previewLines
+        .map((l) => String(l || '').trim())
+        .filter((l) => l && l.toLowerCase() !== '[unknown]')
+        .slice(-8)
     : [];
   if (!lines.length) return null;
 
@@ -89,7 +92,10 @@ function upsertMany(entries) {
   for (const entry of entries) {
     if (!entry || !entry.key) continue;
     const lines = Array.isArray(entry.previewLines)
-      ? entry.previewLines.map((l) => String(l || '').trim()).filter(Boolean).slice(-8)
+      ? entry.previewLines
+          .map((l) => String(l || '').trim())
+          .filter((l) => l && l.toLowerCase() !== '[unknown]')
+          .slice(-8)
       : [];
     if (!lines.length) continue;
     store.previews[entry.key] = {
@@ -112,12 +118,17 @@ function isPreviewStale(chat, preview) {
   if (!preview || !Array.isArray(preview.previewLines) || !preview.previewLines.length) {
     return true;
   }
+  const cleanedLines = preview.previewLines
+    .map((l) => String(l || '').trim())
+    .filter((l) => l && l.toLowerCase() !== '[unknown]');
+  if (!cleanedLines.length) return true;
   const incoming = String((chat && chat.lastMessage) || '').trim();
   if (!incoming) return false;
+  if (incoming.toLowerCase() === '[unknown]') return false;
   const stored = String(preview.sourceLastMessage || preview.lastMessage || '').trim();
-  const lastLine = String(preview.previewLines[preview.previewLines.length - 1] || '').trim();
+  const lastLine = String(cleanedLines[cleanedLines.length - 1] || '').trim();
   if (incoming === stored || incoming === lastLine) return false;
-  if (preview.previewLines.some((l) => String(l).trim() === incoming)) return false;
+  if (cleanedLines.some((l) => String(l).trim() === incoming)) return false;
   return true;
 }
 
@@ -143,12 +154,21 @@ function applyToChats(chats) {
     if (isPreviewStale(chat, preview)) {
       return { ...chat, key };
     }
+    const previewLines = preview.previewLines
+      .map((l) => String(l || '').trim())
+      .filter((l) => l && l.toLowerCase() !== '[unknown]');
+    if (!previewLines.length) {
+      return { ...chat, key };
+    }
     return {
       ...chat,
       key,
-      previewLines: [...preview.previewLines],
+      previewLines,
       lastFromMe: hasDirection(preview) ? preview.lastFromMe : null,
-      lastMessage: chat.lastMessage || preview.lastMessage || ''
+      lastMessage:
+        chat.lastMessage && String(chat.lastMessage).toLowerCase() !== '[unknown]'
+          ? chat.lastMessage
+          : previewLines[previewLines.length - 1] || ''
     };
   });
 }

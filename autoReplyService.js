@@ -346,6 +346,13 @@ function extractIncomingMessage(payload) {
   const msg = parsed.data || {};
   const body = String(msg.body || msg.text || msg.caption || '').trim();
   const mediaType = msg.type || msg.mediaType || msg.mimetype || null;
+  const typeNorm = String(mediaType || '')
+    .trim()
+    .toLowerCase();
+  // Protocolo/cifrado no interpretable por OpenWA
+  if (typeNorm === 'unknown' || body.toLowerCase() === '[unknown]') {
+    return null;
+  }
   if (!body && !mediaType) return null;
 
   const chatId = msg.from || msg.chatId || msg.sender || '';

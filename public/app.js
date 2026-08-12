@@ -1805,13 +1805,15 @@ class CVAnalyzer {
                     : lastFromMe === false
                       ? '<span class="chat-direction from-them" title="El último mensaje es del contacto">Ellos</span>'
                       : '<span class="chat-direction from-unknown" title="Aún no se sabe quién envió el último">…</span>';
-            const previewLines = Array.isArray(chat.previewLines) && chat.previewLines.length
-                ? chat.previewLines
-                : String(chat.lastMessage || '')
-                    .split(/\n+/)
-                    .map((l) => l.trim())
-                    .filter(Boolean)
-                    .slice(-4);
+            const previewLines = (
+                Array.isArray(chat.previewLines) && chat.previewLines.length
+                    ? chat.previewLines
+                    : String(chat.lastMessage || '')
+                          .split(/\n+/)
+                          .map((l) => l.trim())
+                          .filter(Boolean)
+                          .slice(-4)
+            ).filter((line) => String(line).trim().toLowerCase() !== '[unknown]');
             const previewHtml = previewLines.length
                 ? previewLines.map((line) => this.escapeHtml(line)).join('<br>')
                 : '';
@@ -2472,16 +2474,24 @@ class CVAnalyzer {
                 return;
             }
 
-            const messages = data.messages || [];
+            const messages = (data.messages || []).filter(
+                (m) => !this.isUnknownConversationMessage(m)
+            );
             this.renderConversationMessages(messages, { preserveScroll: silent });
 
             const previewLines = messages
                 .map((m) => String((m && m.body) || '').replace(/\s+/g, ' ').trim())
-                .filter(Boolean)
+                .filter((line) => line && line.toLowerCase() !== '[unknown]')
                 .slice(-4)
                 .map((line) => (line.length > 140 ? `${line.slice(0, 140)}…` : line));
             if (previewLines.length) {
-                const lastMsg = [...messages].reverse().find((m) => String((m && m.body) || '').trim());
+                const lastMsg = [...messages]
+                    .reverse()
+                    .find(
+                        (m) =>
+                            String((m && m.body) || '').trim() &&
+                            !this.isUnknownConversationMessage(m)
+                    );
                 const lastFromMe = lastMsg ? Boolean(lastMsg.fromMe) : null;
                 const chat = (this.conversationsChats || []).find(
                     (c) =>
@@ -2502,6 +2512,17 @@ class CVAnalyzer {
         }
     }
 
+    isUnknownConversationMessage(msg) {
+        if (!msg || typeof msg !== 'object') return false;
+        const type = String(msg.type || msg.mediaType || '')
+            .trim()
+            .toLowerCase();
+        if (type === 'unknown') return true;
+        return String(msg.body || '')
+            .trim()
+            .toLowerCase() === '[unknown]';
+    }
+
     renderConversationMessages(messages, options = {}) {
         if (!this.conversationsThreadMessages) return;
         const preserveScroll = Boolean(options.preserveScroll);
@@ -2513,13 +2534,17 @@ class CVAnalyzer {
             this.activeConversation &&
             this.canControlSession(this.activeConversation.sessionId);
 
-        if (!messages.length) {
+        const visible = (Array.isArray(messages) ? messages : []).filter(
+            (m) => !this.isUnknownConversationMessage(m)
+        );
+
+        if (!visible.length) {
             el.innerHTML = '<p class="auto-reply-empty">Sin mensajes en este chat.</p>';
             delete el.dataset.lastMessagesHtml;
             return;
         }
 
-        const nextHtml = messages
+        const nextHtml = visible
             .map((msg) => {
                 const time = this.formatConversationTime(msg.timestamp);
                 const messageId = msg.id ? String(msg.id) : '';
