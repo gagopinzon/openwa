@@ -2484,6 +2484,43 @@ app.get('/api/android/devices', (req, res) => {
   }
 });
 
+app.delete('/api/android/devices/:id', requireSuper, (req, res) => {
+  try {
+    const deviceId = String(req.params.id || '').trim();
+    const result = androidGatewayStore.deleteDevice(deviceId);
+    if (!result) {
+      return res.status(404).json({ success: false, error: 'device_not_found' });
+    }
+
+    const unlinkedSessions = [];
+    for (const session of sessionsStore.getAllSessions()) {
+      if (session.androidDeviceId !== deviceId) continue;
+      try {
+        const updated = sessionsStore.updateSession(session.id, {
+          androidDeviceId: null,
+          outreachChannel:
+            session.outreachChannel === 'android' ? 'openwa' : session.outreachChannel
+        });
+        unlinkedSessions.push(updated.id);
+      } catch (unlinkErr) {
+        console.warn(
+          `[android] no se pudo desvincular sesión ${session.id} al borrar device:`,
+          unlinkErr.message
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      device: result.device,
+      cancelledJobs: result.cancelledJobs,
+      unlinkedSessions
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/android/jobs', (req, res) => {
   try {
     if (!forbidUnlessAnyControl(req, res)) return;

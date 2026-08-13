@@ -419,6 +419,34 @@ function linkDeviceToLogicalSession(deviceId, logicalSessionId) {
 }
 
 /**
+ * Elimina un dispositivo y cancela jobs pendientes/reclamados.
+ * @param {string} deviceId
+ * @returns {{ device: object, cancelledJobs: number }|null}
+ */
+function deleteDevice(deviceId) {
+  const store = readStore();
+  const id = String(deviceId || '').trim();
+  if (!id) return null;
+  const idx = store.devices.findIndex((d) => d.id === id);
+  if (idx < 0) return null;
+
+  const [device] = store.devices.splice(idx, 1);
+  const now = new Date().toISOString();
+  let cancelledJobs = 0;
+  for (const job of store.jobs) {
+    if (job.deviceId !== id) continue;
+    if (job.status !== JOB_STATUS.PENDING && job.status !== JOB_STATUS.CLAIMED) continue;
+    job.status = JOB_STATUS.FAILED;
+    job.error = 'device_deleted';
+    job.finishedAt = now;
+    cancelledJobs += 1;
+  }
+
+  writeStore(store);
+  return { device: { ...device }, cancelledJobs };
+}
+
+/**
  * Encola jobs ya asignados a deviceId concreto.
  * @param {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, batchId?: string|null, logicalSessionId?: string|null, meta?: object }>} items
  */
@@ -477,6 +505,7 @@ module.exports = {
   enqueueJobs,
   enqueueAssignedJobs,
   linkDeviceToLogicalSession,
+  deleteDevice,
   getJob,
   listJobs,
   pickOnlineDevices,

@@ -89,6 +89,18 @@ describe('androidGatewayStore', () => {
     assert.equal(listed.batteryLevel, 42);
   });
 
+  it('deleteDevice elimina el dispositivo y cancela jobs pendientes', () => {
+    const device = store.registerDevice({ label: 'Borrar' });
+    store.enqueueJobs([{ telefono: '5215551112233', mensaje: 'Hola' }], [device.id]);
+    const result = store.deleteDevice(device.id);
+    assert.ok(result);
+    assert.equal(result.device.id, device.id);
+    assert.equal(result.cancelledJobs, 1);
+    assert.equal(store.listDevices().length, 0);
+    assert.equal(store.listJobs({ status: 'failed' }).length, 1);
+    assert.equal(store.deleteDevice(device.id), null);
+  });
+
   it('pickOnlineDevices filtra por lastSeen reciente', () => {
     const device = store.registerDevice({ label: 'A', logicalSessionId: 'session1' });
     const online = store.pickOnlineDevices({ logicalSessionIds: ['session1'], maxAgeMs: 60_000 });

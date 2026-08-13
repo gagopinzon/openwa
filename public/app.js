@@ -88,6 +88,55 @@ class CVAnalyzer {
         }, this._androidDevicesPollMs || 30000);
     }
 
+    bindAndroidDeviceDeleteButtons() {
+        if (!this.androidDevicesList) return;
+        this.androidDevicesList.querySelectorAll('.android-device-delete-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const deviceId = btn.getAttribute('data-device-id') || '';
+                const label = btn.getAttribute('data-device-label') || deviceId;
+                const linked = btn.getAttribute('data-linked') === '1';
+                this.deleteAndroidDevice(deviceId, label, linked);
+            });
+        });
+    }
+
+    async deleteAndroidDevice(deviceId, label, linked) {
+        if (!this.isSuperUser()) {
+            this.showStatus('Solo el admin puede borrar dispositivos Android', 'error');
+            return;
+        }
+        const id = String(deviceId || '').trim();
+        if (!id) return;
+        const name = label || id;
+        const msg = linked
+            ? `¿Borrar "${name}"? Está vinculado a una línea: se desvinculará y los envíos pendientes de ese celular se cancelarán.`
+            : `¿Borrar el dispositivo "${name}"? Ya no aparecerá en el Gateway hasta que se registre de nuevo.`;
+        if (!window.confirm(msg)) return;
+
+        try {
+            const res = await fetch(`/api/android/devices/${encodeURIComponent(id)}`, {
+                method: 'DELETE'
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success === false) {
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
+            const unlinked = (data.unlinkedSessions || []).length;
+            this.showStatus(
+                unlinked
+                    ? `Dispositivo borrado (${unlinked} línea(s) desvinculada(s))`
+                    : 'Dispositivo Android borrado',
+                'success'
+            );
+            if (unlinked && typeof this.loadSessions === 'function') {
+                await this.loadSessions();
+            }
+            await this.refreshAndroidDevices({ silent: true });
+        } catch (err) {
+            this.showStatus(err.message || 'No se pudo borrar el dispositivo', 'error');
+        }
+    }
+
     getAndroidDeviceById(deviceId) {
         if (!deviceId) return null;
         return (this.androidDevices || []).find((d) => d.id === deviceId) || null;
@@ -233,6 +282,7 @@ class CVAnalyzer {
                 this.androidDevicesList.innerHTML =
                     '<p style="color:#64748b;">Ningún celular registrado aún. Instala la app agente y regístrala.</p>';
             } else {
+                const canDelete = this.isSuperUser();
                 this.androidDevicesList.innerHTML = devices
                     .map((d) => {
                         const on = onlineIds.has(d.id);
@@ -241,14 +291,25 @@ class CVAnalyzer {
                             bat.known ? (bat.isLow ? ' is-low' : '') : ' is-unknown'
                         }`;
                         const batText = bat.known ? `${bat.level}%` : 'bat. —';
-                        return `<div style="padding:8px 0;border-bottom:1px solid #e2e8f0;">
-                            <strong>${this.escapeHtml(d.label || d.id)}</strong>
-                            <span style="margin-left:8px;color:${on ? '#15803d' : '#94a3b8'};">${on ? 'online' : 'offline'}</span>
-                            <span class="${batClass}">${this.escapeHtml(batText)}</span>
-                            <div style="color:#64748b;font-size:12px;">id: ${this.escapeHtml(d.id)} · sesión: ${this.escapeHtml(d.logicalSessionId || '—')} · visto: ${this.escapeHtml(d.lastSeenAt || '—')}</div>
+                        const linked = (this.configuredSessions || []).some(
+                            (s) => s.androidDeviceId === d.id
+                        );
+                        const deleteBtn = canDelete
+                            ? `<button type="button" class="btn btn-secondary btn-sm android-device-delete-btn" data-device-id="${this.escapeHtml(d.id)}" data-device-label="${this.escapeHtml(d.label || d.id)}" data-linked="${linked ? '1' : '0'}" title="Eliminar dispositivo">Borrar</button>`
+                            : '';
+                        return `<div class="android-device-row" style="padding:8px 0;border-bottom:1px solid #e2e8f0;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;justify-content:space-between;">
+                            <div style="min-width:0;flex:1;">
+                                <strong>${this.escapeHtml(d.label || d.id)}</strong>
+                                <span style="margin-left:8px;color:${on ? '#15803d' : '#94a3b8'};">${on ? 'online' : 'offline'}</span>
+                                <span class="${batClass}">${this.escapeHtml(batText)}</span>
+                                ${linked ? '<span style="margin-left:8px;font-size:11px;color:#64748b;">vinculado</span>' : '<span style="margin-left:8px;font-size:11px;color:#94a3b8;">sin vincular</span>'}
+                                <div style="color:#64748b;font-size:12px;">id: ${this.escapeHtml(d.id)} · sesión: ${this.escapeHtml(d.logicalSessionId || '—')} · visto: ${this.escapeHtml(d.lastSeenAt || '—')}</div>
+                            </div>
+                            ${deleteBtn}
                         </div>`;
                     })
                     .join('');
+                this.bindAndroidDeviceDeleteButtons();
             }
             if (this.androidGatewayHint) {
                 const minMin = Math.round((data.config?.minIntervalMs || 180000) / 60000);
