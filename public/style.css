@@ -2476,6 +2476,55 @@ footer p {
     background: #fff7f7;
 }
 
+.line-pill.is-battery-low {
+    border-color: #f59e0b;
+    background: #fffbeb;
+}
+
+.line-pill-battery {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+    background: #ecfdf5;
+    color: #047857;
+}
+
+.line-pill-battery.is-low {
+    background: #fef3c7;
+    color: #b45309;
+}
+
+.line-pill-battery.is-unknown {
+    background: #f1f5f9;
+    color: #64748b;
+}
+
+.lines-battery-alert {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid #f59e0b;
+    border-radius: 8px;
+    background: #fffbeb;
+    color: #92400e;
+    font-size: 13px;
+}
+
+.android-device-battery {
+    margin-left: 8px;
+    font-weight: 600;
+    color: #047857;
+}
+
+.android-device-battery.is-low {
+    color: #b45309;
+}
+
+.android-device-battery.is-unknown {
+    color: #94a3b8;
+    font-weight: 500;
+}
+
 .line-pill-actions .remove-line-user-btn {
     min-width: 28px;
     padding: 4px 8px;

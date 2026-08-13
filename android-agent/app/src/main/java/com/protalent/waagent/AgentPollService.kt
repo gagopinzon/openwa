@@ -15,6 +15,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.net.URLEncoder
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -101,6 +102,13 @@ class AgentPollService : Service() {
         super.onDestroy()
     }
 
+    private fun getBatteryLevel(): Int {
+        val intent = registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+        val level = intent?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1
+        return if (level >= 0 && scale > 0) (level * 100 / scale) else -1
+    }
+
     private fun pollLoop() {
         while (running.get()) {
             try {
@@ -112,18 +120,21 @@ class AgentPollService : Service() {
                     continue
                 }
                 val api = ApiClient(base, token)
+                val battery = getBatteryLevel()
+
                 if (deviceId.isBlank()) {
-                    val reg = api.register(Prefs.label(this), Prefs.sessionId(this).ifBlank { null }, null)
+                    val reg = api.register(Prefs.label(this), Prefs.sessionId(this).ifBlank { null }, null, battery)
                     deviceId = reg.getJSONObject("device").getString("id")
                     Prefs.setDeviceId(this, deviceId)
                 } else {
                     try {
-                        api.heartbeat(deviceId)
+                        api.heartbeat(deviceId, battery)
                     } catch (_: Exception) {
                         val reg = api.register(
                             Prefs.label(this),
                             Prefs.sessionId(this).ifBlank { null },
-                            deviceId
+                            deviceId,
+                            battery
                         )
                         deviceId = reg.getJSONObject("device").getString("id")
                         Prefs.setDeviceId(this, deviceId)
@@ -227,7 +238,7 @@ class AgentPollService : Service() {
             onFinish(ok, error)
         }
 
-        val encoded = java.net.URLEncoder.encode(text, "UTF-8")
+        val encoded = URLEncoder.encode(text, "UTF-8")
         // Usamos el esquema nativo whatsapp:// que es más directo que el https://
         val uri = Uri.parse("whatsapp://send?phone=$phone&text=$encoded")
         val sendIntent = Intent(Intent.ACTION_VIEW, uri).apply {
@@ -235,7 +246,7 @@ class AgentPollService : Service() {
             // Esto fuerza a que SÓLO esta app pueda responder al mensaje
             setPackage(packageName)
         }
-
+        
         try {
             startActivity(sendIntent)
         } catch (e: Exception) {

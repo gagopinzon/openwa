@@ -74,6 +74,21 @@ describe('androidGatewayStore', () => {
     assert.equal(second, null);
   });
 
+  it('register y heartbeat persisten batteryLevel; -1 no pisa', () => {
+    const a = store.registerDevice({ label: 'A', batteryLevel: 85 });
+    assert.equal(a.batteryLevel, 85);
+    assert.ok(a.batteryUpdatedAt);
+
+    const hb = store.heartbeat(a.id, { batteryLevel: 42 });
+    assert.equal(hb.batteryLevel, 42);
+
+    const ignored = store.heartbeat(a.id, { batteryLevel: -1 });
+    assert.equal(ignored.batteryLevel, 42);
+
+    const listed = store.listDevices().find((d) => d.id === a.id);
+    assert.equal(listed.batteryLevel, 42);
+  });
+
   it('pickOnlineDevices filtra por lastSeen reciente', () => {
     const device = store.registerDevice({ label: 'A', logicalSessionId: 'session1' });
     const online = store.pickOnlineDevices({ logicalSessionIds: ['session1'], maxAgeMs: 60_000 });

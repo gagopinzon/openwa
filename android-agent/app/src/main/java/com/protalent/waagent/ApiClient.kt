@@ -27,11 +27,12 @@ class ApiClient(
 
     private fun url(path: String): String = "$baseUrl$path"
 
-    fun register(label: String, logicalSessionId: String?, deviceId: String?): JSONObject {
+    fun register(label: String, logicalSessionId: String?, deviceId: String?, batteryLevel: Int? = null): JSONObject {
         val body = JSONObject()
             .put("label", label)
             .put("logicalSessionId", logicalSessionId)
             .put("deviceId", deviceId)
+            .put("batteryLevel", batteryLevel)
             .toString()
             .toRequestBody(json)
         val req = Request.Builder()
@@ -42,11 +43,15 @@ class ApiClient(
         return executeJson(req)
     }
 
-    fun heartbeat(deviceId: String): JSONObject {
+    fun heartbeat(deviceId: String, batteryLevel: Int? = null): JSONObject {
+        val body = JSONObject()
+            .put("batteryLevel", batteryLevel)
+            .toString()
+            .toRequestBody(json)
         val req = Request.Builder()
             .url(url("/api/android/devices/$deviceId/heartbeat"))
             .header("X-Android-Token", token)
-            .post("{}".toRequestBody(json))
+            .post(body)
             .build()
         return executeJson(req)
     }

@@ -67,6 +67,9 @@ class CVAnalyzer {
         this.androidTestPhone = document.getElementById('androidTestPhone');
         this.androidTestSendBtn = document.getElementById('androidTestSendBtn');
         this.androidTestSendStatus = document.getElementById('androidTestSendStatus');
+        this.linesBatteryAlert = document.getElementById('linesBatteryAlert');
+        this._androidDevicesPollMs = 30000;
+        this._androidBatteryLowThreshold = 20;
         if (this.refreshAndroidDevicesBtn) {
             this.refreshAndroidDevicesBtn.addEventListener('click', () =>
                 this.refreshAndroidDevices({ silent: false })
@@ -75,6 +78,91 @@ class CVAnalyzer {
         if (this.androidTestSendBtn) {
             this.androidTestSendBtn.addEventListener('click', () => this.sendAndroidTestMessage());
         }
+    }
+
+    startAndroidDevicesPolling() {
+        if (this._androidDevicesPollTimer) return;
+        this._androidDevicesPollTimer = setInterval(() => {
+            if (document.hidden) return;
+            this.refreshAndroidDevices({ silent: true });
+        }, this._androidDevicesPollMs || 30000);
+    }
+
+    getAndroidDeviceById(deviceId) {
+        if (!deviceId) return null;
+        return (this.androidDevices || []).find((d) => d.id === deviceId) || null;
+    }
+
+    /**
+     * @returns {{ known: boolean, level: number|null, isLow: boolean, label: string, className: string }}
+     */
+    batteryMetaForDevice(device) {
+        const threshold = this._androidBatteryLowThreshold || 20;
+        const level =
+            device && Number.isFinite(Number(device.batteryLevel))
+                ? Math.round(Number(device.batteryLevel))
+                : null;
+        if (level === null || level < 0 || level > 100) {
+            return {
+                known: false,
+                level: null,
+                isLow: false,
+                label: 'bat. —',
+                className: 'line-pill-battery is-unknown'
+            };
+        }
+        const isLow = level < threshold;
+        return {
+            known: true,
+            level,
+            isLow,
+            label: `${level}%`,
+            className: `line-pill-battery${isLow ? ' is-low' : ''}`
+        };
+    }
+
+    /** Solo canal Android: badge de batería del celular vinculado. */
+    lineBatteryBadgeHtml(session) {
+        if (!session || session.outreachChannel !== 'android') return '';
+        const device = this.getAndroidDeviceById(session.androidDeviceId);
+        const meta = this.batteryMetaForDevice(device);
+        const title = device
+            ? `Batería de ${device.label || device.id}`
+            : 'Sin celular Android vinculado';
+        return `<span class="${meta.className}" title="${this.escapeHtml(title)}">${this.escapeHtml(meta.label)}</span>`;
+    }
+
+    updateLinesBatteryBanner() {
+        if (!this.linesBatteryAlert) return;
+        const threshold = this._androidBatteryLowThreshold || 20;
+        const onlineIds = this.androidOnlineIds || new Set();
+        const low = (this.configuredSessions || [])
+            .filter((s) => s.outreachChannel === 'android' && s.androidDeviceId)
+            .map((s) => {
+                const device = this.getAndroidDeviceById(s.androidDeviceId);
+                if (!device || !onlineIds.has(device.id)) return null;
+                const meta = this.batteryMetaForDevice(device);
+                if (!meta.known || !meta.isLow) return null;
+                return {
+                    line: s.label || s.id,
+                    device: device.label || device.id,
+                    level: meta.level
+                };
+            })
+            .filter(Boolean);
+
+        if (!low.length) {
+            this.linesBatteryAlert.hidden = true;
+            this.linesBatteryAlert.textContent = '';
+            return;
+        }
+
+        const parts = low.map((row) => `${row.line} (${row.device}: ${row.level}%)`);
+        this.linesBatteryAlert.hidden = false;
+        this.linesBatteryAlert.textContent =
+            low.length === 1
+                ? `Batería baja (< ${threshold}%): ${parts[0]}`
+                : `Batería baja (< ${threshold}%): ${parts.join(' · ')}`;
     }
 
     setAndroidTestStatus(message, type = 'info') {
@@ -148,9 +236,15 @@ class CVAnalyzer {
                 this.androidDevicesList.innerHTML = devices
                     .map((d) => {
                         const on = onlineIds.has(d.id);
+                        const bat = this.batteryMetaForDevice(d);
+                        const batClass = `android-device-battery${
+                            bat.known ? (bat.isLow ? ' is-low' : '') : ' is-unknown'
+                        }`;
+                        const batText = bat.known ? `${bat.level}%` : 'bat. —';
                         return `<div style="padding:8px 0;border-bottom:1px solid #e2e8f0;">
                             <strong>${this.escapeHtml(d.label || d.id)}</strong>
                             <span style="margin-left:8px;color:${on ? '#15803d' : '#94a3b8'};">${on ? 'online' : 'offline'}</span>
+                            <span class="${batClass}">${this.escapeHtml(batText)}</span>
                             <div style="color:#64748b;font-size:12px;">id: ${this.escapeHtml(d.id)} · sesión: ${this.escapeHtml(d.logicalSessionId || '—')} · visto: ${this.escapeHtml(d.lastSeenAt || '—')}</div>
                         </div>`;
                     })
@@ -167,19 +261,22 @@ class CVAnalyzer {
                 this.androidTestDeviceSelect.innerHTML =
                     '<option value="">— Celular online —</option>' +
                     online
-                        .map(
-                            (d) =>
-                                `<option value="${this.escapeHtml(d.id)}">${this.escapeHtml(d.label || d.id)}</option>`
-                        )
+                        .map((d) => {
+                            const bat = this.batteryMetaForDevice(d);
+                            const batSuffix = bat.known ? ` · ${bat.level}%` : '';
+                            return `<option value="${this.escapeHtml(d.id)}">${this.escapeHtml(d.label || d.id)}${this.escapeHtml(batSuffix)}</option>`;
+                        })
                         .join('');
                 if (prev && online.some((d) => d.id === prev)) {
                     this.androidTestDeviceSelect.value = prev;
                 }
             }
-            // Refrescar selects de vínculo en tarjetas de línea
-            if (this.isSuperUser()) {
+            this.updateLinesBatteryBanner();
+            // Refrescar pastillas / selects con batería actualizada
+            if (this.lineUsersList) {
                 this.renderLineUsersList();
             }
+            this.startAndroidDevicesPolling();
         } catch (err) {
             if (!silent) this.showStatus(err.message, 'error');
         }
@@ -387,6 +484,12 @@ class CVAnalyzer {
     renderLinePillHtml(session, opts = {}) {
         const meta = this.lineChannelMeta(session);
         const conn = this.connectionBadgeForSession(session.id);
+        const batteryBadge = this.lineBatteryBadgeHtml(session);
+        const device =
+            session.outreachChannel === 'android'
+                ? this.getAndroidDeviceById(session.androidDeviceId)
+                : null;
+        const batteryLow = this.batteryMetaForDevice(device).isLow;
         const offline =
             !this.testMode &&
             this.openwaConnectionBySession?.[session.id] &&
@@ -419,7 +522,7 @@ class CVAnalyzer {
                 : '';
 
         return `
-            <div class="line-pill${offline ? ' is-offline' : ''}"
+            <div class="line-pill${offline ? ' is-offline' : ''}${batteryLow ? ' is-battery-low' : ''}"
                 draggable="true"
                 data-session-id="${this.escapeHtml(session.id)}"
                 data-from-user-id="${this.escapeHtml(userId)}"
@@ -429,6 +532,7 @@ class CVAnalyzer {
                     <span class="line-pill-badges">
                         <span class="${conn.className}" data-conn-badge="1">${this.escapeHtml(conn.text)}</span>
                         <span class="line-pill-channel ${meta.chipClass}">${meta.chipLabel}</span>
+                        ${batteryBadge}
                     </span>
                 </div>
                 <div class="line-pill-sender line-pill-open">Remitente: ${this.escapeHtml(meta.sender)}</div>
@@ -459,8 +563,10 @@ class CVAnalyzer {
                 '<option value="">— Sin celular Android —</option>',
                 ...(this.androidDevices || []).map((d) => {
                     const on = this.androidOnlineIds?.has?.(d.id);
+                    const bat = this.batteryMetaForDevice(d);
+                    const batSuffix = bat.known ? ` · ${bat.level}%` : '';
                     const selected = session.androidDeviceId === d.id ? 'selected' : '';
-                    return `<option value="${this.escapeHtml(d.id)}" ${selected}>${this.escapeHtml(d.label || d.id)}${on ? ' (online)' : ''}</option>`;
+                    return `<option value="${this.escapeHtml(d.id)}" ${selected}>${this.escapeHtml(d.label || d.id)}${on ? ' (online)' : ''}${this.escapeHtml(batSuffix)}</option>`;
                 })
             ].join('');
         }
@@ -560,6 +666,7 @@ class CVAnalyzer {
             this.lineUsersList.innerHTML = isSuper
                 ? '<p style="font-size:13px;color:#64748b;">Aún no hay líneas. Agrégalas con el picker de OpenWA abajo.</p>'
                 : '<p style="font-size:13px;color:#64748b;">No tienes líneas asignadas.</p>';
+            this.updateLinesBatteryBanner();
             return;
         }
 
@@ -575,27 +682,40 @@ class CVAnalyzer {
                     const accessLabel = access === 'control' ? 'Control' : 'Solo ver';
                     const meta = this.lineChannelMeta(session);
                     const conn = this.connectionBadgeForSession(session.id);
+                    const androidDevice = this.getAndroidDeviceById(session.androidDeviceId);
                     const androidLabel = session.androidDeviceId
-                        ? (this.androidDevices || []).find((d) => d.id === session.androidDeviceId)?.label ||
-                          session.androidDeviceId
+                        ? (androidDevice?.label || session.androidDeviceId)
                         : '—';
+                    const batteryBadge = this.lineBatteryBadgeHtml(session);
+                    const batMeta =
+                        session.outreachChannel === 'android'
+                            ? this.batteryMetaForDevice(androidDevice)
+                            : null;
+                    const batteryLine =
+                        batMeta && batMeta.known
+                            ? ` · Batería: ${batMeta.level}%`
+                            : session.outreachChannel === 'android'
+                              ? ' · Batería: —'
+                              : '';
                     return `
-                <div class="line-card" data-session-id="${this.escapeHtml(session.id)}">
+                <div class="line-card${batMeta?.isLow ? ' is-battery-low' : ''}" data-session-id="${this.escapeHtml(session.id)}">
                     <div class="line-card-header">
                         <div class="line-card-title">
                             <strong>${this.escapeHtml(session.label || session.id)}</strong>
                             <span class="${conn.className}" data-conn-badge="1">${this.escapeHtml(conn.text)}</span>
                             <span class="session-access-badge session-access-${access}">${accessLabel}</span>
                             <span class="line-pill-channel ${meta.chipClass}">${meta.chipLabel}</span>
+                            ${batteryBadge}
                         </div>
                         <code class="line-card-code">${this.escapeHtml(session.openwaSessionId || '')}</code>
                     </div>
                     <div style="font-size:12px;color:#64748b;margin-top:8px;">
-                        Remitente: ${this.escapeHtml(meta.sender)} · Celular: ${this.escapeHtml(androidLabel)}
+                        Remitente: ${this.escapeHtml(meta.sender)} · Celular: ${this.escapeHtml(androidLabel)}${this.escapeHtml(batteryLine)}
                     </div>
                 </div>`;
                 })
                 .join('');
+            this.updateLinesBatteryBanner();
             this.refreshOpenWAConnectionStatuses({ silent: true });
             this.startConnectionStatusPolling();
             return;
@@ -659,6 +779,7 @@ class CVAnalyzer {
 
         this.lineUsersList.innerHTML = `<div class="lines-kanban-board">${columnsHtml.join('')}</div>`;
         this.attachKanbanBoardEvents();
+        this.updateLinesBatteryBanner();
         this.refreshOpenWAConnectionStatuses({ silent: true });
         this.startConnectionStatusPolling();
     }

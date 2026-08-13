@@ -56,6 +56,8 @@ function writeStore(data) {
   fs.writeFileSync(STORE_FILE, JSON.stringify(normalizeStore(data), null, 2), 'utf8');
 }
 
+const BATTERY_LOW_THRESHOLD = 20;
+
 function getConfig() {
   const store = readStore();
   return {
@@ -65,9 +67,35 @@ function getConfig() {
 }
 
 /**
- * @param {{ label: string, logicalSessionId?: string|null, deviceId?: string|null }} opts
+ * Nivel de batería 0–100. -1 u otros inválidos → null (no pisa un valor previo).
+ * @param {unknown} value
+ * @returns {number|null}
  */
-function registerDevice({ label, logicalSessionId = null, deviceId = null } = {}) {
+function normalizeBatteryLevel(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.round(n);
+  if (i < 0 || i > 100) return null;
+  return i;
+}
+
+function applyBatteryLevel(device, batteryLevel, nowIso) {
+  const level = normalizeBatteryLevel(batteryLevel);
+  if (level === null || !device) return;
+  device.batteryLevel = level;
+  device.batteryUpdatedAt = nowIso;
+}
+
+/**
+ * @param {{ label: string, logicalSessionId?: string|null, deviceId?: string|null, batteryLevel?: number|null }} opts
+ */
+function registerDevice({
+  label,
+  logicalSessionId = null,
+  deviceId = null,
+  batteryLevel = null
+} = {}) {
   const store = readStore();
   const now = new Date().toISOString();
   const cleanLabel = String(label || '').trim() || 'Android';
@@ -83,6 +111,7 @@ function registerDevice({ label, logicalSessionId = null, deviceId = null } = {}
     if (sessionId) device.logicalSessionId = sessionId;
     device.lastSeenAt = now;
     device.status = 'online';
+    applyBatteryLevel(device, batteryLevel, now);
   } else {
     device = {
       id: newId(),
@@ -91,8 +120,11 @@ function registerDevice({ label, logicalSessionId = null, deviceId = null } = {}
       status: 'online',
       lastSeenAt: now,
       lastJobAt: null,
-      createdAt: now
+      createdAt: now,
+      batteryLevel: null,
+      batteryUpdatedAt: null
     };
+    applyBatteryLevel(device, batteryLevel, now);
     store.devices.push(device);
   }
 
@@ -110,12 +142,18 @@ function getDevice(deviceId) {
   return readStore().devices.find((d) => d.id === id) || null;
 }
 
-function heartbeat(deviceId) {
+/**
+ * @param {string} deviceId
+ * @param {{ batteryLevel?: number|null }} [opts]
+ */
+function heartbeat(deviceId, opts = {}) {
   const store = readStore();
   const device = store.devices.find((d) => d.id === String(deviceId || '').trim());
   if (!device) return null;
-  device.lastSeenAt = new Date().toISOString();
+  const now = new Date().toISOString();
+  device.lastSeenAt = now;
   device.status = 'online';
+  applyBatteryLevel(device, opts.batteryLevel, now);
   writeStore(store);
   return { ...device };
 }
@@ -427,6 +465,8 @@ module.exports = {
   JOB_STATUS,
   DEFAULT_MIN_INTERVAL_MS,
   DEFAULT_CLAIM_TIMEOUT_MS,
+  BATTERY_LOW_THRESHOLD,
+  normalizeBatteryLevel,
   getConfig,
   registerDevice,
   listDevices,

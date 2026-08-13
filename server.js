@@ -2504,7 +2504,8 @@ app.post('/api/android/devices/register', (req, res) => {
     const device = androidGatewayStore.registerDevice({
       label: req.body?.label,
       logicalSessionId: req.body?.logicalSessionId || null,
-      deviceId: req.body?.deviceId || null
+      deviceId: req.body?.deviceId || null,
+      batteryLevel: req.body?.batteryLevel
     });
     res.json({ success: true, device, config: androidGatewayStore.getConfig() });
   } catch (err) {
@@ -2515,7 +2516,9 @@ app.post('/api/android/devices/register', (req, res) => {
 app.post('/api/android/devices/:id/heartbeat', (req, res) => {
   try {
     if (!requireAndroidToken(req, res)) return;
-    const device = androidGatewayStore.heartbeat(req.params.id);
+    const device = androidGatewayStore.heartbeat(req.params.id, {
+      batteryLevel: req.body?.batteryLevel
+    });
     if (!device) return res.status(404).json({ error: 'device_not_found' });
     res.json({ success: true, device });
   } catch (err) {

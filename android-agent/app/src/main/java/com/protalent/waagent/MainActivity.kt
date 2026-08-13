@@ -53,6 +53,13 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Guardado", Toast.LENGTH_SHORT).show()
         }
 
+        val getBatteryLevel = {
+            val intent = registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+            val level = intent?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1
+            if (level >= 0 && scale > 0) (level * 100 / scale) else -1
+        }
+
         findViewById<Button>(R.id.registerBtn).setOnClickListener {
             Prefs.save(
                 this,
@@ -62,13 +69,15 @@ class MainActivity : AppCompatActivity() {
                 sessionId.text.toString(),
                 getSelectedPkg()
             )
+            val battery = getBatteryLevel()
             thread {
                 try {
                     val api = ApiClient(Prefs.serverUrl(this), Prefs.token(this))
                     val res = api.register(
                         Prefs.label(this),
                         Prefs.sessionId(this).ifBlank { null },
-                        Prefs.deviceId(this).ifBlank { null }
+                        Prefs.deviceId(this).ifBlank { null },
+                        battery
                     )
                     val id = res.getJSONObject("device").getString("id")
                     Prefs.setDeviceId(this, id)
