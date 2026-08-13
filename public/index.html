@@ -94,6 +94,23 @@
                             <button type="button" id="androidTestSendBtn" class="btn btn-primary">Enviar prueba ProTalent</button>
                         </div>
                         <p id="androidTestSendStatus" class="users-form-status" style="display: none; margin-top: 8px;"></p>
+
+                        <div style="margin-top: 18px; padding-top: 14px; border-top: 1px dashed #e2e8f0;">
+                            <h4 style="font-size: 0.95rem; margin: 0 0 8px;">Asalto (juego interno)</h4>
+                            <p style="font-size: 12px; color: #64748b; margin-bottom: 10px;">
+                                Todos los celulares <strong>online</strong> mandan el mismo mensaje al número de abajo, en cascada.
+                                Solo para bromas internas (ej. tu socio).
+                            </p>
+                            <textarea id="androidRaidMessage" class="form-select" rows="3" style="width: 100%; max-width: 560px; padding: 8px; resize: vertical;" placeholder="Mensaje del asalto…">¡Sorpresa! Te saludan todas las líneas de ProTalent a la vez </textarea>
+                            <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px;">
+                                <label style="font-size: 12px; color: #64748b; display: flex; align-items: center; gap: 6px;">
+                                    Delay (s)
+                                    <input type="number" id="androidRaidDelaySec" class="form-select" min="3" max="30" value="8" style="width: 72px; padding: 8px;">
+                                </label>
+                                <button type="button" id="androidRaidSendBtn" class="btn btn-secondary">Asaltar con todos los online</button>
+                            </div>
+                            <p id="androidRaidSendStatus" class="users-form-status" style="display: none; margin-top: 8px;"></p>
+                        </div>
                     </div>
                 </section>
 

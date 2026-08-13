@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
@@ -2605,6 +2606,46 @@ app.post('/api/android/jobs/:id/result', (req, res) => {
 const DEFAULT_ANDROID_TEST_MESSAGE =
   'Hola, este es un mensaje de prueba de ProTalent Connections. Si lo recibiste, la línea Android está funcionando correctamente.';
 
+const DEFAULT_ANDROID_RAID_MESSAGE =
+  '¡Sorpresa! Te saludan todas las líneas de ProTalent a la vez ';
+
+function buildAndroidOutboundMessage(device, mensaje) {
+  let finalMessage = String(mensaje || '').trim();
+  if (!finalMessage) return '';
+  if (device && device.logicalSessionId) {
+    const senderName = sessionsStore.getSessionSenderName(device.logicalSessionId);
+    if (senderName && !/Atte:/i.test(finalMessage)) {
+      finalMessage = `${finalMessage}\n\nAtte:\n${senderName}`;
+    } else if (senderName) {
+      const { applySenderName } = require('./messageSignature');
+      finalMessage = applySenderName(finalMessage, senderName);
+    }
+  }
+  return finalMessage;
+}
+
+function enqueueAndroidTestJob(device, telefono, mensaje, metaExtra = {}) {
+  const finalMessage = buildAndroidOutboundMessage(device, mensaje);
+  const [job] = androidGatewayStore.enqueueJobs(
+    [
+      {
+        telefono,
+        mensaje: finalMessage,
+        nombre: metaExtra.nombre || 'Prueba ProTalent',
+        meta: {
+          test: true,
+          bypassInterval: true,
+          source: metaExtra.source || 'admin_test',
+          logicalSessionId: device.logicalSessionId || null,
+          ...metaExtra.meta
+        }
+      }
+    ],
+    [device.id]
+  );
+  return job;
+}
+
 app.post('/api/android/test-send', requireSuper, (req, res) => {
   try {
     const deviceId = String(req.body?.deviceId || '').trim();
@@ -2633,39 +2674,84 @@ app.post('/api/android/test-send', requireSuper, (req, res) => {
       });
     }
 
-    let finalMessage = mensaje;
-    if (device.logicalSessionId) {
-      const senderName = sessionsStore.getSessionSenderName(device.logicalSessionId);
-      if (senderName && !/Atte:/i.test(finalMessage)) {
-        finalMessage = `${finalMessage}\n\nAtte:\n${senderName}`;
-      } else if (senderName) {
-        const { applySenderName } = require('./messageSignature');
-        finalMessage = applySenderName(finalMessage, senderName);
-      }
-    }
-
-    const [job] = androidGatewayStore.enqueueJobs(
-      [
-        {
-          telefono,
-          mensaje: finalMessage,
-          nombre: 'Prueba ProTalent',
-          meta: {
-            test: true,
-            bypassInterval: true,
-            source: 'admin_test',
-            logicalSessionId: device.logicalSessionId || null
-          }
-        }
-      ],
-      [deviceId]
-    );
+    const job = enqueueAndroidTestJob(device, telefono, mensaje);
 
     res.json({
       success: true,
       message: 'Prueba encolada. El celular debería abrir WhatsApp en unos segundos.',
       job,
       device: { id: device.id, label: device.label }
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code || null });
+  }
+});
+
+/**
+ * Asalto interno: todos los Android online mandan el mismo mensaje al mismo número, en cascada.
+ * Body: { telefono, mensaje?, delaySec? }
+ */
+app.post('/api/android/raid-send', requireSuper, (req, res) => {
+  try {
+    const telefono = String(req.body?.telefono || '').replace(/\D/g, '');
+    const mensaje = String(req.body?.mensaje || DEFAULT_ANDROID_RAID_MESSAGE).trim();
+    let delaySec = parseInt(req.body?.delaySec, 10);
+    if (!Number.isFinite(delaySec)) delaySec = 8;
+    delaySec = Math.min(Math.max(delaySec, 3), 30);
+    const delayMs = delaySec * 1000;
+
+    if (telefono.length < 10) {
+      return res.status(400).json({ error: 'Teléfono destino inválido (mín. 10 dígitos)' });
+    }
+    if (!mensaje) {
+      return res.status(400).json({ error: 'Mensaje vacío' });
+    }
+
+    const online = androidGatewayStore.pickOnlineDevices({ maxAgeMs: 3 * 60 * 1000 });
+    if (!online.length) {
+      return res.status(409).json({
+        error: 'No hay celulares Android online. Abre WA Agent e Iniciar agente.'
+      });
+    }
+
+    const raidId = crypto.randomBytes(6).toString('hex');
+    const scheduled = online.map((device, index) => ({
+      deviceId: device.id,
+      label: device.label || device.id,
+      enqueueAfterMs: index * delayMs
+    }));
+
+    online.forEach((device, index) => {
+      const run = () => {
+        try {
+          const job = enqueueAndroidTestJob(device, telefono, mensaje, {
+            nombre: 'Asalto ProTalent',
+            source: 'admin_raid',
+            meta: { raid: true, raidId, raidIndex: index, raidTotal: online.length }
+          });
+          console.log(
+            `[android] raid ${raidId} encolado ${index + 1}/${online.length} device=${device.id} job=${job?.id || '?'}`
+          );
+        } catch (err) {
+          console.warn(
+            `[android] raid ${raidId} falló device=${device.id}:`,
+            err.message || err
+          );
+        }
+      };
+      if (index === 0) run();
+      else setTimeout(run, index * delayMs);
+    });
+
+    const totalSec = Math.round(((online.length - 1) * delayMs) / 1000);
+    res.json({
+      success: true,
+      raidId,
+      count: online.length,
+      delaySec,
+      telefono,
+      scheduled,
+      message: `Asalto en marcha: ${online.length} celular(es), delay ${delaySec}s (~${totalSec}s hasta el último).`
     });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message, code: err.code || null });

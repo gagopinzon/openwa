@@ -67,6 +67,10 @@ class CVAnalyzer {
         this.androidTestPhone = document.getElementById('androidTestPhone');
         this.androidTestSendBtn = document.getElementById('androidTestSendBtn');
         this.androidTestSendStatus = document.getElementById('androidTestSendStatus');
+        this.androidRaidMessage = document.getElementById('androidRaidMessage');
+        this.androidRaidDelaySec = document.getElementById('androidRaidDelaySec');
+        this.androidRaidSendBtn = document.getElementById('androidRaidSendBtn');
+        this.androidRaidSendStatus = document.getElementById('androidRaidSendStatus');
         this.linesBatteryAlert = document.getElementById('linesBatteryAlert');
         this._androidDevicesPollMs = 30000;
         this._androidBatteryLowThreshold = 20;
@@ -77,6 +81,9 @@ class CVAnalyzer {
         }
         if (this.androidTestSendBtn) {
             this.androidTestSendBtn.addEventListener('click', () => this.sendAndroidTestMessage());
+        }
+        if (this.androidRaidSendBtn) {
+            this.androidRaidSendBtn.addEventListener('click', () => this.sendAndroidRaidMessage());
         }
     }
 
@@ -220,6 +227,70 @@ class CVAnalyzer {
         this.androidTestSendStatus.textContent = message || '';
         this.androidTestSendStatus.style.color =
             type === 'error' ? '#b91c1c' : type === 'success' ? '#15803d' : '#64748b';
+    }
+
+    setAndroidRaidStatus(message, type = 'info') {
+        if (!this.androidRaidSendStatus) return;
+        this.androidRaidSendStatus.style.display = message ? 'block' : 'none';
+        this.androidRaidSendStatus.textContent = message || '';
+        this.androidRaidSendStatus.style.color =
+            type === 'error' ? '#b91c1c' : type === 'success' ? '#15803d' : '#64748b';
+    }
+
+    async sendAndroidRaidMessage() {
+        if (!this.isSuperUser()) {
+            this.setAndroidRaidStatus('Solo el admin puede lanzar el asalto', 'error');
+            return;
+        }
+        const telefono = (this.androidTestPhone?.value || '').trim();
+        const mensaje = (this.androidRaidMessage?.value || '').trim();
+        const delaySec = Number(this.androidRaidDelaySec?.value) || 8;
+        const onlineCount = (this.androidOnlineIds && this.androidOnlineIds.size) || 0;
+
+        if (!telefono) {
+            this.setAndroidRaidStatus('Escribe el teléfono destino arriba (campo de prueba)', 'error');
+            return;
+        }
+        if (!mensaje) {
+            this.setAndroidRaidStatus('Escribe el mensaje del asalto', 'error');
+            return;
+        }
+        if (onlineCount < 1) {
+            this.setAndroidRaidStatus('No hay celulares online. Actualiza dispositivos.', 'error');
+            return;
+        }
+
+        const ok = window.confirm(
+            `¿Asaltar a ${telefono} con ${onlineCount} celular(es) online?\n` +
+                `Delay: ${delaySec}s entre cada uno.\n` +
+                `Mensaje: ${mensaje.slice(0, 120)}${mensaje.length > 120 ? '…' : ''}`
+        );
+        if (!ok) return;
+
+        this.androidRaidSendBtn.disabled = true;
+        this.setAndroidRaidStatus('Lanzando asalto…', 'info');
+        try {
+            const res = await fetch('/api/android/raid-send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ telefono, mensaje, delaySec })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.success === false) {
+                this.setAndroidRaidStatus(data.error || 'Error al lanzar asalto', 'error');
+                return;
+            }
+            const names = (data.scheduled || []).map((s) => s.label).join(', ');
+            this.setAndroidRaidStatus(
+                `${data.message || 'Asalto en marcha'}${names ? ` → ${names}` : ''}`,
+                'success'
+            );
+            this.showStatus(`Asalto Android: ${data.count || onlineCount} envíos en cascada`, 'success');
+        } catch (err) {
+            this.setAndroidRaidStatus(err.message, 'error');
+        } finally {
+            this.androidRaidSendBtn.disabled = false;
+        }
     }
 
     async sendAndroidTestMessage() {
