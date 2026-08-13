@@ -56,8 +56,25 @@ function defaultConfig() {
     rules: DEFAULT_RULES.map((r) => ({ ...r, keywords: [...r.keywords] })),
     /** null = todas las líneas; array = solo esas logicalSessionId */
     enabledSessionIds: null,
-    webhookIdsBySession: {}
+    webhookIdsBySession: {},
+    /** Límites de "escribiendo…" (ms). null = usar .env / defaults del servicio */
+    minDelayMs: null,
+    maxDelayMs: null
   };
+}
+
+function clampDelayMs(value, fallback = null) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.min(300000, n);
+}
+
+function normalizeDelayPair(minDelayMs, maxDelayMs) {
+  const min = clampDelayMs(minDelayMs, null);
+  let max = clampDelayMs(maxDelayMs, null);
+  if (min != null && max != null && max < min) max = min;
+  return { minDelayMs: min, maxDelayMs: max };
 }
 
 function readConfig() {
@@ -76,6 +93,8 @@ function readConfig() {
         ? null
         : normalizeSessionIds(parsed.enabledSessionIds);
 
+    const delays = normalizeDelayPair(parsed.minDelayMs, parsed.maxDelayMs);
+
     return {
       ...base,
       ...parsed,
@@ -84,7 +103,9 @@ function readConfig() {
       webhookIdsBySession:
         parsed.webhookIdsBySession && typeof parsed.webhookIdsBySession === 'object'
           ? parsed.webhookIdsBySession
-          : {}
+          : {},
+      minDelayMs: delays.minDelayMs,
+      maxDelayMs: delays.maxDelayMs
     };
   } catch {
     return defaultConfig();
@@ -107,7 +128,9 @@ function getPublicConfig() {
     basePrompt: cfg.basePrompt,
     rules: cfg.rules,
     enabledSessionIds: cfg.enabledSessionIds,
-    webhookIdsBySession: cfg.webhookIdsBySession
+    webhookIdsBySession: cfg.webhookIdsBySession,
+    minDelayMs: cfg.minDelayMs,
+    maxDelayMs: cfg.maxDelayMs
   };
 }
 
@@ -124,7 +147,7 @@ function isSessionEnabled(logicalSessionId, cfg = null) {
 }
 
 /**
- * @param {{ enabled?: boolean, basePrompt?: string, rules?: Array, enabledSessionIds?: string[]|null }} patch
+ * @param {{ enabled?: boolean, basePrompt?: string, rules?: Array, enabledSessionIds?: string[]|null, minDelayMs?: number|null, maxDelayMs?: number|null }} patch
  */
 function updateConfig(patch) {
   const cfg = readConfig();
@@ -134,6 +157,14 @@ function updateConfig(patch) {
   if (patch.enabledSessionIds !== undefined) {
     cfg.enabledSessionIds =
       patch.enabledSessionIds === null ? null : normalizeSessionIds(patch.enabledSessionIds);
+  }
+  if (patch.minDelayMs !== undefined || patch.maxDelayMs !== undefined) {
+    const delays = normalizeDelayPair(
+      patch.minDelayMs !== undefined ? patch.minDelayMs : cfg.minDelayMs,
+      patch.maxDelayMs !== undefined ? patch.maxDelayMs : cfg.maxDelayMs
+    );
+    cfg.minDelayMs = delays.minDelayMs;
+    cfg.maxDelayMs = delays.maxDelayMs;
   }
   if (Array.isArray(patch.rules)) {
     cfg.rules = patch.rules.map((rule) => ({

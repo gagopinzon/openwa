@@ -54,13 +54,21 @@ function shouldAllowGreeting(lastAiGreetingAt, now = new Date()) {
 }
 
 function getMinDelayMs() {
+  const cfg = autoReplyStore.getConfig();
+  if (cfg.minDelayMs != null && Number.isFinite(cfg.minDelayMs) && cfg.minDelayMs >= 0) {
+    return cfg.minDelayMs;
+  }
   const v = parseInt(process.env.AUTO_REPLY_MIN_DELAY_MS || '3000', 10);
   return Number.isFinite(v) && v >= 0 ? v : 3000;
 }
 
 function getMaxDelayMs() {
-  const v = parseInt(process.env.AUTO_REPLY_MAX_DELAY_MS || '35000', 10);
   const min = getMinDelayMs();
+  const cfg = autoReplyStore.getConfig();
+  if (cfg.maxDelayMs != null && Number.isFinite(cfg.maxDelayMs) && cfg.maxDelayMs >= min) {
+    return cfg.maxDelayMs;
+  }
+  const v = parseInt(process.env.AUTO_REPLY_MAX_DELAY_MS || '35000', 10);
   return Number.isFinite(v) && v >= min ? v : Math.max(min, 35000);
 }
 
@@ -81,7 +89,7 @@ function sleep(ms) {
 /**
  * Tiempo de "escribiendo…" según longitud del mensaje.
  * ~200ms/char → un párrafo de ~150 caracteres ≈ 30s (+ base).
- * Respeta AUTO_REPLY_MIN/MAX_DELAY_MS.
+ * Respeta min/max desde auto-reply-config.json o AUTO_REPLY_MIN/MAX_DELAY_MS.
  * @param {string} text
  * @returns {number}
  */

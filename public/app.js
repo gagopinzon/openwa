@@ -38,6 +38,7 @@ class CVAnalyzer {
             await this.loadSessions();
             await this.refreshCvsFromServer({ silent: true });
             await this.refreshSendQueue();
+            await this.loadSendSettings();
             if (this.isSuperUser() || this.getControllableSessions().length > 0) {
                 this.loadAutoReplyStatus();
                 this.loadAutoReplyConfig();
@@ -1064,11 +1065,20 @@ class CVAnalyzer {
         this.autoReplyRulesList = document.getElementById('autoReplyRulesList');
         this.addAutoReplyRuleBtn = document.getElementById('addAutoReplyRuleBtn');
         this.saveAutoReplyConfigBtn = document.getElementById('saveAutoReplyConfigBtn');
+        this.autoReplyMinDelaySec = document.getElementById('autoReplyMinDelaySec');
+        this.autoReplyMaxDelaySec = document.getElementById('autoReplyMaxDelaySec');
         this.autoReplyConversations = document.getElementById('autoReplyConversations');
         this.autoReplySessionsList = document.getElementById('autoReplySessionsList');
         this.autoReplyGlobalBadge = document.getElementById('autoReplyGlobalBadge');
         this.autoReplyUserHint = document.getElementById('autoReplyUserHint');
         this.autoReplyEnabledSessionIds = null; // null = todas
+        this.sendDelayMinMin = document.getElementById('sendDelayMinMin');
+        this.sendDelayMaxMin = document.getElementById('sendDelayMaxMin');
+        this.saveSendDelayBtn = document.getElementById('saveSendDelayBtn');
+        this.sendDelaySettings = {
+            minDelaySec: 60,
+            maxDelaySec: 300
+        };
         this.incomingInboxList = document.getElementById('incomingInboxList');
         this.incomingInboxCount = document.getElementById('incomingInboxCount');
         this.refreshIncomingInboxBtn = document.getElementById('refreshIncomingInboxBtn');
@@ -1123,6 +1133,9 @@ class CVAnalyzer {
     attachAutoReplyListeners() {
         if (this.saveAutoReplyConfigBtn) {
             this.saveAutoReplyConfigBtn.addEventListener('click', () => this.saveAutoReplyConfig());
+        }
+        if (this.saveSendDelayBtn) {
+            this.saveSendDelayBtn.addEventListener('click', () => this.saveSendSettings());
         }
         if (this.addAutoReplyRuleBtn) {
             this.addAutoReplyRuleBtn.addEventListener('click', () => this.addAutoReplyRule());
@@ -3019,6 +3032,78 @@ class CVAnalyzer {
         }
     }
 
+    formatSendDelayRangeLabel(minSec, maxSec) {
+        const fmt = (sec) => {
+            const s = Math.max(0, Number(sec) || 0);
+            if (s % 60 === 0) {
+                const m = s / 60;
+                return `${m} min`;
+            }
+            if (s < 60) return `${s}s`;
+            const m = Math.floor(s / 60);
+            const r = s % 60;
+            return `${m}m ${r}s`;
+        };
+        return `${fmt(minSec)}–${fmt(maxSec)}`;
+    }
+
+    applySendSettingsToInputs(settings) {
+        const minSec = Number(settings?.minDelaySec) || 60;
+        const maxSec = Math.max(minSec, Number(settings?.maxDelaySec) || 300);
+        this.sendDelaySettings = { minDelaySec: minSec, maxDelaySec: maxSec };
+        if (this.sendDelayMinMin) {
+            this.sendDelayMinMin.value = String(Math.round((minSec / 60) * 10) / 10);
+        }
+        if (this.sendDelayMaxMin) {
+            this.sendDelayMaxMin.value = String(Math.round((maxSec / 60) * 10) / 10);
+        }
+    }
+
+    async loadSendSettings() {
+        try {
+            const response = await fetch('/api/send-settings');
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'Error cargando intervalo');
+            this.applySendSettingsToInputs(data.settings || {});
+        } catch (error) {
+            console.error('Error cargando send-settings:', error);
+            this.applySendSettingsToInputs(this.sendDelaySettings);
+        }
+    }
+
+    async saveSendSettings() {
+        try {
+            const minMin = parseFloat(this.sendDelayMinMin?.value);
+            const maxMin = parseFloat(this.sendDelayMaxMin?.value);
+            if (!Number.isFinite(minMin) || !Number.isFinite(maxMin)) {
+                throw new Error('Indica mínimo y máximo válidos (en minutos)');
+            }
+            if (minMin <= 0 || maxMin <= 0) {
+                throw new Error('El intervalo debe ser mayor a 0');
+            }
+            if (maxMin < minMin) {
+                throw new Error('El máximo debe ser ≥ al mínimo');
+            }
+            const minDelaySec = Math.round(minMin * 60);
+            const maxDelaySec = Math.round(maxMin * 60);
+            const response = await fetch('/api/send-settings', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ minDelaySec, maxDelaySec })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo guardar');
+            this.applySendSettingsToInputs(data.settings || {});
+            const label = this.formatSendDelayRangeLabel(
+                this.sendDelaySettings.minDelaySec,
+                this.sendDelaySettings.maxDelaySec
+            );
+            this.showStatus(`Intervalo guardado: ${label} entre mensajes`, 'success');
+        } catch (error) {
+            this.showStatus(error.message, 'error');
+        }
+    }
+
     async loadAutoReplyConfig() {
         try {
             const response = await fetch('/api/auto-reply/config');
@@ -3037,6 +3122,20 @@ class CVAnalyzer {
             }
             if (this.autoReplyEnabledToggle) {
                 this.autoReplyEnabledToggle.checked = Boolean(config.enabled);
+            }
+            const minMs =
+                config.minDelayMs != null && Number.isFinite(Number(config.minDelayMs))
+                    ? Number(config.minDelayMs)
+                    : 3000;
+            const maxMs =
+                config.maxDelayMs != null && Number.isFinite(Number(config.maxDelayMs))
+                    ? Number(config.maxDelayMs)
+                    : 35000;
+            if (this.autoReplyMinDelaySec) {
+                this.autoReplyMinDelaySec.value = String(Math.round(minMs / 1000));
+            }
+            if (this.autoReplyMaxDelaySec) {
+                this.autoReplyMaxDelaySec.value = String(Math.round(maxMs / 1000));
             }
             this.renderAutoReplyRules();
             this.renderAutoReplySessions();
@@ -3189,6 +3288,8 @@ class CVAnalyzer {
 
     async saveAutoReplyConfig(options = {}) {
         try {
+            const minSec = parseInt(this.autoReplyMinDelaySec?.value, 10);
+            const maxSec = parseInt(this.autoReplyMaxDelaySec?.value, 10);
             const payload = {
                 enabled: this.autoReplyEnabledToggle ? this.autoReplyEnabledToggle.checked : false,
                 basePrompt: this.autoReplyBasePrompt ? this.autoReplyBasePrompt.value : '',
@@ -3199,6 +3300,18 @@ class CVAnalyzer {
             };
             if (options.enabledOnly) {
                 payload.rules = this.autoReplyRules;
+            } else {
+                if (!Number.isFinite(minSec) || minSec < 0) {
+                    throw new Error('Mínimo de “escribiendo…” inválido');
+                }
+                if (!Number.isFinite(maxSec) || maxSec < 1) {
+                    throw new Error('Máximo de “escribiendo…” inválido');
+                }
+                if (maxSec < minSec) {
+                    throw new Error('El máximo de “escribiendo…” debe ser ≥ al mínimo');
+                }
+                payload.minDelayMs = minSec * 1000;
+                payload.maxDelayMs = maxSec * 1000;
             }
             const response = await fetch('/api/auto-reply/config', {
                 method: 'PUT',
@@ -3216,6 +3329,16 @@ class CVAnalyzer {
             if (!options.enabledOnly) {
                 this.renderAutoReplyRules();
                 this.renderAutoReplySessions();
+                if (this.autoReplyMinDelaySec && data.config.minDelayMs != null) {
+                    this.autoReplyMinDelaySec.value = String(
+                        Math.round(Number(data.config.minDelayMs) / 1000)
+                    );
+                }
+                if (this.autoReplyMaxDelaySec && data.config.maxDelayMs != null) {
+                    this.autoReplyMaxDelaySec.value = String(
+                        Math.round(Number(data.config.maxDelayMs) / 1000)
+                    );
+                }
             }
             if (!options.silent) {
                 this.showStatus('Configuración de auto-respuesta guardada', 'success');
@@ -6492,6 +6615,10 @@ class CVAnalyzer {
             return;
         }
 
+        const delayLabel = this.formatSendDelayRangeLabel(
+            this.sendDelaySettings?.minDelaySec || 60,
+            this.sendDelaySettings?.maxDelaySec || 300
+        );
         const sessionLabels = selectedSessions.map((s) => this.getSessionLabel(s)).join(', ');
         let confirmMessage = `¿Enviar ${cvsToSend.length} mensajes por WhatsApp?\n\n`;
         if (this.testMode) {
@@ -6504,10 +6631,10 @@ class CVAnalyzer {
                     weightValidation.weights
                 );
                 confirmMessage += `Reparto: ${preview.map((row) => `${this.getSessionLabel(row.id)} ${row.count}`).join(', ')}\n`;
-                confirmMessage += 'Cada línea envía su primer mensaje a la vez; luego espera 1–5 min entre mensajes.\n';
+                confirmMessage += `Cada línea envía su primer mensaje a la vez; luego espera ${delayLabel} entre mensajes.\n`;
             } else {
                 confirmMessage += `Línea: ${sessionLabels}.\n`;
-                confirmMessage += 'Delay aleatorio de 1–5 minutos entre cada mensaje.';
+                confirmMessage += `Delay aleatorio de ${delayLabel} entre cada mensaje.`;
             }
             confirmMessage += '\nAsegúrate de tener las líneas verificadas en OpenWA.';
         }

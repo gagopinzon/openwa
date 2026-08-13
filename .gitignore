@@ -12,6 +12,7 @@ data/super-profile.json
 data/agenda-offers.json
 data/agenda-pending.json
 data/auto-reply-config.json
+data/send-settings.json
 data/conversation-previews.json
 data/send-queue.json
 logs/

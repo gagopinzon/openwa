@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { extractProfileNameFromOpenWA } = require('./messageSignature');
+const { defaultThrottle } = require('./openwaThrottle');
 
 function getBaseConfig() {
   const baseUrl = (process.env.OPENWA_BASE_URL || 'https://openwa.protalentconnections.com/api').replace(
@@ -70,10 +71,6 @@ function formatPhoneToChatId(phoneNumber) {
   return `${normalized}@c.us`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isRateLimitError(status, message) {
   if (status === 429) return true;
   const msg = String(message || '');
@@ -88,26 +85,44 @@ function createOpenWAError(message, { status, code } = {}) {
 }
 
 async function openwaRequest(method, path, body, opts = {}) {
+  const methodUpper = String(method || 'GET').toUpperCase();
+  const run = () => executeOpenWARequest(methodUpper, path, body, opts);
+  if (methodUpper === 'GET') {
+    return defaultThrottle.coalesceGet(`${methodUpper} ${path}`, run);
+  }
+  return defaultThrottle.enqueue(run);
+}
+
+async function executeOpenWARequest(method, path, body, opts = {}) {
   const { baseUrl, apiKey } = getBaseConfig();
   assertOpenWAConfigured();
 
   const timeout = Number.isFinite(opts.timeout) ? opts.timeout : 30000;
   const allowRetry = opts.retry !== false;
+  const maxAttempts = allowRetry ? 3 : 1;
 
-  const response = await axios({
-    method,
-    url: `${baseUrl}${path}`,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': apiKey
-    },
-    data: body,
-    timeout,
-    validateStatus: () => true
-  });
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await defaultThrottle.waitForSlot();
+    }
 
-  const data = response.data || {};
-  if (response.status < 200 || response.status >= 300) {
+    const response = await axios({
+      method,
+      url: `${baseUrl}${path}`,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': apiKey
+      },
+      data: body,
+      timeout,
+      validateStatus: () => true
+    });
+
+    const data = response.data || {};
+    if (response.status >= 200 && response.status < 300) {
+      return data;
+    }
+
     const details =
       data.message ||
       data.error ||
@@ -117,33 +132,26 @@ async function openwaRequest(method, path, body, opts = {}) {
     if (typeof message === 'object') {
       message = JSON.stringify(message);
     }
-    // Incluir body completo en 400 para depurar validaciones
     if (response.status === 400) {
       const raw = JSON.stringify(data).slice(0, 800);
       message = `${message} | body=${raw}`;
       console.warn(`[openwa] ${method} ${path} → 400 ${raw}`);
     }
 
-    if (allowRetry && isRateLimitError(response.status, message)) {
-      const retryAfterHeader = response.headers && response.headers['retry-after'];
-      const retryAfterSec = parseInt(retryAfterHeader, 10);
-      const attempt = Number(opts._rateLimitAttempt) || 0;
-      const waitMs = Number.isFinite(retryAfterSec)
-        ? Math.min(Math.max(retryAfterSec * 1000, 2000), 30000)
-        : Math.min(4000 * (attempt + 1), 20000);
+    if (isRateLimitError(response.status, message) && attempt < maxAttempts - 1) {
+      defaultThrottle.noteRateLimited({
+        retryAfterHeader: response.headers && response.headers['retry-after']
+      });
       console.warn(
-        `[openwa] rate-limit ${method} ${path} — reintento ${attempt + 1} en ${waitMs}ms`
+        `[openwa] rate-limit ${method} ${path} — reintento ${attempt + 1} (cooldown global)`
       );
-      await sleep(waitMs);
-      if (attempt < 2) {
-        return openwaRequest(method, path, body, {
-          ...opts,
-          _rateLimitAttempt: attempt + 1
-        });
-      }
+      continue;
     }
 
     if (isRateLimitError(response.status, message)) {
+      defaultThrottle.noteRateLimited({
+        retryAfterHeader: response.headers && response.headers['retry-after']
+      });
       throw createOpenWAError(message, {
         status: 429,
         code: 'RATE_LIMIT'
@@ -152,25 +160,40 @@ async function openwaRequest(method, path, body, opts = {}) {
 
     throw createOpenWAError(message, { status: response.status });
   }
-  return data;
 }
 
-const OPENWA_CACHE_TTL_MS = 18000;
+const OPENWA_CACHE_TTL_MS = 60000;
+const OPENWA_CACHE_STALE_MS = 10 * 60 * 1000;
 const openwaCache = new Map();
 
-function getCached(key) {
+function getCached(key, { allowStale = false } = {}) {
   const entry = openwaCache.get(key);
   if (!entry) return undefined;
-  if (Date.now() > entry.expiresAt) {
+  const ts = Date.now();
+  if (ts > (entry.staleUntil || entry.expiresAt)) {
     openwaCache.delete(key);
     return undefined;
   }
+  if (!allowStale && ts > entry.expiresAt) return undefined;
   return entry.value;
 }
 
 function setCached(key, value, ttlMs = OPENWA_CACHE_TTL_MS) {
-  openwaCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  const ts = Date.now();
+  openwaCache.set(key, {
+    value,
+    expiresAt: ts + ttlMs,
+    staleUntil: ts + ttlMs + OPENWA_CACHE_STALE_MS
+  });
   return value;
+}
+
+function staleCacheOnRateLimit(cacheKey, err, label) {
+  if (!err || err.code !== 'RATE_LIMIT') return undefined;
+  const stale = getCached(cacheKey, { allowStale: true });
+  if (!stale) return undefined;
+  console.warn(`[openwa] ${label} — usando caché stale`);
+  return stale;
 }
 
 function invalidateOpenWACache({ openwaSessionId, chatId } = {}) {
@@ -427,27 +450,33 @@ async function listChats(openwaSessionId, opts = {}) {
     if (cached) return cached;
   }
 
-  const data = await openwaRequest(
-    'GET',
-    `/sessions/${openwaSessionId}/chats?${qs.toString()}`
-  );
-  const raw = Array.isArray(data) ? data : data.data || data.chats || [];
-  const chats = raw
-    .map((row) => {
-      if (!row || typeof row !== 'object') return null;
-      const id = row.id || row.chatId;
-      if (!id) return null;
-      return {
-        id: String(id),
-        name: String(row.name || row.pushName || row.chatName || id),
-        isGroup: Boolean(row.isGroup),
-        unreadCount: Number(row.unreadCount) || 0,
-        timestamp: row.timestamp != null ? Number(row.timestamp) : null,
-        lastMessage: row.lastMessage != null ? String(row.lastMessage) : ''
-      };
-    })
-    .filter(Boolean);
-  return setCached(cacheKey, chats);
+  try {
+    const data = await openwaRequest(
+      'GET',
+      `/sessions/${openwaSessionId}/chats?${qs.toString()}`
+    );
+    const raw = Array.isArray(data) ? data : data.data || data.chats || [];
+    const chats = raw
+      .map((row) => {
+        if (!row || typeof row !== 'object') return null;
+        const id = row.id || row.chatId;
+        if (!id) return null;
+        return {
+          id: String(id),
+          name: String(row.name || row.pushName || row.chatName || id),
+          isGroup: Boolean(row.isGroup),
+          unreadCount: Number(row.unreadCount) || 0,
+          timestamp: row.timestamp != null ? Number(row.timestamp) : null,
+          lastMessage: row.lastMessage != null ? String(row.lastMessage) : ''
+        };
+      })
+      .filter(Boolean);
+    return setCached(cacheKey, chats);
+  } catch (err) {
+    const stale = staleCacheOnRateLimit(cacheKey, err, `listChats sesión=${openwaSessionId}`);
+    if (stale) return stale;
+    throw err;
+  }
 }
 
 /**
@@ -520,44 +549,56 @@ async function getChatHistory(openwaSessionId, chatId, opts = {}) {
   const encoded = encodeURIComponent(String(chatId));
   const qs = new URLSearchParams({ limit: String(limit) });
   if (includeMedia) qs.set('includeMedia', 'true');
-  const data = await openwaRequest(
-    'GET',
-    `/sessions/${openwaSessionId}/messages/${encoded}/history?${qs.toString()}`,
-    undefined,
-    { timeout: includeMedia ? 120000 : 30000 }
-  );
-  const raw = Array.isArray(data) ? data : data.messages || data.data || [];
-  const messages = raw
-    .map((msg) => {
-      if (!msg || typeof msg !== 'object') return null;
-      const body = String(msg.body || msg.text || msg.caption || '').trim();
-      const type = String(msg.type || 'text');
-      const media = normalizeMediaPayload(msg);
-      return {
-        id: msg.id || msg.waMessageId || null,
-        chatId: msg.chatId || chatId,
-        from: msg.from || null,
-        to: msg.to || null,
-        body: body || (type !== 'text' ? `[${type}]` : ''),
-        type,
-        fromMe: resolveMessageFromMe(msg),
-        isGroup: Boolean(msg.isGroup),
-        timestamp: msg.timestamp != null ? Number(msg.timestamp) : null,
-        contactName:
-          (msg.contact && (msg.contact.pushName || msg.contact.name)) ||
-          msg.pushName ||
-          msg.senderName ||
-          null,
-        hasMedia: Boolean(msg.hasMedia || (media && (media.data || media.mimetype))),
-        media
-      };
-    })
-    .filter(Boolean)
-    .filter((msg) => !isUnknownPlaceholderMessage(msg));
-  if (!includeMedia) {
-    return setCached(cacheKey, messages);
+  try {
+    const data = await openwaRequest(
+      'GET',
+      `/sessions/${openwaSessionId}/messages/${encoded}/history?${qs.toString()}`,
+      undefined,
+      { timeout: includeMedia ? 120000 : 30000 }
+    );
+    const raw = Array.isArray(data) ? data : data.messages || data.data || [];
+    const messages = raw
+      .map((msg) => {
+        if (!msg || typeof msg !== 'object') return null;
+        const body = String(msg.body || msg.text || msg.caption || '').trim();
+        const type = String(msg.type || 'text');
+        const media = normalizeMediaPayload(msg);
+        return {
+          id: msg.id || msg.waMessageId || null,
+          chatId: msg.chatId || chatId,
+          from: msg.from || null,
+          to: msg.to || null,
+          body: body || (type !== 'text' ? `[${type}]` : ''),
+          type,
+          fromMe: resolveMessageFromMe(msg),
+          isGroup: Boolean(msg.isGroup),
+          timestamp: msg.timestamp != null ? Number(msg.timestamp) : null,
+          contactName:
+            (msg.contact && (msg.contact.pushName || msg.contact.name)) ||
+            msg.pushName ||
+            msg.senderName ||
+            null,
+          hasMedia: Boolean(msg.hasMedia || (media && (media.data || media.mimetype))),
+          media
+        };
+      })
+      .filter(Boolean)
+      .filter((msg) => !isUnknownPlaceholderMessage(msg));
+    if (!includeMedia) {
+      return setCached(cacheKey, messages);
+    }
+    return messages;
+  } catch (err) {
+    if (!includeMedia) {
+      const stale = staleCacheOnRateLimit(
+        cacheKey,
+        err,
+        `getChatHistory sesión=${openwaSessionId}`
+      );
+      if (stale) return stale;
+    }
+    throw err;
   }
-  return messages;
 }
 
 /**
@@ -569,40 +610,51 @@ async function downloadMessageMedia(openwaSessionId, chatId, messageId) {
   const { baseUrl, apiKey } = getBaseConfig();
   const encodedChat = encodeURIComponent(String(chatId));
   const encodedMsg = encodeURIComponent(String(messageId));
-  const response = await axios({
-    method: 'GET',
-    url: `${baseUrl}/sessions/${openwaSessionId}/messages/${encodedChat}/${encodedMsg}/media`,
-    headers: { 'X-API-Key': apiKey },
-    responseType: 'arraybuffer',
-    timeout: 60000,
-    validateStatus: () => true
-  });
+  return defaultThrottle.enqueue(async () => {
+    const response = await axios({
+      method: 'GET',
+      url: `${baseUrl}/sessions/${openwaSessionId}/messages/${encodedChat}/${encodedMsg}/media`,
+      headers: { 'X-API-Key': apiKey },
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      validateStatus: () => true
+    });
 
-  if (response.status === 404) {
-    throw createOpenWAError('No hay media almacenada para este mensaje', { status: 404 });
-  }
-  if (response.status < 200 || response.status >= 300) {
-    let message = `OpenWA media error ${response.status}`;
-    try {
-      const text = Buffer.from(response.data || []).toString('utf8');
-      const parsed = JSON.parse(text);
-      message = parsed.message || parsed.error || message;
-    } catch {
-      /* ignore */
+    if (response.status === 404) {
+      throw createOpenWAError('No hay media almacenada para este mensaje', { status: 404 });
     }
-    throw createOpenWAError(message, { status: response.status });
-  }
+    if (isRateLimitError(response.status)) {
+      defaultThrottle.noteRateLimited({
+        retryAfterHeader: response.headers && response.headers['retry-after']
+      });
+      throw createOpenWAError('Too Many Requests', {
+        status: 429,
+        code: 'RATE_LIMIT'
+      });
+    }
+    if (response.status < 200 || response.status >= 300) {
+      let message = `OpenWA media error ${response.status}`;
+      try {
+        const text = Buffer.from(response.data || []).toString('utf8');
+        const parsed = JSON.parse(text);
+        message = parsed.message || parsed.error || message;
+      } catch {
+        /* ignore */
+      }
+      throw createOpenWAError(message, { status: response.status });
+    }
 
-  const contentType = String(
-    (response.headers && (response.headers['content-type'] || response.headers['Content-Type'])) ||
-      'application/octet-stream'
-  )
-    .split(';')[0]
-    .trim();
-  return {
-    buffer: Buffer.from(response.data || []),
-    mimetype: contentType || 'application/octet-stream'
-  };
+    const contentType = String(
+      (response.headers && (response.headers['content-type'] || response.headers['Content-Type'])) ||
+        'application/octet-stream'
+    )
+      .split(';')[0]
+      .trim();
+    return {
+      buffer: Buffer.from(response.data || []),
+      mimetype: contentType || 'application/octet-stream'
+    };
+  });
 }
 
 /**

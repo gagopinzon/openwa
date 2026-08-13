@@ -344,6 +344,51 @@ section h2 {
     border: 1px solid #e5e7eb;
 }
 
+.send-delay-settings {
+    margin: -16px 0 28px;
+    padding: 16px 20px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+}
+
+.send-delay-settings-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #0f172a;
+    margin-bottom: 4px;
+}
+
+.send-delay-settings-hint {
+    font-size: 12px;
+    color: #64748b;
+    margin: 0 0 12px;
+}
+
+.send-delay-settings-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.send-delay-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: #475569;
+}
+
+.send-delay-field input {
+    width: 96px;
+    padding: 8px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font-size: 14px;
+    background: #fff;
+}
+
 /* Mensajes de estado */
 .status-message {
     padding: 16px 20px;

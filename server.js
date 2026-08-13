@@ -52,6 +52,7 @@ const agendaOfferStore = require('./agendaOfferStore');
 const sendQueueStore = require('./sendQueueStore');
 const conversationPreviewStore = require('./conversationPreviewStore');
 const androidGatewayStore = require('./androidGatewayStore');
+const sendSettingsStore = require('./sendSettingsStore');
 const { runAndroidSendJob } = require('./androidSendService');
 const {
   isAuthEnabled,
@@ -578,13 +579,19 @@ async function runWhatsAppSendJob({
             if (openwaSessionIds.length === 1) {
               const singleCheck = makeSessionCheckControls(openwaSessionIds[0], null);
               const onWaitProgress = onWaitProgressBySession(openwaSessionIds[0]);
+              const sendSettings = sendSettingsStore.getSettings();
+              const delayRange = {
+                minSeconds: sendSettings.minDelaySec,
+                maxSeconds: sendSettings.maxDelaySec
+              };
               return services[0].sendBulkMessages(
                 openwaFlat,
                 2,
                 onProgress,
                 singleCheck,
                 trackMessageResult,
-                onWaitProgress
+                onWaitProgress,
+                delayRange
               );
             }
 
@@ -593,6 +600,11 @@ async function runWhatsAppSendJob({
             for (const sId of openwaSessionIds) {
               openwaWeights[sId] = (openwaContactsBySession.get(sId) || []).length;
             }
+            const sendSettings = sendSettingsStore.getSettings();
+            const delayRange = {
+              minSeconds: sendSettings.minDelaySec,
+              maxSeconds: sendSettings.maxDelaySec
+            };
             return sendRoundRobinBulk(
               servicesBySessionId,
               openwaSessionIds,
@@ -601,7 +613,8 @@ async function runWhatsAppSendJob({
               checkControlsBySession,
               trackMessageResult,
               onWaitProgressBySession,
-              openwaWeights
+              openwaWeights,
+              delayRange
             );
           })()
         );
@@ -3549,6 +3562,97 @@ async function mapWithConcurrency(items, concurrency, worker) {
 
 let conversationPreviewEnrichPromise = null;
 let conversationPreviewEnrichQueued = null;
+const conversationsListInflight = new Map();
+
+function conversationsListConcurrency() {
+  const v = parseInt(process.env.CONVERSATIONS_LIST_CONCURRENCY, 10);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 2) : 1;
+}
+
+async function loadConversationsListPayload(sessions, { limit, includeGroups, user, wantAll }) {
+  console.log(
+    `[conversations] listando chats sesiones=${sessions.map((s) => s.id).join(',')} limit=${limit}`
+  );
+
+  const settled = await mapWithConcurrency(
+    sessions,
+    conversationsListConcurrency(),
+    async (session) => {
+      try {
+        let chats = await listChats(session.openwaSessionId, {
+          limit,
+          offset: 0
+        });
+        if (!includeGroups) {
+          chats = chats.filter((c) => !c.isGroup);
+        }
+        return { session, chats, error: null };
+      } catch (err) {
+        console.error(`[conversations] error sesión=${session.id}:`, err.message);
+        return {
+          session,
+          chats: [],
+          error: err.message,
+          rateLimited: err.code === 'RATE_LIMIT'
+        };
+      }
+    }
+  );
+
+  const chats = settled
+    .flatMap(({ session, chats: sessionChats }) =>
+      sessionChats.map((c) => ({
+        ...c,
+        sessionId: session.id,
+        sessionLabel: session.label || session.id,
+        openwaSessionId: session.openwaSessionId,
+        key: `${session.id}::${c.id}`
+      }))
+    )
+    .sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+
+  const errors = settled
+    .filter((row) => row.error)
+    .map((row) => ({
+      sessionId: row.session.id,
+      label: row.session.label || row.session.id,
+      error: row.error
+    }));
+
+  const rateLimited = settled.some((row) => row.rateLimited);
+  if (rateLimited && !chats.length) {
+    return {
+      statusCode: 429,
+      body: {
+        success: false,
+        error: errors[0]?.error || 'Too Many Requests',
+        errors
+      }
+    };
+  }
+
+  console.log(
+    `[conversations] OK ${chats.length} chats (${sessions.length} sesiones, ${errors.length} errores)`
+  );
+
+  const chatsWithPreviews = conversationPreviewStore.applyToChats(chats);
+  scheduleConversationPreviewEnrichment(chatsWithPreviews, user);
+
+  return {
+    statusCode: 200,
+    body: {
+      success: true,
+      all: wantAll,
+      sessions: sessions.map((s) => ({
+        id: s.id,
+        label: s.label || s.id,
+        openwaSessionId: s.openwaSessionId
+      })),
+      errors,
+      chats: chatsWithPreviews
+    }
+  };
+}
 
 function previewEnrichDelayMs() {
   const v = parseInt(process.env.CONVERSATIONS_PREVIEW_DELAY_MS, 10);
@@ -3830,76 +3934,32 @@ app.get('/api/conversations', async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
     const includeGroups = String(req.query.includeGroups || '') === '1';
 
-    console.log(
-      `[conversations] listando chats sesiones=${sessions.map((s) => s.id).join(',')} limit=${limit}`
-    );
+    const inflightKey = [
+      (req.user && req.user.username) || 'anon',
+      sessions.map((s) => s.id).sort().join(','),
+      limit,
+      includeGroups ? '1' : '0'
+    ].join('|');
 
-    const settled = await mapWithConcurrency(sessions, 2, async (session) => {
-      try {
-        let chats = await listChats(session.openwaSessionId, {
-          limit,
-          offset: 0
-        });
-        if (!includeGroups) {
-          chats = chats.filter((c) => !c.isGroup);
+    let pending = conversationsListInflight.get(inflightKey);
+    if (!pending) {
+      pending = loadConversationsListPayload(sessions, {
+        limit,
+        includeGroups,
+        user: req.user,
+        wantAll
+      }).finally(() => {
+        if (conversationsListInflight.get(inflightKey) === pending) {
+          conversationsListInflight.delete(inflightKey);
         }
-        return { session, chats, error: null };
-      } catch (err) {
-        console.error(
-          `[conversations] error sesión=${session.id}:`,
-          err.message
-        );
-        return { session, chats: [], error: err.message, rateLimited: err.code === 'RATE_LIMIT' };
-      }
-    });
-
-    const chats = settled
-      .flatMap(({ session, chats: sessionChats }) =>
-        sessionChats.map((c) => ({
-          ...c,
-          sessionId: session.id,
-          sessionLabel: session.label || session.id,
-          openwaSessionId: session.openwaSessionId,
-          key: `${session.id}::${c.id}`
-        }))
-      )
-      .sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
-
-    const errors = settled
-      .filter((row) => row.error)
-      .map((row) => ({
-        sessionId: row.session.id,
-        label: row.session.label || row.session.id,
-        error: row.error
-      }));
-
-    const rateLimited = settled.some((row) => row.rateLimited);
-    if (rateLimited && !chats.length) {
-      return res.status(429).json({
-        success: false,
-        error: errors[0]?.error || 'Too Many Requests',
-        errors
       });
+      conversationsListInflight.set(inflightKey, pending);
+    } else {
+      console.log('[conversations] coalescing listado en vuelo');
     }
 
-    console.log(
-      `[conversations] OK ${chats.length} chats (${sessions.length} sesiones, ${errors.length} errores)`
-    );
-
-    const chatsWithPreviews = conversationPreviewStore.applyToChats(chats);
-    scheduleConversationPreviewEnrichment(chatsWithPreviews, req.user);
-
-    res.json({
-      success: true,
-      all: wantAll,
-      sessions: sessions.map((s) => ({
-        id: s.id,
-        label: s.label || s.id,
-        openwaSessionId: s.openwaSessionId
-      })),
-      errors,
-      chats: chatsWithPreviews
-    });
+    const payload = await pending;
+    return res.status(payload.statusCode).json(payload.body);
   } catch (error) {
     console.error('[conversations] error:', error.message);
     res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
@@ -4587,9 +4647,32 @@ app.put('/api/auto-reply/config', requireSuper, (req, res) => {
       enabled: req.body.enabled,
       basePrompt: req.body.basePrompt,
       rules: req.body.rules,
-      enabledSessionIds: req.body.enabledSessionIds
+      enabledSessionIds: req.body.enabledSessionIds,
+      minDelayMs: req.body.minDelayMs,
+      maxDelayMs: req.body.maxDelayMs
     });
     res.json({ success: true, config });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/send-settings', (req, res) => {
+  try {
+    res.json({ success: true, settings: sendSettingsStore.getPublicSettings() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/send-settings', (req, res) => {
+  try {
+    if (!forbidUnlessAnyControl(req, res)) return;
+    const settings = sendSettingsStore.updateSettings({
+      minDelaySec: req.body.minDelaySec,
+      maxDelaySec: req.body.maxDelaySec
+    });
+    res.json({ success: true, settings });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }

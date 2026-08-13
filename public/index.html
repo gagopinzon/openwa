@@ -364,6 +364,27 @@
                             </div>
                         </div>
                         <div class="accordion-item">
+                            <button type="button" class="accordion-header" data-accordion="typingDelay">
+                                Tiempo de “escribiendo…”
+                            </button>
+                            <div class="accordion-body accordion-body-collapsed" id="accordionTypingDelay">
+                                <p style="font-size: 12px; color: #64748b; margin: 0 0 10px;">
+                                    La duración sigue siendo proporcional a la longitud del mensaje.
+                                    Aquí solo ajustas el mínimo y máximo (segundos).
+                                </p>
+                                <div class="send-delay-settings-row">
+                                    <label class="send-delay-field">
+                                        <span>Mín (seg)</span>
+                                        <input type="number" id="autoReplyMinDelaySec" min="0" max="300" step="1" value="3">
+                                    </label>
+                                    <label class="send-delay-field">
+                                        <span>Máx (seg)</span>
+                                        <input type="number" id="autoReplyMaxDelaySec" min="1" max="300" step="1" value="35">
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="accordion-item">
                             <button type="button" class="accordion-header" data-accordion="conversations">
                                 Conversaciones en vivo
                             </button>
@@ -381,7 +402,7 @@
             <section class="session-sending-panel" id="sessionSendingPanel" style="display: none;">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Envío en progreso</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                    Cada sesión envía en paralelo con su propio tiempo de espera (1–5 min aleatorio entre mensajes).
+                    Cada sesión envía en paralelo con su propio tiempo de espera (intervalo configurable entre mensajes).
                 </p>
                 <div id="sessionSendingCards" class="session-sending-cards"></div>
                 <div class="session-sending-global" style="margin-top: 16px; text-align: center;">
@@ -429,6 +450,24 @@
                 <button id="clearDataBtn" class="btn btn-danger">
                     Limpiar
                 </button>
+            </div>
+
+            <div class="send-delay-settings" id="sendDelaySettings">
+                <div class="send-delay-settings-title">Intervalo entre mensajes (aleatorio)</div>
+                <p class="send-delay-settings-hint">
+                    Se guarda en el servidor y aplica a todos los envíos masivos OpenWA.
+                </p>
+                <div class="send-delay-settings-row">
+                    <label class="send-delay-field">
+                        <span>Mín (min)</span>
+                        <input type="number" id="sendDelayMinMin" min="0.2" max="120" step="0.5" value="1">
+                    </label>
+                    <label class="send-delay-field">
+                        <span>Máx (min)</span>
+                        <input type="number" id="sendDelayMaxMin" min="0.2" max="120" step="0.5" value="5">
+                    </label>
+                    <button type="button" id="saveSendDelayBtn" class="btn btn-secondary btn-sm">Guardar intervalo</button>
+                </div>
             </div>
 
             <div class="queue-controls" id="schedulePanel" style="display: none;">

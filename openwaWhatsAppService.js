@@ -21,13 +21,31 @@ const {
 const ROUND_ROBIN_CONTROL_ID = '__roundrobin__';
 
 /**
- * Espera aleatoria entre mensajes (1–5 min), respetando controles de pausa/aborto.
+ * @param {{ minSeconds?: number, maxSeconds?: number }|null} delayRange
+ * @param {number} [delayMinutesFallback]
+ */
+function normalizeDelayRange(delayRange, delayMinutesFallback = 3) {
+  const fallbackSec = Math.max(1, Math.round(Number(delayMinutesFallback) || 3) * 60);
+  const minSeconds = Math.max(
+    1,
+    Math.floor(Number(delayRange?.minSeconds) || fallbackSec)
+  );
+  const maxSeconds = Math.max(
+    minSeconds,
+    Math.floor(Number(delayRange?.maxSeconds) || Math.max(fallbackSec, minSeconds))
+  );
+  return { minSeconds, maxSeconds };
+}
+
+/**
+ * Espera aleatoria entre mensajes, respetando controles de pausa/aborto.
+ * @param {Function|null} checkControls
  * @param {Function|null} onWaitProgress - (remainingMs, totalMs) => void
+ * @param {{ minSeconds?: number, maxSeconds?: number }|null} delayRange
  * @returns {'ok'|'aborted'}
  */
-async function waitBetweenMessages(checkControls, onWaitProgress = null) {
-  const minSeconds = 60;
-  const maxSeconds = 300;
+async function waitBetweenMessages(checkControls, onWaitProgress = null, delayRange = null) {
+  const { minSeconds, maxSeconds } = normalizeDelayRange(delayRange);
   const randomDelaySeconds =
     Math.floor(Math.random() * (maxSeconds - minSeconds + 1)) + minSeconds;
   const delayMs = randomDelaySeconds * 1000;
@@ -273,16 +291,18 @@ class OpenWAWhatsAppService {
     onProgress = null,
     checkControls = null,
     onMessageResult = null,
-    onWaitProgress = null
+    onWaitProgress = null,
+    delayRange = null
   ) {
     if (!this.isInitialized) {
       throw new Error('WhatsApp no está inicializado. Llama a initWhatsApp() primero.');
     }
 
     const results = [];
+    const range = normalizeDelayRange(delayRange, delayMinutes);
 
     console.log(
-      `Iniciando envío masivo de ${contacts.length} mensajes con delay aleatorio de 1-5 minutos`
+      `Iniciando envío masivo de ${contacts.length} mensajes con delay aleatorio de ${range.minSeconds}-${range.maxSeconds}s`
     );
 
     for (let i = 0; i < contacts.length; i++) {
@@ -370,7 +390,11 @@ class OpenWAWhatsAppService {
             });
           }
 
-          const waitResult = await waitBetweenMessages(checkControls, onWaitProgress);
+          const waitResult = await waitBetweenMessages(
+            checkControls,
+            onWaitProgress,
+            range
+          );
           if (waitResult === 'aborted') {
             return results;
           }
@@ -512,11 +536,13 @@ async function sendSessionQueue(
   checkControls = null,
   onMessageResult = null,
   onWaitProgress = null,
-  failoverCtx = null
+  failoverCtx = null,
+  delayRange = null
 ) {
   const results = [];
   const cfg = getFailoverConfig();
   let processedOnThisSession = 0;
+  const range = normalizeDelayRange(delayRange);
 
   try {
   while (true) {
@@ -675,7 +701,11 @@ async function sendSessionQueue(
             telefono: next.contact.telefono
           });
         }
-        const waitResult = await waitBetweenMessages(checkControls, onWaitProgress);
+        const waitResult = await waitBetweenMessages(
+          checkControls,
+          onWaitProgress,
+          range
+        );
         if (waitResult === 'aborted') break;
       }
       continue;
@@ -762,13 +792,15 @@ async function sendRoundRobinBulk(
   checkControlsBySession = null,
   onMessageResult = null,
   onWaitProgressBySession = null,
-  sessionWeights = null
+  sessionWeights = null,
+  delayRange = null
 ) {
   const N = sessionOrder.length;
   const counts = resolveExactCounts(sessionOrder, sessionWeights, contacts.length);
   const queues = buildQueuesFromCounts(sessionOrder, contacts, counts);
   const failoverCtx = createFailoverContext(sessionOrder, queues);
   const sumCounts = counts.reduce((a, b) => a + b, 0) || 1;
+  const range = normalizeDelayRange(delayRange);
 
   const distribution = sessionOrder.map((sId, i) => {
     const pct = Math.round((counts[i] / sumCounts) * 1000) / 10;
@@ -776,6 +808,9 @@ async function sendRoundRobinBulk(
   });
   console.log(
     `Envío paralelo: ${contacts.length} mensaje(s) entre ${N} sesión(es) con timers independientes + failover`
+  );
+  console.log(
+    `Delay entre mensajes: ${range.minSeconds}-${range.maxSeconds}s (aleatorio)`
   );
   console.log(`📊 Distribución por cantidad → ${distribution.join(', ')}`);
 
@@ -804,7 +839,8 @@ async function sendRoundRobinBulk(
       checkControls,
       onMessageResult,
       onWaitProgress,
-      failoverCtx
+      failoverCtx,
+      range
     );
   });
 

@@ -43,5 +43,7 @@
     }
   ],
   "enabledSessionIds": null,
-  "webhookIdsBySession": {}
+  "webhookIdsBySession": {},
+  "minDelayMs": null,
+  "maxDelayMs": null
 }
