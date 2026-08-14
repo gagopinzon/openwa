@@ -2894,8 +2894,10 @@ class CVAnalyzer {
             this.activeConversation &&
             this.canControlSession(this.activeConversation.sessionId);
 
-        const visible = (Array.isArray(messages) ? messages : []).filter(
-            (m) => !this.isUnknownConversationMessage(m)
+        const visible = this.mergePendingOutgoingMessages(
+            (Array.isArray(messages) ? messages : []).filter(
+                (m) => !this.isUnknownConversationMessage(m)
+            )
         );
 
         if (!visible.length) {
@@ -2920,8 +2922,9 @@ class CVAnalyzer {
                         <button type="button" class="bubble-action-btn" data-action="delete" data-message-id="${this.escapeHtml(messageId)}">Eliminar</button>
                        </div>`
                     : '';
+                const pendingClass = msg.pending ? ' is-pending' : '';
                 return `
-                <div class="conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}" data-message-id="${this.escapeHtml(messageId)}">
+                <div class="conv-bubble ${msg.fromMe ? 'outgoing' : 'incoming'}${pendingClass}" data-message-id="${this.escapeHtml(messageId)}"${msg.pendingId ? ` data-pending-id="${this.escapeHtml(msg.pendingId)}"` : ''}>
                     ${this.buildConversationMessageHtml(msg)}
                     ${time ? `<span class="bubble-time">${this.escapeHtml(time)}</span>` : ''}
                     ${actions}
@@ -2943,6 +2946,109 @@ class CVAnalyzer {
         }
     }
 
+    conversationThreadKey(sessionId, chatId) {
+        return `${sessionId}::${chatId}`;
+    }
+
+    mergePendingOutgoingMessages(messages) {
+        const active = this.activeConversation;
+        if (!active) return Array.isArray(messages) ? messages : [];
+        const threadKey = this.conversationThreadKey(active.sessionId, active.chatId);
+        const pending = (this._pendingOutgoing || []).filter((p) => p.threadKey === threadKey);
+        if (!pending.length) return messages;
+
+        const merged = [...messages];
+        const stillPending = [];
+        const consumed = new Set();
+        for (const p of pending) {
+            const matchIdx = messages.findIndex(
+                (m, idx) =>
+                    !consumed.has(idx) &&
+                    m &&
+                    m.fromMe &&
+                    String(m.body || '').trim() === p.body
+            );
+            if (matchIdx >= 0) {
+                consumed.add(matchIdx);
+                continue;
+            }
+            stillPending.push(p);
+            merged.push({
+                id: null,
+                body: p.body,
+                fromMe: true,
+                timestamp: p.timestamp,
+                type: 'text',
+                pending: true,
+                pendingId: p.id
+            });
+        }
+        this._pendingOutgoing = (this._pendingOutgoing || []).filter(
+            (p) => p.threadKey !== threadKey || stillPending.some((s) => s.id === p.id)
+        );
+        return merged;
+    }
+
+    appendOptimisticOutgoing(text) {
+        const active = this.activeConversation;
+        if (!active || !this.conversationsThreadMessages) return null;
+        const pending = {
+            id: `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            threadKey: this.conversationThreadKey(active.sessionId, active.chatId),
+            sessionId: active.sessionId,
+            chatId: active.chatId,
+            body: text,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+        if (!this._pendingOutgoing) this._pendingOutgoing = [];
+        this._pendingOutgoing.push(pending);
+
+        const el = this.conversationsThreadMessages;
+        const empty = el.querySelector('.auto-reply-empty');
+        if (empty) empty.remove();
+        const bubble = document.createElement('div');
+        bubble.className = 'conv-bubble outgoing is-pending';
+        bubble.dataset.pendingId = pending.id;
+        bubble.innerHTML = `
+            ${this.escapeHtml(text)}
+            <span class="bubble-time">${this.escapeHtml(this.formatConversationTime(pending.timestamp) || new Date().toLocaleString())}</span>
+        `;
+        el.appendChild(bubble);
+        el.scrollTop = el.scrollHeight;
+        delete el.dataset.lastMessagesHtml;
+        return pending;
+    }
+
+    dropPendingOutgoing(pendingId) {
+        this._pendingOutgoing = (this._pendingOutgoing || []).filter((p) => p.id !== pendingId);
+        const el = this.conversationsThreadMessages;
+        if (!el) return;
+        const bubble = el.querySelector(`[data-pending-id="${pendingId}"]`);
+        if (bubble) bubble.remove();
+        delete el.dataset.lastMessagesHtml;
+    }
+
+    applyOptimisticChatPreview(text) {
+        const active = this.activeConversation;
+        if (!active) return;
+        const chat = (this.conversationsChats || []).find(
+            (c) => (c.key || `${c.sessionId}::${c.id}`) === active.key
+        );
+        if (!chat) return;
+        const line = String(text).replace(/\s+/g, ' ').trim();
+        const lines = Array.isArray(chat.previewLines) ? [...chat.previewLines] : [];
+        if (line) {
+            lines.push(line.length > 140 ? `${line.slice(0, 140)}…` : line);
+        }
+        this.rememberConversationPreview(chat, lines.slice(-4), true);
+        chat.lastMessage = text;
+        chat.timestamp = Math.floor(Date.now() / 1000);
+        this.conversationsChats.sort(
+            (a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)
+        );
+        this.renderConversationsChatList();
+    }
+
     async sendConversationReply() {
         if (!this.activeConversation) {
             this.showStatus('Selecciona un chat primero', 'error');
@@ -2954,68 +3060,44 @@ class CVAnalyzer {
             return;
         }
 
-        if (this.conversationsReplyBtn) this.conversationsReplyBtn.disabled = true;
-        if (this.conversationsReplyInput) this.conversationsReplyInput.disabled = true;
+        const sessionId = this.activeConversation.sessionId;
+        const chatId = this.activeConversation.chatId;
+        const sessionLabel = this.activeConversation.sessionLabel;
+
+        if (this.conversationsReplyInput) this.conversationsReplyInput.value = '';
+        const pending = this.appendOptimisticOutgoing(text);
+        this.applyOptimisticChatPreview(text);
+        this.setConversationsReplyEnabled(true);
+        if (this.conversationsReplyInput) this.conversationsReplyInput.focus();
 
         try {
             const response = await fetch('/api/conversations/reply', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    sessionId: this.activeConversation.sessionId,
-                    chatId: this.activeConversation.chatId,
-                    text
-                })
+                body: JSON.stringify({ sessionId, chatId, text })
             });
             const data = await response.json();
             if (!response.ok || !data.success) {
                 throw new Error(data.error || `HTTP ${response.status}`);
             }
 
-            if (this.conversationsReplyInput) this.conversationsReplyInput.value = '';
-
-            // Mostrar el mensaje enviado de inmediato en el hilo
-            if (this.conversationsThreadMessages) {
-                const empty = this.conversationsThreadMessages.querySelector('.auto-reply-empty');
-                if (empty) empty.remove();
-                const bubble = document.createElement('div');
-                bubble.className = 'conv-bubble outgoing';
-                bubble.innerHTML = `
-                    ${this.escapeHtml(text)}
-                    <span class="bubble-time">${this.escapeHtml(new Date().toLocaleString())}</span>
-                `;
-                this.conversationsThreadMessages.appendChild(bubble);
-                this.conversationsThreadMessages.scrollTop =
-                    this.conversationsThreadMessages.scrollHeight;
-            }
-
-            // Actualizar preview en la lista
-            const chat = this.conversationsChats.find(
-                (c) => (c.key || `${c.sessionId}::${c.id}`) === this.activeConversation.key
-            );
-            if (chat) {
-                const line = String(text).replace(/\s+/g, ' ').trim();
-                const lines = Array.isArray(chat.previewLines) ? [...chat.previewLines] : [];
-                if (line) {
-                    lines.push(line.length > 140 ? `${line.slice(0, 140)}…` : line);
-                }
-                this.rememberConversationPreview(chat, lines.slice(-4), true);
-                chat.lastMessage = text;
-                chat.timestamp = Math.floor(Date.now() / 1000);
-                this.conversationsChats.sort(
-                    (a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)
-                );
-                this.renderConversationsChatList();
-            }
+            const bubble = pending && this.conversationsThreadMessages
+                ? this.conversationsThreadMessages.querySelector(
+                      `[data-pending-id="${pending.id}"]`
+                  )
+                : null;
+            if (bubble) bubble.classList.remove('is-pending');
 
             this.showStatus(
                 data.aiPaused === true
-                    ? `Enviado desde ${this.activeConversation.sessionLabel}. IA pausada en este chat.`
-                    : `Enviado desde ${this.activeConversation.sessionLabel}`,
+                    ? `Enviado desde ${sessionLabel}. IA pausada en este chat.`
+                    : `Enviado desde ${sessionLabel}`,
                 'success'
             );
 
-            if (data.aiPaused === true) {
+            if (data.aiPaused === true && this.activeConversation &&
+                this.activeConversation.sessionId === sessionId &&
+                this.activeConversation.chatId === chatId) {
                 this.activeConversationAiPaused = true;
                 this.activeConversationKnownContact = true;
                 this.updateConversationThreadActions();
@@ -3023,6 +3105,10 @@ class CVAnalyzer {
             }
         } catch (error) {
             console.error('[conversations] reply error', error);
+            if (pending) this.dropPendingOutgoing(pending.id);
+            if (this.conversationsReplyInput && !this.conversationsReplyInput.value) {
+                this.conversationsReplyInput.value = text;
+            }
             this.showStatus(error.message || 'No se pudo enviar', 'error');
         } finally {
             this.setConversationsReplyEnabled(Boolean(this.activeConversation));

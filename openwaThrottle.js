@@ -1,6 +1,7 @@
 /**
  * Cola global para llamadas a OpenWA: una a la vez, hueco mínimo
  * entre peticiones, y cooldown compartido cuando llega un 429.
+ * POST (envío) usa prioridad alta para no esperar detrás de GET de chats.
  */
 
 function sleepMs(ms) {
@@ -17,7 +18,9 @@ function createOpenWAThrottle(opts = {}) {
 
   let lastEndedAt = null;
   let cooldownUntil = 0;
-  let tail = Promise.resolve();
+  const highQueue = [];
+  const lowQueue = [];
+  let pumping = false;
   const inflightGets = new Map();
 
   function minGapMs() {
@@ -48,20 +51,39 @@ function createOpenWAThrottle(opts = {}) {
     }
   }
 
-  function enqueue(fn) {
-    const run = tail.then(async () => {
-      await waitForSlot();
-      try {
-        return await fn();
-      } finally {
-        lastEndedAt = now();
-      }
+  function enqueue(fn, enqueueOpts = {}) {
+    const high = enqueueOpts.priority === 'high';
+    return new Promise((resolve, reject) => {
+      const item = { fn, resolve, reject };
+      if (high) highQueue.push(item);
+      else lowQueue.push(item);
+      pump();
     });
-    tail = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
+  }
+
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (highQueue.length || lowQueue.length) {
+        await waitForSlot();
+        const item = highQueue.length ? highQueue.shift() : lowQueue.shift();
+        if (!item) continue;
+        try {
+          const result = await item.fn();
+          lastEndedAt = now();
+          item.resolve(result);
+        } catch (err) {
+          lastEndedAt = now();
+          item.reject(err);
+        }
+      }
+    } finally {
+      pumping = false;
+      if (highQueue.length || lowQueue.length) {
+        pump();
+      }
+    }
   }
 
   /**

@@ -100,4 +100,42 @@ describe('createOpenWAThrottle', () => {
     assert.deepEqual(left, ['chat-1']);
     assert.deepEqual(right, ['chat-1']);
   });
+
+  it('prioridad alta se cuela delante de las GET pendientes', async () => {
+    const order = [];
+    let releaseLow;
+    const blocked = new Promise((resolve) => {
+      releaseLow = resolve;
+    });
+    let startedLow;
+    const lowStarted = new Promise((resolve) => {
+      startedLow = resolve;
+    });
+
+    const low1 = throttle.enqueue(async () => {
+      order.push('low-start');
+      startedLow();
+      await blocked;
+      order.push('low-end');
+      return 'L';
+    });
+
+    await lowStarted;
+
+    const low2 = throttle.enqueue(async () => {
+      order.push('low2');
+      return 'L2';
+    });
+    const high = throttle.enqueue(
+      async () => {
+        order.push('high');
+        return 'H';
+      },
+      { priority: 'high' }
+    );
+
+    releaseLow();
+    await Promise.all([low1, low2, high]);
+    assert.deepEqual(order, ['low-start', 'low-end', 'high', 'low2']);
+  });
 });

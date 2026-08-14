@@ -4044,27 +4044,8 @@ app.post('/api/conversations/reply', async (req, res) => {
       chatId
     });
 
-    // Al contestar manualmente, pausar la IA de ese remitente para no pelear la conversación.
-    let aiPaused = null;
     const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
-    if (phone && contactHistory.mongoUriConfigured()) {
-      try {
-        const pauseResult = await contactHistory.setContactAiPaused(phone, true);
-        if (pauseResult.ok) {
-          aiPaused = true;
-          broadcastEvent('aiControlChanged', {
-            sessionId: session.id,
-            chatId,
-            telefono: phone,
-            aiPaused: true,
-            reason: 'manual_reply',
-            timestamp: new Date().toISOString()
-          });
-        }
-      } catch (err) {
-        console.warn('[conversations] no se pudo pausar IA tras reply manual:', err.message);
-      }
-    }
+    const willPause = Boolean(phone && contactHistory.mongoUriConfigured());
 
     res.json({
       success: true,
@@ -4072,8 +4053,29 @@ app.post('/api/conversations/reply', async (req, res) => {
       sessionLabel: session.label || session.id,
       chatId,
       messageId: result.messageId || null,
-      aiPaused
+      aiPaused: willPause ? true : null
     });
+
+    // Pausar IA en background para no retrasar el OK al panel.
+    if (willPause) {
+      setImmediate(async () => {
+        try {
+          const pauseResult = await contactHistory.setContactAiPaused(phone, true);
+          if (pauseResult.ok) {
+            broadcastEvent('aiControlChanged', {
+              sessionId: session.id,
+              chatId,
+              telefono: phone,
+              aiPaused: true,
+              reason: 'manual_reply',
+              timestamp: new Date().toISOString()
+            });
+          }
+        } catch (err) {
+          console.warn('[conversations] no se pudo pausar IA tras reply manual:', err.message);
+        }
+      });
+    }
   } catch (error) {
     console.error('[conversations] reply error:', error.message);
     res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });

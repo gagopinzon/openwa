@@ -1865,6 +1865,10 @@ footer p {
     color: #14532d;
 }
 
+.conv-bubble.outgoing.is-pending {
+    opacity: 0.72;
+}
+
 .conv-bubble .bubble-time {
     display: block;
     margin-top: 4px;

@@ -90,7 +90,7 @@ async function openwaRequest(method, path, body, opts = {}) {
   if (methodUpper === 'GET') {
     return defaultThrottle.coalesceGet(`${methodUpper} ${path}`, run);
   }
-  return defaultThrottle.enqueue(run);
+  return defaultThrottle.enqueue(run, { priority: 'high' });
 }
 
 async function executeOpenWARequest(method, path, body, opts = {}) {
