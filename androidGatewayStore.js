@@ -447,6 +447,27 @@ function deleteDevice(deviceId) {
 }
 
 /**
+ * Marca pending/claimed de un lote como failed para que el poll de Android termine.
+ */
+function failOpenJobsByBatchId(batchId, error = 'batch_finished') {
+  const id = batchId != null ? String(batchId).trim() : '';
+  if (!id) return 0;
+  const store = readStore();
+  const now = new Date().toISOString();
+  let count = 0;
+  for (const job of store.jobs) {
+    if (String(job.batchId || '') !== id) continue;
+    if (job.status !== JOB_STATUS.PENDING && job.status !== JOB_STATUS.CLAIMED) continue;
+    job.status = JOB_STATUS.FAILED;
+    job.error = error;
+    job.finishedAt = now;
+    count += 1;
+  }
+  if (count) writeStore(store);
+  return count;
+}
+
+/**
  * Encola jobs ya asignados a deviceId concreto.
  * @param {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, batchId?: string|null, logicalSessionId?: string|null, meta?: object }>} items
  */
@@ -506,6 +527,7 @@ module.exports = {
   enqueueAssignedJobs,
   linkDeviceToLogicalSession,
   deleteDevice,
+  failOpenJobsByBatchId,
   getJob,
   listJobs,
   pickOnlineDevices,

@@ -253,7 +253,7 @@ let generationState = {
   completedAt: null
 };
 
-/** @type {{ inProgress: boolean, total: number, successCount: number, completedCount: number, sessionIds: string[], startedAt: number|null, completedAt: number|null, error: string|null, message: string|null, results: Array|null, skippedAlreadyContacted: Array, testMode: boolean }} */
+/** @type {{ inProgress: boolean, total: number, successCount: number, completedCount: number, sessionIds: string[], startedAt: number|null, completedAt: number|null, error: string|null, message: string|null, results: Array|null, skippedAlreadyContacted: Array, testMode: boolean, aborted: boolean, batchId: string|null }} */
 let lastSendJob = {
   inProgress: false,
   total: 0,
@@ -266,8 +266,13 @@ let lastSendJob = {
   message: null,
   results: null,
   skippedAlreadyContacted: [],
-  testMode: false
+  testMode: false,
+  aborted: false,
+  batchId: null
 };
+
+/** Sube al finalizar/abortar para que un job viejo no vuelva a bloquear la cola. */
+let sendJobEpoch = 0;
 
 function isAnySendingInProgress() {
   return lastSendJob.inProgress || [...sessionStates.values()].some((s) => s.sendingInProgress);
@@ -349,7 +354,10 @@ async function runWhatsAppSendJob({
   const sendChannel =
     sendChannelRaw === 'android' || sendChannelRaw === 'openwa' ? sendChannelRaw : 'auto';
 
+  const epoch = ++sendJobEpoch;
   lastSendJob.inProgress = true;
+  lastSendJob.aborted = false;
+  lastSendJob.batchId = batchId || null;
   lastSendJob.total = finalCvsToSend.length;
   lastSendJob.successCount = 0;
   lastSendJob.completedCount = 0;
@@ -358,13 +366,26 @@ async function runWhatsAppSendJob({
   lastSendJob.completedAt = null;
   lastSendJob.error = null;
   lastSendJob.message = null;
-  lastSendJob.results = null;
+  lastSendJob.results = [];
   lastSendJob.skippedAlreadyContacted = skippedAlreadyContacted;
   lastSendJob.testMode = testMode;
   lastSendJob.channel = sendChannel;
 
+  if (batchId) {
+    const liveBatch = sendQueueStore.getBatchById(batchId);
+    if (!liveBatch || liveBatch.status !== sendQueueStore.STATUS.SENDING) {
+      lastSendJob.inProgress = false;
+      lastSendJob.aborted = true;
+      return;
+    }
+  }
+
   const trackMessageResult = (row) => {
     lastSendJob.completedCount = (lastSendJob.completedCount || 0) + 1;
+    if (row) {
+      lastSendJob.results = lastSendJob.results || [];
+      lastSendJob.results.push(row);
+    }
     if (row && row.success) {
       lastSendJob.successCount = (lastSendJob.successCount || 0) + 1;
       broadcastEvent('sendSuccess', {
@@ -443,6 +464,7 @@ async function runWhatsAppSendJob({
         sessionIds,
         batchId,
         onMessageResult: trackMessageResult,
+        shouldAbort: () => lastSendJob.aborted || epoch !== sendJobEpoch,
         pollMs: 2000,
         timeoutMs: 24 * 60 * 60 * 1000
       });
@@ -546,6 +568,7 @@ async function runWhatsAppSendJob({
             assignments: androidAssignments,
             batchId,
             onMessageResult: trackMessageResult,
+            shouldAbort: () => lastSendJob.aborted || epoch !== sendJobEpoch,
             pollMs: 2000,
             timeoutMs: 24 * 60 * 60 * 1000
           })
@@ -641,6 +664,10 @@ async function runWhatsAppSendJob({
     lastSendJob.completedAt = Date.now();
     console.log(`Envío completado. ${lastSendJob.message}`);
 
+    if (epoch !== sendJobEpoch) {
+      return;
+    }
+
     const workspaceCleanup = removeSuccessfullySentFromWorkspace(lastSendJob.results || []);
 
     // Marcar cola como sent ANTES de liberar inProgress / sendComplete,
@@ -670,12 +697,17 @@ async function runWhatsAppSendJob({
     });
   } catch (error) {
     console.error('Error en envío en segundo plano:', error);
+    if (epoch !== sendJobEpoch) {
+      return;
+    }
     lastSendJob.error = error.message;
     resetBulkControlState(controlId, sessionIds);
     markSendQueueJobFinished();
     broadcastEvent('sendError', { error: error.message });
   } finally {
-    lastSendJob.inProgress = false;
+    if (epoch === sendJobEpoch) {
+      lastSendJob.inProgress = false;
+    }
   }
 }
 
@@ -954,6 +986,60 @@ function abortAllActiveSessions() {
   }
 }
 
+function abortAllSessionStates() {
+  for (const [, state] of sessionStates) {
+    state.sendingAborted = true;
+    state.sendingPaused = false;
+    state.timePaused = false;
+    state.skipWait = false;
+    state.sendingInProgress = false;
+    state.liveStatus = null;
+  }
+}
+
+/**
+ * Aborta el job vivo, vacía la cola y deja el sistema listo para un envío nuevo.
+ */
+function finishSendQueueNow() {
+  const sending = sendQueueStore.getSendingBatch();
+  const resultsSnapshot = Array.isArray(lastSendJob.results) ? [...lastSendJob.results] : [];
+  sendJobEpoch += 1;
+  lastSendJob.aborted = true;
+  lastSendJob.inProgress = false;
+  lastSendJob.completedAt = Date.now();
+  lastSendJob.message = 'Envío finalizado por el usuario';
+  abortAllSessionStates();
+
+  const batchId = sending?.id || lastSendJob.batchId;
+  if (batchId) {
+    try {
+      androidGatewayStore.failOpenJobsByBatchId(batchId, 'batch_finished');
+    } catch (err) {
+      console.warn('failOpenJobsByBatchId:', err.message);
+    }
+  }
+
+  const result = sendQueueStore.finishAll();
+  clearSendQueueTimer();
+
+  const workspaceCleanup = removeSuccessfullySentFromWorkspace(resultsSnapshot);
+  broadcastEvent('cvsUpdated', {
+    removed: workspaceCleanup.removed,
+    remaining: workspaceCleanup.remaining,
+    cvs: cvsData
+  });
+  broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+  broadcastEvent('sendQueueFinished', {
+    batchId: batchId || null,
+    status: 'cancelled',
+    finishedByUser: true,
+    removedFromWorkspace: workspaceCleanup.removed,
+    remainingInWorkspace: workspaceCleanup.remaining
+  });
+  console.log('Cola de envío finalizada por el usuario');
+  return result;
+}
+
 // Event emitters para notificaciones en tiempo real (Server-Sent Events)
 const eventClients = [];
 /** @type {ReturnType<typeof setInterval>|null} */
@@ -1003,6 +1089,11 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
   const delaySeconds = 2; // En modo prueba, delay más corto para testing
 
   for (let i = 0; i < cvsToSend.length; i++) {
+    if (lastSendJob.aborted) {
+      console.log('🧪 Simulación finalizada por el usuario');
+      break;
+    }
+
     const cv = cvsToSend[i];
 
     // Mostrar el mensaje que se está enviando
@@ -1056,7 +1147,12 @@ async function simulateWhatsAppSending(cvsToSend, onProgress = null) {
     // Delay más corto en modo prueba
     if (i < cvsToSend.length - 1) {
       console.log(`🧪 Esperando ${delaySeconds} segundos antes del siguiente mensaje...`);
-      await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+      const until = Date.now() + delaySeconds * 1000;
+      while (Date.now() < until) {
+        if (lastSendJob.aborted) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (lastSendJob.aborted) break;
     }
   }
 
@@ -2414,6 +2510,28 @@ app.post('/api/send-queue/cancel', (req, res) => {
   }
 });
 
+app.post('/api/send-queue/finish', (req, res) => {
+  try {
+    const sending = sendQueueStore.getSendingBatch();
+    if (!sending && !isAnySendingInProgress()) {
+      return res.status(409).json({
+        error: 'No hay un envío en curso para finalizar'
+      });
+    }
+    if (sending?.selectedSessions?.length) {
+      if (!forbidUnlessControlSessions(sending.selectedSessions, req, res)) return;
+    }
+    const result = finishSendQueueNow();
+    res.json({
+      success: true,
+      finished: result.finished,
+      ...sendQueueStore.getPublicState()
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 app.post('/api/send-queue/clear', (req, res) => {
   try {
     const force = Boolean(req.body?.force);
@@ -2845,12 +2963,33 @@ app.post('/send-whatsapp', async (req, res) => {
         : 'auto';
 
     try {
-      sendQueueStore.beginDirectSend({
+      const startedBatch = sendQueueStore.beginDirectSend({
         cvs: finalCvsToSend,
         selectedSessions: sessionIds,
         sessionWeights,
         scheduledAt: null,
         channel
+      });
+      res.status(202).json({
+        success: true,
+        started: true,
+        total: finalCvsToSend.length,
+        sessionIds,
+        channel,
+        skippedAlreadyContacted,
+        testMode: TEST_MODE,
+        message: `Envío iniciado para ${finalCvsToSend.length} mensajes (${channel})`
+      });
+
+      runWhatsAppSendJob({
+        finalCvsToSend,
+        sessionIds,
+        sessionWeights,
+        skippedAlreadyContacted,
+        mongoRecordHook,
+        testMode: TEST_MODE,
+        channel,
+        batchId: startedBatch.id
       });
     } catch (error) {
       if (error.status) {
@@ -2858,27 +2997,6 @@ app.post('/send-whatsapp', async (req, res) => {
       }
       throw error;
     }
-
-    res.status(202).json({
-      success: true,
-      started: true,
-      total: finalCvsToSend.length,
-      sessionIds,
-      channel,
-      skippedAlreadyContacted,
-      testMode: TEST_MODE,
-      message: `Envío iniciado para ${finalCvsToSend.length} mensajes (${channel})`
-    });
-
-    runWhatsAppSendJob({
-      finalCvsToSend,
-      sessionIds,
-      sessionWeights,
-      skippedAlreadyContacted,
-      mongoRecordHook,
-      testMode: TEST_MODE,
-      channel
-    });
   } catch (error) {
     console.error('Error enviando mensajes por WhatsApp:', error);
     res.status(500).json({
@@ -2906,7 +3024,8 @@ app.get('/send-job-status', (req, res) => {
     message: lastSendJob.message,
     results: lastSendJob.results,
     skippedAlreadyContacted: lastSendJob.skippedAlreadyContacted,
-    testMode: lastSendJob.testMode
+    testMode: lastSendJob.testMode,
+    aborted: Boolean(lastSendJob.aborted)
   });
 });
 

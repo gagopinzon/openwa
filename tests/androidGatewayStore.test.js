@@ -113,4 +113,24 @@ describe('androidGatewayStore', () => {
     const stale = store.pickOnlineDevices({ maxAgeMs: 60_000 });
     assert.equal(stale.length, 0);
   });
+
+  it('failOpenJobsByBatchId falla pending y claimed del lote', () => {
+    const device = store.registerDevice({ label: 'A' });
+    const jobs = store.enqueueJobs(
+      [
+        { telefono: '5215551112233', mensaje: 'Uno', batchId: 'batch-a' },
+        { telefono: '5215551112244', mensaje: 'Dos', batchId: 'batch-a' },
+        { telefono: '5215551112255', mensaje: 'Tres', batchId: 'batch-b' }
+      ],
+      [device.id]
+    );
+    store.claimNextJob({ deviceId: device.id });
+    const n = store.failOpenJobsByBatchId('batch-a', 'batch_finished');
+    assert.equal(n, 2);
+    const byId = Object.fromEntries(store.getJobsByIds(jobs.map((j) => j.id)).map((j) => [j.id, j]));
+    assert.equal(byId[jobs[0].id].status, 'failed');
+    assert.equal(byId[jobs[0].id].error, 'batch_finished');
+    assert.equal(byId[jobs[1].id].status, 'failed');
+    assert.equal(byId[jobs[2].id].status, 'pending');
+  });
 });

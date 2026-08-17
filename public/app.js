@@ -6463,6 +6463,7 @@ class CVAnalyzer {
                             : 'sin hora (manual)';
                         const canAct =
                             batch.status === 'queued' || batch.status === 'scheduled';
+                        const canFinish = batch.status === 'sending';
                         return `
                         <div class="send-queue-item" data-batch-id="${batch.id}">
                             <div class="send-queue-item-info">
@@ -6474,7 +6475,9 @@ class CVAnalyzer {
                                     canAct
                                         ? `<button type="button" class="btn btn-success btn-sm" data-action="dispatch" data-batch-id="${batch.id}">Iniciar</button>
                                            <button type="button" class="btn btn-danger btn-sm" data-action="cancel" data-batch-id="${batch.id}">Cancelar</button>`
-                                        : ''
+                                        : canFinish
+                                          ? `<button type="button" class="btn btn-warning btn-sm" data-action="finish" data-batch-id="${batch.id}">Finalizar</button>`
+                                          : ''
                                 }
                             </div>
                         </div>`;
@@ -6489,6 +6492,11 @@ class CVAnalyzer {
                 this.sendQueueList.querySelectorAll('[data-action="cancel"]').forEach((btn) => {
                     btn.addEventListener('click', () =>
                         this.cancelQueue(btn.getAttribute('data-batch-id'))
+                    );
+                });
+                this.sendQueueList.querySelectorAll('[data-action="finish"]').forEach((btn) => {
+                    btn.addEventListener('click', () =>
+                        this.finishQueue(btn.getAttribute('data-batch-id'))
                     );
                 });
             }
@@ -6675,6 +6683,49 @@ class CVAnalyzer {
         }
     }
 
+    async finishQueue(_batchId = null) {
+        if (
+            !confirm(
+                '¿Finalizar el envío y vaciar la cola?\n\nSe detendrán los mensajes pendientes y podrás volver a enviar.'
+            )
+        ) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/send-queue/finish', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                this.showStatus(data.error || 'No se pudo finalizar', 'error');
+                await this.refreshSendQueue();
+                return;
+            }
+
+            this.queueState = data;
+            this.sendJobCompleted = {
+                finishedByUser: true,
+                message: 'Cola finalizada. Ya puedes enviar de nuevo.',
+                results: []
+            };
+            this.hideSendingControls();
+            this.hideSessionSendingPanel();
+            this.applyQueueUi(data);
+            this.unlockSendControlsIfIdle();
+            this.showStatus('Cola finalizada. Ya puedes enviar de nuevo.', 'success');
+            await this.reloadCvsFromServer();
+            await this.refreshSendQueue();
+            this.unlockSendControlsIfIdle();
+        } catch (error) {
+            console.error('Error finalizando cola:', error);
+            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+            await this.refreshSendQueue();
+        }
+    }
+
     async sendWhatsApp() {
         const cvsToSend = this.cvsData.filter(cv =>
             cv.procesado &&
@@ -6845,6 +6896,12 @@ class CVAnalyzer {
             if (this.sendJobCompleted) {
                 const status = this.sendJobCompleted;
                 this.sendJobCompleted = null;
+                if (status.finishedByUser) {
+                    this.hideSendingControls();
+                    this.hideSessionSendingPanel();
+                    this.unlockSendControlsIfIdle();
+                    return;
+                }
                 this.applySendJobResult(status);
                 return;
             }
@@ -6879,6 +6936,13 @@ class CVAnalyzer {
                     this.hideSessionSendingPanel();
                     this.disconnectFromEvents();
                 this.connectToEvents();
+                    return;
+                }
+
+                if (status.aborted) {
+                    this.hideSendingControls();
+                    this.hideSessionSendingPanel();
+                    this.unlockSendControlsIfIdle();
                     return;
                 }
 
@@ -7883,7 +7947,22 @@ class CVAnalyzer {
             }
         });
 
-        this.eventSource.addEventListener('sendQueueFinished', async () => {
+        this.eventSource.addEventListener('sendQueueFinished', async (event) => {
+            let payload = {};
+            try {
+                payload = JSON.parse(event.data || '{}');
+            } catch {
+                payload = {};
+            }
+            if (payload.finishedByUser) {
+                await this.reloadCvsFromServer();
+                await this.clearIdleSendQueue();
+                await this.refreshSendQueue();
+                this.hideSendingControls();
+                this.hideSessionSendingPanel();
+                this.unlockSendControlsIfIdle();
+                return;
+            }
             await this.syncWorkspaceAfterSend();
         });
 

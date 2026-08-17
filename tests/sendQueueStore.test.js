@@ -251,6 +251,43 @@ describe('sendQueueStore', () => {
     assert.equal(batches[0].id, 'legacy1');
   });
 
+  it('finishAll aborta sending y queued y deja la cola vacía', () => {
+    const sending = store.enqueue({
+      cvs: sampleCvs,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: null
+    });
+    store.enqueue({
+      cvs: sampleCvs2,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: null
+    });
+    store.enqueue({
+      cvs: sampleCvs,
+      selectedSessions: ['s1'],
+      sessionWeights: null,
+      scheduledAt: new Date(Date.now() + 3600000).toISOString()
+    });
+    store.markSending(sending.id);
+
+    const result = store.finishAll();
+    assert.equal(result.finished.length, 3);
+    assert.ok(result.finished.every((b) => b.status === 'cancelled' && b.finishedByUser));
+    assert.equal(store.getBatches().length, 0);
+    assert.equal(store.getSendingBatch(), null);
+    assert.equal(store.buttonBurned(), false);
+    assert.equal(store.canEnqueue(), true);
+    assert.equal(store.canDispatch(), false);
+  });
+
+  it('finishAll sin lotes activos no falla', () => {
+    const result = store.finishAll();
+    assert.equal(result.finished.length, 0);
+    assert.equal(store.getBatches().length, 0);
+  });
+
   it('getNextScheduledBatch elige el más temprano', () => {
     const later = new Date(Date.now() + 3 * 3600000).toISOString();
     const sooner = new Date(Date.now() + 3600000).toISOString();

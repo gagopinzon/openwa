@@ -34,6 +34,7 @@ function buildAndroidOutreachText(contact, logicalSessionId) {
  * @param {string[]} [opts.sessionIds]
  * @param {string|null} [opts.batchId]
  * @param {(row: object) => void} [opts.onMessageResult]
+ * @param {() => boolean} [opts.shouldAbort]
  * @param {number} [opts.pollMs]
  * @param {number} [opts.timeoutMs]
  */
@@ -43,6 +44,7 @@ async function runAndroidSendJob({
   sessionIds,
   batchId = null,
   onMessageResult = null,
+  shouldAbort = null,
   pollMs = 2000,
   timeoutMs = 24 * 60 * 60 * 1000
 } = {}) {
@@ -144,6 +146,11 @@ async function runAndroidSendJob({
   };
 
   while (Date.now() - started < timeoutMs) {
+    if (typeof shouldAbort === 'function' && shouldAbort()) {
+      androidGatewayStore.failOpenJobsByBatchId(batchId, 'batch_finished');
+      for (const job of androidGatewayStore.getJobsByIds(jobIds)) emitRow(job);
+      return results;
+    }
     const current = androidGatewayStore.getJobsByIds(jobIds);
     for (const job of current) emitRow(job);
     if (androidGatewayStore.areJobsTerminal(current)) {

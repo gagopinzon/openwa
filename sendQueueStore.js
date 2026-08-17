@@ -396,6 +396,26 @@ function clearTerminalBatches() {
 }
 
 /**
+ * Para toda la cola: cancela queued/scheduled/sending y deja el store vacío
+ * para poder encolar de nuevo. El caller debe abortar el job vivo.
+ */
+function finishAll() {
+  const store = readStore();
+  const now = new Date().toISOString();
+  const finished = [];
+  for (const b of store.batches) {
+    if (!ACTIVE_STATUSES.includes(b.status)) continue;
+    b.status = STATUS.CANCELLED;
+    b.cancelledAt = now;
+    b.finishedByUser = true;
+    finished.push({ ...b });
+  }
+  store.batches = [];
+  writeStore(store);
+  return { finished };
+}
+
+/**
  * Vacía la cola. Con force=true cierra sending huérfanos (caller valida que no hay job vivo).
  */
 function clearBatch({ force = false } = {}) {
@@ -473,6 +493,7 @@ module.exports = {
   markSending,
   markSent,
   cancel,
+  finishAll,
   clearBatch,
   clearTerminalBatches,
   recoverOrphanSending,
