@@ -6,6 +6,89 @@ const DATA_DIR = path.join(__dirname, 'data');
 const CV_FILES_DIR = path.join(DATA_DIR, 'cv-files');
 const MANIFEST_FILE = path.join(DATA_DIR, 'cvs-manifest.json');
 const TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 días
+const CV_TTL_MS = TOKEN_TTL_SECONDS * 1000;
+
+function isCvExpired(cv, now = Date.now(), ttlMs = CV_TTL_MS) {
+  const saved = Date.parse(cv && cv.savedAt);
+  if (!Number.isFinite(saved)) return false;
+  return now - saved >= ttlMs;
+}
+
+function stampMissingSavedAt(cvs, now = Date.now()) {
+  const iso = new Date(now).toISOString();
+  return (Array.isArray(cvs) ? cvs : []).map((cv) => {
+    if (!cv || typeof cv !== 'object') return cv;
+    if (cv.savedAt) return cv;
+    return { ...cv, savedAt: iso };
+  });
+}
+
+function partitionExpired(cvs, now = Date.now()) {
+  const kept = [];
+  const expired = [];
+  for (const cv of Array.isArray(cvs) ? cvs : []) {
+    if (isCvExpired(cv, now)) expired.push(cv);
+    else kept.push(cv);
+  }
+  return { kept, expired };
+}
+
+function getWorkspaceCvs(cvs) {
+  return (Array.isArray(cvs) ? cvs : []).filter((c) => c && c.inWorkspace !== false);
+}
+
+function archiveAllWorkspace(cvs) {
+  return (Array.isArray(cvs) ? cvs : []).map((cv) =>
+    cv && typeof cv === 'object' ? { ...cv, inWorkspace: false } : cv
+  );
+}
+
+function archiveSentByPhones(cvs, sentPhones, phonesMatch) {
+  const phones = Array.isArray(sentPhones) ? sentPhones : [];
+  const matchFn = typeof phonesMatch === 'function' ? phonesMatch : () => false;
+  return (Array.isArray(cvs) ? cvs : []).map((cv) => {
+    if (!cv || typeof cv !== 'object') return cv;
+    const phone = cv.telefono;
+    if (!phone || phone === 'No encontrado') return cv;
+    const sent = phones.some((s) => matchFn(phone, s));
+    return sent ? { ...cv, inWorkspace: false } : cv;
+  });
+}
+
+function hasUsablePhone(phone) {
+  const raw = String(phone || '').trim();
+  return Boolean(raw) && raw !== 'No encontrado' && raw !== 'N/A';
+}
+
+/**
+ * Archiva el lote anterior y mete el nuevo en mesa.
+ * Si un teléfono ya existía, reemplaza esa entrada y reporta el cvId viejo.
+ */
+function mergeIncomingBatch(archive, incoming, phonesMatch) {
+  const matchFn = typeof phonesMatch === 'function' ? phonesMatch : () => false;
+  const result = archiveAllWorkspace(archive);
+  const replacedIds = [];
+
+  for (const entry of Array.isArray(incoming) ? incoming : []) {
+    if (!entry || typeof entry !== 'object') continue;
+    const next = { ...entry, inWorkspace: true };
+    let idx = -1;
+    if (hasUsablePhone(next.telefono)) {
+      idx = result.findIndex(
+        (c) => c && hasUsablePhone(c.telefono) && matchFn(c.telefono, next.telefono)
+      );
+    }
+    if (idx >= 0) {
+      const prevId = result[idx].cvId;
+      if (prevId && prevId !== next.cvId) replacedIds.push(prevId);
+      result[idx] = next;
+    } else {
+      result.push(next);
+    }
+  }
+
+  return { cvs: result, replacedIds };
+}
 
 function ensureCvFilesDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -162,6 +245,7 @@ function sanitizeCvForPersist(cv) {
     procesado: Boolean(cv.procesado),
     error: cv.error || undefined,
     fromConversation: Boolean(cv.fromConversation) || undefined,
+    inWorkspace: cv.inWorkspace !== false,
     savedAt: cv.savedAt || new Date().toISOString()
   };
 }
@@ -223,18 +307,29 @@ function loadCvsManifest() {
         procesado: cv.procesado !== false,
         error: cv.error,
         fromConversation: Boolean(cv.fromConversation),
+        inWorkspace: cv.inWorkspace !== false,
         savedAt: cv.savedAt || null
       });
     }
 
-    if (dropped > 0) {
-      console.warn(
-        `[cvFileStore] Manifest: ${dropped} CV(s) omitidos (archivo faltante). Quedan ${restored.length}.`
-      );
-      saveCvsManifest(restored);
+    const hadMissingSavedAt = restored.some((cv) => !cv.savedAt);
+    const { kept, expired } = purgeExpiredCvs(restored);
+
+    if (dropped > 0 || expired.length > 0 || hadMissingSavedAt) {
+      if (dropped > 0) {
+        console.warn(
+          `[cvFileStore] Manifest: ${dropped} CV(s) omitidos (archivo faltante).`
+        );
+      }
+      if (expired.length > 0) {
+        console.warn(
+          `[cvFileStore] Caducidad 7 días: ${expired.length} CV(s) borrados. Quedan ${kept.length}.`
+        );
+      }
+      saveCvsManifest(kept);
     }
 
-    return restored;
+    return kept;
   } catch (err) {
     console.error('[cvFileStore] Error leyendo cvs-manifest.json:', err.message);
     return [];
@@ -250,6 +345,33 @@ function clearCvsManifest() {
   }
 }
 
+function deleteCvFile(cvId) {
+  const filePath = resolveFilePath(cvId);
+  if (!filePath) return false;
+  try {
+    fs.unlinkSync(filePath);
+    return true;
+  } catch (err) {
+    console.warn(`[cvFileStore] No se pudo borrar CV ${cvId}:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Quita CVs con más de 7 días y borra sus PDFs.
+ * @param {Array} cvs
+ * @param {number} [now]
+ * @returns {{ kept: Array, expired: Array }}
+ */
+function purgeExpiredCvs(cvs, now = Date.now()) {
+  const stamped = stampMissingSavedAt(cvs, now);
+  const { kept, expired } = partitionExpired(stamped, now);
+  for (const cv of expired) {
+    if (cv && cv.cvId) deleteCvFile(cv.cvId);
+  }
+  return { kept, expired };
+}
+
 /** Borra PDFs + manifiesto */
 function clearAllCvs() {
   clearAllCvFiles();
@@ -261,8 +383,18 @@ function isPanelIntegrationConfigured() {
 }
 
 module.exports = {
+  CV_TTL_MS,
+  TOKEN_TTL_SECONDS,
+  isCvExpired,
+  stampMissingSavedAt,
+  partitionExpired,
+  getWorkspaceCvs,
+  archiveAllWorkspace,
+  archiveSentByPhones,
+  mergeIncomingBatch,
   saveCvFile,
   getCvFileMeta,
+  deleteCvFile,
   buildSignedToken,
   verifySignedToken,
   buildCvPublicUrl,
@@ -271,6 +403,7 @@ module.exports = {
   clearCvsManifest,
   saveCvsManifest,
   loadCvsManifest,
+  purgeExpiredCvs,
   sanitizeCvForPersist,
   isPublicUrlConfigured,
   isPanelIntegrationConfigured,

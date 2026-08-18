@@ -787,6 +787,18 @@ class CVAnalyzer {
                 this.setUserLineAccess(btn.dataset.userId, btn.dataset.sessionId, '');
             });
         });
+        this.lineUsersList.querySelectorAll('.line-transfer-user').forEach((select) => {
+            select.addEventListener('click', (event) => event.stopPropagation());
+            select.addEventListener('mousedown', (event) => event.stopPropagation());
+            select.addEventListener('change', () => {
+                const toUserId = select.value;
+                if (!toUserId) return;
+                this.transferUserLines(select.dataset.fromUserId, toUserId, {
+                    fromUsername: select.dataset.fromUsername || '',
+                    select
+                });
+            });
+        });
     }
 
     renderLineUsersList() {
@@ -883,9 +895,25 @@ class CVAnalyzer {
                     return { session, access };
                 })
                 .filter(Boolean);
+            const others = users.filter((u) => u.id !== user.id);
+            const transferSelect =
+                assigned.length && others.length
+                    ? `<select class="form-select line-transfer-user" data-from-user-id="${this.escapeHtml(user.id)}" data-from-username="${this.escapeHtml(user.username)}" title="Pasar todas las líneas a otro vendedor">
+                            <option value="">Pasar líneas…</option>
+                            ${others
+                                .map(
+                                    (u) =>
+                                        `<option value="${this.escapeHtml(u.id)}">${this.escapeHtml(u.username)}</option>`
+                                )
+                                .join('')}
+                       </select>`
+                    : '';
             columnsHtml.push(`
             <div class="lines-kanban-column" data-column="user" data-user-id="${this.escapeHtml(user.id)}">
-                <p class="lines-kanban-column-title">${this.escapeHtml(user.username)} <span class="count">(${assigned.length})</span></p>
+                <div class="lines-kanban-column-head">
+                    <p class="lines-kanban-column-title">${this.escapeHtml(user.username)} <span class="count">(${assigned.length})</span></p>
+                    ${transferSelect}
+                </div>
                 <div class="lines-kanban-pills">
                     ${
                         assigned.length
@@ -4285,6 +4313,132 @@ class CVAnalyzer {
         }
     }
 
+    async transferUserLines(fromUserId, toUserId, opts = {}) {
+        if (!this.isSuperUser() || !fromUserId || !toUserId) return;
+        const fromUser = (this.managedUsers || []).find((u) => u.id === fromUserId);
+        const toUser = (this.managedUsers || []).find((u) => u.id === toUserId);
+        const fromName = opts.fromUsername || (fromUser && fromUser.username) || 'este usuario';
+        const toName = (toUser && toUser.username) || 'el otro usuario';
+        const n = fromUser
+            ? Object.values(fromUser.permissions || {}).filter((v) => v === 'view' || v === 'control')
+                  .length
+            : 0;
+        if (
+            !confirm(
+                `¿Pasar ${n} línea${n === 1 ? '' : 's'} de ${fromName} a ${toName}? ${fromName} dejará de verlas.`
+            )
+        ) {
+            if (opts.select) opts.select.value = '';
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/users/${encodeURIComponent(fromUserId)}/transfer-lines`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ toUserId })
+            });
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudo pasar las líneas');
+            if (fromUser) fromUser.permissions = (data.from && data.from.permissions) || {};
+            if (toUser) toUser.permissions = (data.to && data.to.permissions) || {};
+            this.renderLineUsersList();
+            this.renderUsersList();
+            this.showStatus(
+                `${data.movedCount} línea${data.movedCount === 1 ? '' : 's'} pasadas a ${toName}`,
+                'success'
+            );
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+            if (opts.select) opts.select.value = '';
+            await this.loadUsers();
+        }
+    }
+
+    async refreshCurrentUserAccess() {
+        try {
+            const response = await fetch('/api/auth/status');
+            const data = await response.json();
+            if (data && data.user) {
+                this.currentUser = { ...(this.currentUser || {}), ...data.user };
+                if (this.myGerenteEmail && data.user.gerenteEmail != null) {
+                    this.myGerenteEmail.value = data.user.gerenteEmail || '';
+                }
+            }
+        } catch (error) {
+            console.warn('auth/status:', error);
+        }
+    }
+
+    clearActiveConversationThread() {
+        this.activeConversation = null;
+        this.activeConversationBlocked = false;
+        this.activeConversationAiPaused = false;
+        this.activeConversationKnownContact = false;
+        this.setConversationsReplyEnabled(false);
+        if (this.conversationsThreadHeader) {
+            this.conversationsThreadHeader.textContent = 'Selecciona un chat';
+        }
+        if (this.conversationsThreadMessages) {
+            this.conversationsThreadMessages.innerHTML =
+                '<p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>';
+            delete this.conversationsThreadMessages.dataset.lastMessagesHtml;
+        }
+        if (typeof this.updateConversationThreadActions === 'function') {
+            this.updateConversationThreadActions();
+        }
+    }
+
+    async applyLineAccessChange(payload = {}) {
+        if (this._lineAccessChangeInFlight) {
+            this._lineAccessChangeQueued = true;
+            return;
+        }
+        this._lineAccessChangeInFlight = true;
+        try {
+            const myName = String(
+                (this.currentUser && this.currentUser.username) || ''
+            ).toLowerCase();
+            await this.refreshCurrentUserAccess();
+            await this.loadSessions();
+            if (this.isSuperUser()) {
+                await this.loadUsers();
+            }
+            this.applyPermissionUI();
+
+            const active = this.activeConversation;
+            if (active && !this.getSessionAccess(active.sessionId)) {
+                this.clearActiveConversationThread();
+            }
+            if (this.conversationsEverLoaded) {
+                await this.loadConversationsChats({ silent: true });
+            }
+            if (typeof this.loadIncomingInbox === 'function') {
+                this.loadIncomingInbox().catch(() => {});
+            }
+
+            const moved = Number(payload.movedCount) || 0;
+            const toName = String(payload.toUsername || '').toLowerCase();
+            const fromName = String(payload.fromUsername || '').toLowerCase();
+            if (myName && toName && myName === toName) {
+                this.showStatus(
+                    moved === 1 ? 'Te pasaron 1 línea' : `Te pasaron ${moved} líneas`,
+                    'success'
+                );
+            } else if (myName && fromName && myName === fromName) {
+                this.showStatus('Tus líneas se pasaron a otro vendedor', 'info');
+            }
+        } catch (error) {
+            console.warn('lineAccessChanged:', error);
+        } finally {
+            this._lineAccessChangeInFlight = false;
+            if (this._lineAccessChangeQueued) {
+                this._lineAccessChangeQueued = false;
+                this.applyLineAccessChange(payload);
+            }
+        }
+    }
+
     renderUsersList() {
         if (!this.usersList) return;
         const users = this.managedUsers || [];
@@ -5206,20 +5360,10 @@ class CVAnalyzer {
         }
 
         if (lockMatchedCv && cvId) {
-            // CV del mismo número al que se envió el mensaje: no pedir elegir
-            const cv =
-                this.getReusableCvs().find((c) => c.cvId === cvId) || {
-                    cvId,
-                    nombre: leadNombre,
-                    telefono: leadTelefono,
-                    archivoOriginal: ''
-                };
-            if (this.agendarCvSelectWrap) {
-                this.agendarCvSelectWrap.style.display = 'block';
-            }
+            // CV ligado al chat: no mostrar lista
+            if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
             if (this.agendarCvSelect) {
-                const shown = `${cv.nombre || 'Lead'} · ${cv.telefono || leadTelefono || ''} · ${cv.archivoOriginal || cv.cvId}`;
-                this.agendarCvSelect.innerHTML = `<option value="${this.escapeHtml(cv.cvId)}" selected>${this.escapeHtml(shown)}</option>`;
+                this.agendarCvSelect.innerHTML = '';
                 this.agendarCvSelect.disabled = true;
             }
             if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
@@ -5262,6 +5406,10 @@ class CVAnalyzer {
             if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
             if (this.agendarCvUploadWrap) {
                 this.agendarCvUploadWrap.style.display = needsUpload ? 'block' : 'none';
+            }
+            if (needsUpload && this.agendarCvUploadHint) {
+                this.agendarCvUploadHint.textContent =
+                    'No hay un CV ligado a este chat. Sube el PDF de este lead.';
             }
         }
 
@@ -5335,9 +5483,9 @@ class CVAnalyzer {
             this.agendarSlot.appendChild(opt);
             this.agendarSlot.disabled = false;
         }
-        if (preset.vendedorNombre) {
+        if (preset.vendedorNombre && !this.agendarCvId) {
             this.setAgendarStatus(
-                `Horario preseleccionado: ${preset.vendedorNombre} · ${preset.fecha} ${preset.horaInicio}. Elige el lead (CV) a agendar.`,
+                `Horario preseleccionado: ${preset.vendedorNombre} · ${preset.fecha} ${preset.horaInicio}. Sube el CV de este lead si no está ligado al chat.`,
                 'info'
             );
         }
@@ -5403,24 +5551,21 @@ class CVAnalyzer {
             if (matched) matchSource = 'telefono';
         }
 
-        const reusable = this.getReusableCvs();
         this.agendarCvIndex = matched
             ? (this.cvsData || []).findIndex((c) => c.cvId === matched.cvId)
             : null;
 
         const label = matched
-            ? `Chat: ${name} · CV automático: ${matched.nombre || matched.archivoOriginal}`
-            : reusable.length > 0
-              ? `Chat: ${name}${phone ? ` · +${phone}` : ''} — elige el CV del lead`
-              : `Chat: ${name}${phone ? ` · +${phone}` : ''} — no hay CVs cargados`;
+            ? `Chat: ${name} · CV: ${matched.nombre || matched.archivoOriginal}`
+            : `Chat: ${name}${phone ? ` · +${phone}` : ''} — no hay CV ligado; sube el PDF de este lead`;
 
         await this.prepareAgendarModalShell({
             label,
             leadNombre: (matched && matched.nombre) || name,
             leadTelefono: phone ? `+${phone}` : (matched && matched.telefono) || '',
             cvId: matched ? matched.cvId : null,
-            needsUpload: !matched && reusable.length === 0,
-            showCvPicker: !matched,
+            needsUpload: !matched,
+            showCvPicker: false,
             preferredPhone: phone,
             lockMatchedCv: Boolean(matched),
             matchSource
@@ -5428,19 +5573,11 @@ class CVAnalyzer {
     }
 
     async ensureAgendarCvId() {
-        if (this.agendarCvSelect && this.agendarCvSelect.value) {
-            this.agendarCvId = this.agendarCvSelect.value;
-            this.agendarNeedsCvUpload = false;
-        }
-
         if (this.agendarCvId) return this.agendarCvId;
 
         const file = this.agendarCvFile && this.agendarCvFile.files && this.agendarCvFile.files[0];
         if (!file) {
-            if (this.getReusableCvs().length > 0) {
-                throw new Error('Selecciona un CV de la lista de leads cargados.');
-            }
-            throw new Error('Selecciona el PDF del CV del candidato.');
+            throw new Error('Sube el PDF del CV de este lead.');
         }
 
         const formData = new FormData();
@@ -5869,18 +6006,19 @@ class CVAnalyzer {
             if (!matched) matched = this.findCvByPhone(preferredPhone);
         }
 
-        const reusable = this.getReusableCvs();
         const label = matched
             ? `Calendario · ${slot.vendedorNombre} ${slot.fecha} ${slot.horaInicio} · Lead: ${matched.nombre || matched.archivoOriginal}`
-            : `Calendario · ${slot.vendedorNombre} · ${slot.fecha} ${slot.horaInicio} — ¿a quién agendar?`;
+            : active && !active.isGroup
+              ? `Calendario · ${slot.vendedorNombre} · ${slot.fecha} ${slot.horaInicio} — no hay CV ligado; sube el PDF de este lead`
+              : `Calendario · ${slot.vendedorNombre} · ${slot.fecha} ${slot.horaInicio} — abre el chat del lead o sube su PDF`;
 
         await this.prepareAgendarModalShell({
             label,
             leadNombre: (matched && matched.nombre) || leadNombre || '',
             leadTelefono: leadTelefono || (matched && matched.telefono) || '',
             cvId: matched ? matched.cvId : null,
-            needsUpload: !matched && reusable.length === 0,
-            showCvPicker: !lockMatched,
+            needsUpload: !matched,
+            showCvPicker: false,
             preferredPhone,
             lockMatchedCv: lockMatched,
             matchSource: lockMatched ? 'telefono' : '',
@@ -6213,7 +6351,11 @@ class CVAnalyzer {
             const response = await fetch('/cvs/update-phone', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ index, telefono })
+                body: JSON.stringify({
+                    index,
+                    telefono,
+                    archivoOriginal: this.cvsData[index]?.archivoOriginal || undefined
+                })
             });
             const result = await response.json();
             if (!response.ok || !result.success) {
@@ -7393,7 +7535,10 @@ class CVAnalyzer {
                     this.hideMessagePreview();
                     this.disconnectFromEvents();
                 this.connectToEvents(); // Desconectar eventos al limpiar
-                    this.showStatus('Datos limpiados correctamente', 'success');
+                    this.showStatus(
+                        result.message || 'Mesa de trabajo limpiada. Los CVs de la semana siguen para agendar.',
+                        'success'
+                    );
                 }
             } catch (error) {
                 console.error('Error clearing data:', error);
@@ -8024,6 +8169,16 @@ class CVAnalyzer {
             } catch (error) {
                 console.warn('aiControlChanged SSE:', error);
             }
+        });
+
+        this.eventSource.addEventListener('lineAccessChanged', (event) => {
+            let payload = {};
+            try {
+                payload = JSON.parse(event.data || '{}');
+            } catch {
+                payload = {};
+            }
+            this.applyLineAccessChange(payload);
         });
 
         // Manejar errores de conexión (nginx/timeouts son normales; se reconecta solo)

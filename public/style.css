@@ -2460,14 +2460,32 @@ footer p {
     background: #f0f9ff;
 }
 
+.lines-kanban-column-head {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
 .lines-kanban-column-title {
     font-size: 12px;
     font-weight: 700;
     color: #334155;
-    margin: 0 0 10px;
+    margin: 0;
     display: flex;
     justify-content: space-between;
     gap: 8px;
+}
+
+.lines-kanban-column > .lines-kanban-column-title {
+    margin-bottom: 10px;
+}
+
+.line-transfer-user {
+    font-size: 11px;
+    padding: 4px 6px;
+    width: 100%;
+    max-width: 100%;
 }
 
 .lines-kanban-column-title .count {

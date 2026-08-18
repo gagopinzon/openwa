@@ -171,7 +171,10 @@ const upload = multer({
 // Almacenar datos de CVs (persistidos en data/cvs-manifest.json + data/cv-files/)
 let cvsData = cvFileStore.loadCvsManifest();
 if (cvsData.length > 0) {
-  console.log(`[cvs] Restaurados ${cvsData.length} CV(s) desde disco`);
+  const workspaceCount = cvFileStore.getWorkspaceCvs(cvsData).length;
+  console.log(
+    `[cvs] Restaurados ${cvsData.length} CV(s) desde disco (${workspaceCount} en mesa de trabajo, caducan a los 7 días)`
+  );
 }
 
 function persistCvsData() {
@@ -184,10 +187,36 @@ function persistCvsData() {
   }
 }
 
-/** Quita de la mesa de trabajo los CVs enviados con éxito (evita reenvío accidental). */
+function workspaceCvs() {
+  return cvFileStore.getWorkspaceCvs(cvsData);
+}
+
+function purgeExpiredArchive() {
+  const { kept, expired } = cvFileStore.purgeExpiredCvs(cvsData);
+  cvsData = kept;
+  if (expired.length > 0) {
+    persistCvsData();
+    console.log(
+      `🧹 Caducidad 7 días: ${expired.length} CV(s) borrados; quedan ${cvsData.length}`
+    );
+  }
+  return expired.length;
+}
+
+purgeExpiredArchive();
+setInterval(() => {
+  try {
+    purgeExpiredArchive();
+  } catch (err) {
+    console.warn('[cvs] purgeExpiredArchive:', err.message);
+  }
+}, 60 * 60 * 1000).unref();
+
+/** Saca de la mesa los CVs enviados; el archivo de 7 días se conserva. */
 function removeSuccessfullySentFromWorkspace(results) {
+  const remainingBefore = workspaceCvs().length;
   if (!Array.isArray(results) || results.length === 0) {
-    return { removed: 0, remaining: cvsData.length };
+    return { removed: 0, remaining: remainingBefore };
   }
 
   const sentPhones = results
@@ -195,35 +224,52 @@ function removeSuccessfullySentFromWorkspace(results) {
     .map((r) => r.telefono);
 
   if (sentPhones.length === 0) {
-    return { removed: 0, remaining: cvsData.length };
+    return { removed: 0, remaining: remainingBefore };
   }
 
-  const before = cvsData.length;
-  cvsData = cvsData.filter((cv) => {
-    const phone = cv?.telefono;
-    if (!phone || phone === 'No encontrado') return true;
-    return !sentPhones.some((sent) => contactHistory.phonesMatch(phone, sent));
-  });
-  const removed = before - cvsData.length;
+  cvsData = cvFileStore.archiveSentByPhones(
+    cvsData,
+    sentPhones,
+    contactHistory.phonesMatch
+  );
+  const remaining = workspaceCvs().length;
+  const removed = remainingBefore - remaining;
   if (removed > 0) {
     persistCvsData();
     console.log(
-      `🧹 Mesa de trabajo: quitados ${removed} CV(s) ya enviados; quedan ${cvsData.length}`
+      `🧹 Mesa de trabajo: archivados ${removed} CV(s) enviados (${remaining} en mesa, ${cvsData.length} en archivo 7 días)`
     );
   }
-  return { removed, remaining: cvsData.length };
+  return { removed, remaining };
+}
+
+function liveArchiveCvs() {
+  return cvsData.filter(
+    (c) => c && c.procesado && c.cvId && !cvFileStore.isCvExpired(c)
+  );
 }
 
 /**
  * Resuelve el CV del lead por teléfono (o cvId del historial).
+ * Busca en el archivo de 7 días, no solo en la mesa de trabajo.
  * @param {string} phone
  * @param {{ cvId?: string|null }} [hints]
  */
 function findCvForPhone(phone, hints = {}) {
-  const reusable = cvsData.filter((c) => c && c.procesado && c.cvId);
+  const reusable = liveArchiveCvs();
   if (hints.cvId) {
     const byId = reusable.find((c) => c.cvId === hints.cvId);
     if (byId) return byId;
+    const meta = cvFileStore.getCvFileMeta(hints.cvId);
+    if (meta) {
+      return {
+        cvId: hints.cvId,
+        nombre: '',
+        telefono: phone || '',
+        archivoOriginal: meta.fileName,
+        procesado: true
+      };
+    }
   }
   if (!phone) return null;
   return (
@@ -682,7 +728,8 @@ async function runWhatsAppSendJob({
     broadcastEvent('cvsUpdated', {
       removed: workspaceCleanup.removed,
       remaining: workspaceCleanup.remaining,
-      cvs: cvsData
+      cvs: workspaceCvs(),
+      archiveCount: cvsData.length
     });
     broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
 
@@ -766,7 +813,7 @@ function canControlSendQueueBatch(user, batch) {
 }
 
 async function prepareCvsForSend(cvsFromClient) {
-  let cvsToProcess = cvsData;
+  let cvsToProcess = workspaceCvs();
   if (cvsFromClient && Array.isArray(cvsFromClient)) {
     console.log('📝 Recibiendo CVs editados del cliente...');
     cvsToProcess = cvsFromClient;
@@ -1026,7 +1073,8 @@ function finishSendQueueNow() {
   broadcastEvent('cvsUpdated', {
     removed: workspaceCleanup.removed,
     remaining: workspaceCleanup.remaining,
-    cvs: cvsData
+    cvs: workspaceCvs(),
+    archiveCount: cvsData.length
   });
   broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
   broadcastEvent('sendQueueFinished', {
@@ -1322,6 +1370,29 @@ app.put('/api/users/:id', requireSuper, (req, res) => {
   }
 });
 
+app.post('/api/users/:id/transfer-lines', requireSuper, (req, res) => {
+  try {
+    const result = usersStore.transferLines(req.params.id, req.body && req.body.toUserId);
+    broadcastEvent('lineAccessChanged', {
+      fromUserId: result.from.id,
+      toUserId: result.to.id,
+      fromUsername: result.from.username,
+      toUsername: result.to.username,
+      sessionIds: result.sessionIds,
+      movedCount: result.movedCount
+    });
+    res.json({
+      success: true,
+      from: result.from,
+      to: result.to,
+      sessionIds: result.sessionIds,
+      movedCount: result.movedCount
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 app.delete('/api/users/:id', requireSuper, (req, res) => {
   try {
     usersStore.deleteUser(req.params.id);
@@ -1346,10 +1417,9 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
     }
 
     console.log(`Procesando ${req.files.length} archivos PDF...`);
+    purgeExpiredArchive();
 
-    // Limpiar datos y archivos anteriores
-    cvsData = [];
-    cvFileStore.clearAllCvs();
+    const incoming = [];
 
     // Procesar cada archivo PDF
     for (let i = 0; i < req.files.length; i++) {
@@ -1365,25 +1435,22 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
         // Extraer datos estructurados
         const cvData = extractCVData(text);
 
-        // Agregar información del archivo
-        const processedCV = {
+        incoming.push({
           ...cvData,
           archivoOriginal: file.originalname,
           cvId: saved.cvId,
           cvFileName: saved.cvFileName,
           saludo: '',
-          mensajeIA: '', // Se llenará después
+          mensajeIA: '',
           alreadyContacted: false,
           contactedAt: null,
           procesado: true,
+          inWorkspace: true,
           savedAt: new Date().toISOString()
-        };
-
-        cvsData.push(processedCV);
-
+        });
       } catch (error) {
         console.error(`Error procesando ${file.originalname}:`, error.message);
-        cvsData.push({
+        incoming.push({
           nombre: 'Error al procesar',
           telefono: 'N/A',
           experiencia: 'Error al extraer texto del PDF',
@@ -1395,17 +1462,40 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           alreadyContacted: false,
           contactedAt: null,
           procesado: false,
+          inWorkspace: true,
           error: error.message
         });
       }
     }
 
-    // Verificar historial antes de generar IA / mostrar en UI
+    const { cvs: merged, replacedIds } = cvFileStore.mergeIncomingBatch(
+      cvsData,
+      incoming,
+      contactHistory.phonesMatch
+    );
+    for (const oldId of replacedIds) {
+      cvFileStore.deleteCvFile(oldId);
+    }
+    cvsData = merged;
+
+    // Verificar historial antes de generar IA / mostrar en UI (solo mesa)
     let alreadyContactedCount = 0;
     if (contactHistory.mongoUriConfigured()) {
       try {
-        cvsData = await contactHistory.annotateAlreadyContacted(cvsData);
-        alreadyContactedCount = cvsData.filter((cv) => cv.alreadyContacted).length;
+        const ws = workspaceCvs();
+        const annotated = await contactHistory.annotateAlreadyContacted(ws);
+        alreadyContactedCount = annotated.filter((cv) => cv.alreadyContacted).length;
+        for (const cv of annotated) {
+          const idx = cvsData.findIndex(
+            (c) =>
+              (cv.cvId && c.cvId === cv.cvId) ||
+              c.archivoOriginal === cv.archivoOriginal
+          );
+          if (idx >= 0) {
+            cvsData[idx].alreadyContacted = Boolean(cv.alreadyContacted);
+            cvsData[idx].contactedAt = cv.contactedAt || null;
+          }
+        }
         if (alreadyContactedCount > 0) {
           console.log(
             `📇 ${alreadyContactedCount} CV(s) ya contactados (no se generará IA ni se enviarán).`
@@ -1417,13 +1507,17 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
     }
 
     persistCvsData();
-    console.log(`Procesamiento completado. ${cvsData.length} CVs procesados (persistidos en disco).`);
+    const ws = workspaceCvs();
+    console.log(
+      `Procesamiento completado. ${ws.length} CVs en mesa (${cvsData.length} en archivo 7 días).`
+    );
 
     res.json({
       success: true,
-      message: `Se procesaron ${cvsData.length} CVs exitosamente`,
+      message: `Se procesaron ${ws.length} CVs exitosamente`,
       alreadyContactedCount,
-      cvs: cvsData
+      cvs: ws,
+      archiveCount: cvsData.length
     });
 
   } catch (error) {
@@ -1445,7 +1539,8 @@ app.post('/generate-messages', async (req, res) => {
       });
     }
 
-    if (cvsData.length === 0) {
+    const ws = workspaceCvs();
+    if (ws.length === 0) {
       return res.status(400).json({
         error: 'No hay CVs procesados. Sube archivos PDF primero.'
       });
@@ -1454,17 +1549,33 @@ app.post('/generate-messages', async (req, res) => {
     // Revalidar historial por si hubo contactos entre upload y generate
     if (contactHistory.mongoUriConfigured()) {
       try {
-        cvsData = await contactHistory.annotateAlreadyContacted(cvsData);
+        const annotated = await contactHistory.annotateAlreadyContacted(ws);
+        for (const cv of annotated) {
+          const idx = cvsData.findIndex(
+            (c) =>
+              (cv.cvId && c.cvId === cv.cvId) ||
+              c.archivoOriginal === cv.archivoOriginal
+          );
+          if (idx >= 0) {
+            cvsData[idx].alreadyContacted = Boolean(cv.alreadyContacted);
+            cvsData[idx].contactedAt = cv.contactedAt || null;
+            if (cv.alreadyContacted) {
+              cvsData[idx].saludo = '';
+              cvsData[idx].mensajeIA = '';
+            }
+          }
+        }
         persistCvsData();
       } catch (err) {
         console.warn('⚠️ contactHistory annotate en generate omitido:', err.message);
       }
     }
 
-    const alreadySkipped = cvsData.filter(
+    const workspace = workspaceCvs();
+    const alreadySkipped = workspace.filter(
       (cv) => cv.procesado && cv.nombre !== 'Error al procesar' && cv.alreadyContacted
     );
-    const validCVs = cvsData.filter(
+    const validCVs = workspace.filter(
       (cv) =>
         cv.procesado &&
         cv.nombre !== 'Error al procesar' &&
@@ -1484,7 +1595,7 @@ app.post('/generate-messages', async (req, res) => {
             ? 'Todos los CVs válidos ya fueron contactados; no hay mensajes de IA que generar.'
             : 'No hay CVs válidos para generar mensajes',
         alreadyContactedCount: alreadySkipped.length,
-        cvs: cvsData
+        cvs: workspaceCvs()
       });
     }
 
@@ -1504,7 +1615,7 @@ app.post('/generate-messages', async (req, res) => {
       started: true,
       total: validCVs.length,
       alreadyContactedCount: alreadySkipped.length,
-      cvs: cvsData,
+      cvs: workspaceCvs(),
       message: `Generación iniciada para ${validCVs.length} CVs` +
         (alreadySkipped.length > 0
           ? ` (${alreadySkipped.length} ya contactados omitidos)`
@@ -1520,7 +1631,17 @@ app.post('/generate-messages', async (req, res) => {
         });
 
         cvsWithMessages.forEach(cvWithMessage => {
-          const index = cvsData.findIndex(cv => cv.archivoOriginal === cvWithMessage.archivoOriginal);
+          let index = -1;
+          if (cvWithMessage.cvId) {
+            index = cvsData.findIndex((cv) => cv.cvId === cvWithMessage.cvId);
+          }
+          if (index < 0) {
+            index = cvsData.findIndex(
+              (cv) =>
+                cv.inWorkspace !== false &&
+                cv.archivoOriginal === cvWithMessage.archivoOriginal
+            );
+          }
           if (index !== -1) {
             cvsData[index].saludo = cvWithMessage.saludo;
             cvsData[index].mensajeIA = cvWithMessage.mensajeIA;
@@ -1537,7 +1658,7 @@ app.post('/generate-messages', async (req, res) => {
         broadcastEvent('generationComplete', {
           total: cvsWithMessages.length,
           alreadyContactedCount: alreadySkipped.length,
-          cvs: cvsData,
+          cvs: workspaceCvs(),
           message: `Se generaron mensajes de IA para ${cvsWithMessages.length} CVs`
         });
       } catch (error) {
@@ -1567,9 +1688,11 @@ app.get('/generation-status', (req, res) => {
 
 // Ruta para obtener el estado actual de los CVs
 app.get('/cvs-status', (req, res) => {
+  purgeExpiredArchive();
   res.json({
     success: true,
-    cvs: cvsData
+    cvs: workspaceCvs(),
+    archiveCount: cvsData.length
   });
 });
 
@@ -1584,22 +1707,29 @@ app.post('/cvs/update-phone', async (req, res) => {
       return res.status(400).json({ error: 'Teléfono requerido' });
     }
 
+    const workspace = workspaceCvs();
+    let archiveIndex = -1;
     let index = Number.isInteger(req.body?.index) ? req.body.index : parseInt(req.body?.index, 10);
-    if (!Number.isInteger(index) || index < 0 || index >= cvsData.length) {
-      const archivo = req.body?.archivoOriginal;
-      if (archivo) {
-        index = cvsData.findIndex((cv) => cv.archivoOriginal === archivo);
-      } else {
-        index = -1;
-      }
+    const archivo = req.body?.archivoOriginal;
+
+    if (Number.isInteger(index) && index >= 0 && index < workspace.length) {
+      const target = workspace[index];
+      archiveIndex = cvsData.findIndex(
+        (c) =>
+          (target.cvId && c.cvId === target.cvId) ||
+          c.archivoOriginal === target.archivoOriginal
+      );
+    }
+    if (archiveIndex < 0 && archivo) {
+      archiveIndex = cvsData.findIndex((cv) => cv.archivoOriginal === archivo);
     }
 
-    if (index < 0 || index >= cvsData.length) {
+    if (archiveIndex < 0 || archiveIndex >= cvsData.length) {
       return res.status(404).json({ error: 'CV no encontrado' });
     }
 
     const status = await contactHistory.lookupContactStatus(telefono);
-    const cv = cvsData[index];
+    const cv = cvsData[archiveIndex];
     cv.telefono = telefono;
     cv.alreadyContacted = Boolean(status.alreadyContacted);
     cv.contactedAt = status.contactedAt || null;
@@ -1622,7 +1752,8 @@ app.post('/cvs/update-phone', async (req, res) => {
       cv,
       alreadyContacted: cv.alreadyContacted,
       contactedAt: cv.contactedAt,
-      cvs: cvsData
+      cvs: workspaceCvs(),
+      archiveCount: cvsData.length
     });
   } catch (error) {
     console.error('Error en /cvs/update-phone:', error);
@@ -1694,6 +1825,7 @@ app.get('/api/public/cv/:cvId', (req, res) => {
 // Resolver CV del lead por teléfono (para agendar desde chat)
 app.get('/api/panel/cv-by-phone', async (req, res) => {
   try {
+    purgeExpiredArchive();
     const phone = contactHistory.normalizePhone(req.query.phone || req.query.telefono || '');
     if (!phone) {
       return res.status(400).json({ success: false, error: 'phone es obligatorio' });
@@ -2058,8 +2190,20 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
       mensajeIA: '',
       procesado: true,
       fromConversation: true,
+      inWorkspace: false,
       savedAt: new Date().toISOString()
     };
+
+    if (entry.cvId && contactHistory.normalizePhone(entry.telefono)) {
+      const prev = cvsData.find(
+        (c) =>
+          c &&
+          c.cvId &&
+          c.cvId !== entry.cvId &&
+          contactHistory.phonesMatch(c.telefono, entry.telefono)
+      );
+      if (prev && prev.cvId) cvFileStore.deleteCvFile(prev.cvId);
+    }
 
     // Actualizar si ya hay uno con mismo teléfono; si no, agregar
     const norm = contactHistory.normalizePhone(entry.telefono);
@@ -3185,13 +3329,17 @@ app.post('/close-whatsapp', async (req, res) => {
 
 // Ruta para limpiar datos
 app.post('/clear-data', (req, res) => {
-  cvsData = [];
-  cvFileStore.clearAllCvs();
-  console.log('Datos de CVs limpiados (disco + memoria)');
+  cvsData = cvFileStore.archiveAllWorkspace(cvsData);
+  persistCvsData();
+  console.log(
+    `Mesa de trabajo vaciada. Archivo 7 días: ${cvsData.length} CV(s) conservados.`
+  );
 
   res.json({
     success: true,
-    message: 'Datos limpiados correctamente'
+    message: 'Mesa de trabajo limpiada. Los CVs de la última semana siguen disponibles para agendar.',
+    cvs: [],
+    archiveCount: cvsData.length
   });
 });
 

@@ -246,6 +246,67 @@ function updateUser(id, patch) {
   return publicUser(store.users[idx]);
 }
 
+/**
+ * Calcula el movimiento de permisos: origen pierde las líneas, destino las recibe en control.
+ * @param {Record<string, SessionAccess>} fromPermissions
+ * @param {Record<string, SessionAccess>} toPermissions
+ * @returns {{ fromPermissions: Record<string, SessionAccess>, toPermissions: Record<string, SessionAccess>, sessionIds: string[] }}
+ */
+function computeLineTransfer(fromPermissions, toPermissions) {
+  const from = sanitizePermissions(fromPermissions);
+  const to = sanitizePermissions(toPermissions);
+  const sessionIds = Object.keys(from);
+  if (!sessionIds.length) {
+    throw new Error('Ese usuario no tiene líneas para pasar');
+  }
+  for (const sessionId of sessionIds) {
+    to[sessionId] = ACCESS_LEVELS.CONTROL;
+    delete from[sessionId];
+  }
+  return { fromPermissions: from, toPermissions: to, sessionIds };
+}
+
+/**
+ * Pasa todas las líneas de un usuario a otro en un solo write.
+ * @param {string} fromUserId
+ * @param {string} toUserId
+ * @returns {{ from: object, to: object, sessionIds: string[], movedCount: number }}
+ */
+function transferLines(fromUserId, toUserId) {
+  const fromId = String(fromUserId || '').trim();
+  const toId = String(toUserId || '').trim();
+  if (!fromId || !toId) {
+    throw new Error('Origen y destino son obligatorios');
+  }
+  if (fromId === toId) {
+    throw new Error('El destino debe ser otro usuario');
+  }
+
+  const store = readStore();
+  const fromIdx = store.users.findIndex((u) => u.id === fromId);
+  const toIdx = store.users.findIndex((u) => u.id === toId);
+  if (fromIdx === -1) throw new Error('Usuario origen no encontrado');
+  if (toIdx === -1) throw new Error('Usuario destino no encontrado');
+
+  const moved = computeLineTransfer(
+    store.users[fromIdx].permissions,
+    store.users[toIdx].permissions
+  );
+  const now = new Date().toISOString();
+  store.users[fromIdx].permissions = moved.fromPermissions;
+  store.users[fromIdx].updatedAt = now;
+  store.users[toIdx].permissions = moved.toPermissions;
+  store.users[toIdx].updatedAt = now;
+  writeStore(store);
+
+  return {
+    from: publicUser(store.users[fromIdx]),
+    to: publicUser(store.users[toIdx]),
+    sessionIds: moved.sessionIds,
+    movedCount: moved.sessionIds.length
+  };
+}
+
 function deleteUser(id) {
   const store = readStore();
   const before = store.users.length;
@@ -290,6 +351,8 @@ module.exports = {
   findUserById,
   createUser,
   updateUser,
+  computeLineTransfer,
+  transferLines,
   deleteUser,
   removeSessionFromAllUsers,
   authenticateStoredUser,
