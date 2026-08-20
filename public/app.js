@@ -5235,13 +5235,13 @@ class CVAnalyzer {
         if (this.agendarCvSelect) this.agendarCvSelect.disabled = false;
     }
 
-    async refreshCvsFromServer({ silent = false } = {}) {
+    async refreshCvsFromServer({ silent = false, render = true } = {}) {
         try {
             const response = await fetch('/cvs-status');
             const data = await response.json();
             if (data.success && Array.isArray(data.cvs)) {
                 this.cvsData = data.cvs;
-                if (this.cvsData.length > 0) {
+                if (render && this.cvsData.length > 0) {
                     this.displayResults();
                 }
                 return this.cvsData;
@@ -5587,56 +5587,130 @@ class CVAnalyzer {
         }
         if (!this.canOpenAgendarModal()) return;
 
-        await this.refreshCvsFromServer({ silent: true });
-
         const phone = this.phoneFromChatId(active.chatId);
         const name = String(active.name || '').trim() || 'Candidato';
+        const openToken = `${active.sessionId || ''}|${active.chatId || ''}|${Date.now()}`;
+        this._agendarOpenToken = openToken;
 
-        // Resolver en servidor: CV ligado al número del mensaje / historial
-        let matched = null;
-        let matchSource = '';
-        if (phone) {
-            try {
-                const response = await fetch(
-                    `/api/panel/cv-by-phone?phone=${encodeURIComponent(phone)}`
-                );
-                const data = await response.json();
-                if (data.success && data.found && data.cv && data.cv.cvId) {
-                    matched =
-                        this.getReusableCvs().find((c) => c.cvId === data.cv.cvId) ||
-                        data.cv;
-                    matchSource = data.matchSource || 'telefono';
-                }
-            } catch (err) {
-                console.warn('cv-by-phone:', err.message);
-            }
-        }
-        if (!matched) {
-            matched = this.findCvByPhone(phone);
-            if (matched) matchSource = 'telefono';
-        }
-
-        this.agendarCvIndex = matched
-            ? (this.cvsData || []).findIndex((c) => c.cvId === matched.cvId)
+        // Abrir YA con match local (memoria). No esperar red ni re-render de la tabla.
+        const quickMatch = phone ? this.findCvByPhone(phone) : null;
+        this.agendarCvIndex = quickMatch
+            ? (this.cvsData || []).findIndex((c) => c.cvId === quickMatch.cvId)
             : null;
 
-        const label = matched
-            ? `Chat: ${name} · CV: ${matched.nombre || matched.archivoOriginal}`
-            : `Chat: ${name}${phone ? ` · +${phone}` : ''} — no hay CV ligado; sube el PDF de este lead`;
+        const label = quickMatch
+            ? `Chat: ${name} · CV: ${quickMatch.nombre || quickMatch.archivoOriginal}`
+            : `Chat: ${name}${phone ? ` · +${phone}` : ''} — buscando CV…`;
 
-        await this.prepareAgendarModalShell({
+        const shellPromise = this.prepareAgendarModalShell({
             label,
-            leadNombre: (matched && matched.nombre) || name,
-            leadTelefono: phone ? `+${phone}` : (matched && matched.telefono) || '',
+            leadNombre: (quickMatch && quickMatch.nombre) || name,
+            leadTelefono: phone ? `+${phone}` : (quickMatch && quickMatch.telefono) || '',
             leadCorreo:
-                (matched && (matched.correo || matched.email || matched.leadCorreo)) || '',
-            cvId: matched ? matched.cvId : null,
-            needsUpload: !matched,
-            showCvPicker: !matched,
+                (quickMatch && (quickMatch.correo || quickMatch.email || quickMatch.leadCorreo)) ||
+                '',
+            cvId: quickMatch ? quickMatch.cvId : null,
+            needsUpload: !quickMatch,
+            showCvPicker: !quickMatch,
             preferredPhone: phone,
-            lockMatchedCv: Boolean(matched),
-            matchSource
+            lockMatchedCv: Boolean(quickMatch),
+            matchSource: quickMatch ? 'telefono' : ''
         });
+
+        // Enriquecer en paralelo (no bloquea la apertura visual)
+        this.enrichAgendarConversationMatch({
+            openToken,
+            phone,
+            name,
+            hadQuickMatch: Boolean(quickMatch)
+        }).catch((err) => console.warn('enrich agendar:', err.message));
+
+        await shellPromise;
+    }
+
+    /**
+     * Tras abrir el modal desde chat: resuelve CV ligado sin bloquear la apertura.
+     */
+    async enrichAgendarConversationMatch({ openToken, phone, name, hadQuickMatch }) {
+        try {
+            await this.refreshCvsFromServer({ silent: true, render: false });
+            if (this._agendarOpenToken !== openToken) return;
+
+            let matched = null;
+            let matchSource = '';
+            if (phone) {
+                try {
+                    const response = await fetch(
+                        `/api/panel/cv-by-phone?phone=${encodeURIComponent(phone)}`
+                    );
+                    const data = await response.json();
+                    if (data.success && data.found && data.cv && data.cv.cvId) {
+                        matched =
+                            this.getReusableCvs().find((c) => c.cvId === data.cv.cvId) ||
+                            data.cv;
+                        matchSource = data.matchSource || 'telefono';
+                    }
+                } catch (err) {
+                    console.warn('cv-by-phone:', err.message);
+                }
+            }
+            if (!matched) {
+                matched = this.findCvByPhone(phone);
+                if (matched) matchSource = 'telefono';
+            }
+            if (this._agendarOpenToken !== openToken) return;
+
+            if (!matched) {
+                if (!hadQuickMatch && this.agendarCvLabel) {
+                    this.agendarCvLabel.textContent = `Chat: ${name}${
+                        phone ? ` · +${phone}` : ''
+                    } — no hay CV ligado; sube el PDF de este lead`;
+                }
+                return;
+            }
+
+            // Actualizar modal con el CV definitivo (sin cerrar/reabrir)
+            this.agendarCvIndex = (this.cvsData || []).findIndex((c) => c.cvId === matched.cvId);
+            this.agendarCvId = matched.cvId;
+            this.agendarNeedsCvUpload = false;
+            this.agendarLeadNombre = matched.nombre || name || this.agendarLeadNombre || '';
+            if (phone) this.agendarLeadTelefono = `+${phone}`;
+            else if (matched.telefono) this.agendarLeadTelefono = matched.telefono;
+
+            if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
+            if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
+            if (this.agendarCvSelect) {
+                this.agendarCvSelect.innerHTML = '';
+                this.agendarCvSelect.disabled = true;
+            }
+            if (this.agendarCvFile) this.agendarCvFile.value = '';
+            if (this.agendarLeadCorreo && !this.agendarLeadCorreo.value.trim()) {
+                const correo = String(
+                    matched.correo || matched.email || matched.leadCorreo || ''
+                ).trim();
+                if (correo) this.agendarLeadCorreo.value = correo;
+            }
+            if (this.agendarCvLabel) {
+                this.agendarCvLabel.textContent = `Chat: ${name} · CV: ${
+                    matched.nombre || matched.archivoOriginal
+                }`;
+            }
+            const via =
+                matchSource === 'historial'
+                    ? 'ligado al envío de WhatsApp'
+                    : 'coincidente con el teléfono del chat';
+            if (
+                (this.agendarGerenteEmail?.value || '').trim() &&
+                this.panelConfig.publicCvUrlConfigured
+            ) {
+                this.setAgendarStatus(
+                    `CV asignado automáticamente (${via}). Es el mismo lead del mensaje.`,
+                    'info'
+                );
+            }
+        } catch (err) {
+            console.warn('enrichAgendarConversationMatch:', err.message);
+        }
     }
 
     async ensureAgendarCvId() {
@@ -6044,9 +6118,10 @@ class CVAnalyzer {
         if (!slot || !slot.vendedorId || !slot.fecha) return;
         if (!this.canOpenAgendarModal()) return;
 
-        await this.refreshCvsFromServer({ silent: true });
+        // No bloquear el modal re-renderizando la tabla de CVs
+        this.refreshCvsFromServer({ silent: true, render: false }).catch(() => {});
 
-        // Si hay chat activo individual, intentar ligar ese lead
+        // Si hay chat activo individual, intentar ligar ese lead (match local inmediato)
         let matched = null;
         let lockMatched = false;
         let leadNombre = '';
@@ -6058,22 +6133,12 @@ class CVAnalyzer {
             preferredPhone = this.phoneFromChatId(active.chatId);
             leadNombre = String(active.name || '').trim();
             leadTelefono = preferredPhone ? `+${preferredPhone}` : '';
-            try {
-                const response = await fetch(
-                    `/api/panel/cv-by-phone?phone=${encodeURIComponent(preferredPhone)}`
-                );
-                const data = await response.json();
-                if (data.success && data.found && data.cv?.cvId) {
-                    matched =
-                        this.getReusableCvs().find((c) => c.cvId === data.cv.cvId) || data.cv;
-                    lockMatched = true;
-                }
-            } catch {
-                matched = this.findCvByPhone(preferredPhone);
-                lockMatched = Boolean(matched);
-            }
-            if (!matched) matched = this.findCvByPhone(preferredPhone);
+            matched = this.findCvByPhone(preferredPhone);
+            lockMatched = Boolean(matched);
         }
+
+        const openToken = `cal|${preferredPhone || ''}|${slot.fecha}|${slot.horaInicio}|${Date.now()}`;
+        this._agendarOpenToken = openToken;
 
         const label = matched
             ? `Calendario · ${slot.vendedorNombre} ${slot.fecha} ${slot.horaInicio} · Lead: ${matched.nombre || matched.archivoOriginal}`
@@ -6101,6 +6166,16 @@ class CVAnalyzer {
                 horaFin: slot.horaFin
             }
         });
+
+        // Lookup servidor en background si hay teléfono y aún no hay CV
+        if (preferredPhone && !matched) {
+            this.enrichAgendarConversationMatch({
+                openToken,
+                phone: preferredPhone,
+                name: leadNombre || 'Candidato',
+                hadQuickMatch: false
+            }).catch(() => {});
+        }
     }
 
     populateAgendarVendedores(data) {
