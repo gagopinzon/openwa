@@ -182,7 +182,7 @@
                             <span id="agendaPendingCount" class="agenda-pending-count">0</span>
                         </h2>
                         <p style="font-size: 13px; color: #64748b; margin: 0;">
-                            El lead eligió horario con la IA. Asigna vendedor, pega la liga Zoom/Meet y confirma para crear la reunión y avisar por WhatsApp.
+                            El lead eligió horario con la IA. Asigna vendedor y confirma para crear la reunión; el panel genera la liga de Meet automáticamente y Msg avisa por WhatsApp.
                         </p>
                     </div>
                     <button type="button" id="agendaPendingRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
@@ -661,9 +661,6 @@
                 <select id="agendarSlot" class="agendar-input" disabled>
                     <option value="">Elige un vendedor primero</option>
                 </select>
-
-                <label class="agendar-field-label" for="agendarUrlReunion">Liga Zoom / Meet / Teams</label>
-                <input type="url" id="agendarUrlReunion" class="agendar-input" placeholder="https://zoom.us/j/..." required />
 
                 <label class="agendar-field-label" for="agendarLeadCorreo">Email del candidato (opcional, override)</label>
                 <input type="email" id="agendarLeadCorreo" class="agendar-input" placeholder="Solo si el CV no trae email visible" />

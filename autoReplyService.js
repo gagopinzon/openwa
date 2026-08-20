@@ -824,7 +824,10 @@ function buildNoCvAgendaReply(contactName, senderName) {
  */
 function buildConfirmedMeetingReply({ contactName, fecha, horaInicio, urlReunion, senderName }) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
-  return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}. Liga: ${urlReunion}\n\n¡Nos vemos! ☺️`;
+  const ligaLine = urlReunion
+    ? `\nLiga para unirte: ${urlReunion}`
+    : '';
+  return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}.${ligaLine}\n\n¡Nos vemos! ☺️`;
 }
 
 function extractWebhookId(created) {

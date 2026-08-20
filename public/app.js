@@ -5773,7 +5773,6 @@ class CVAnalyzer {
                             <option value="">Vendedor…</option>
                             ${options}
                         </select>
-                        <input type="url" class="form-select agenda-pending-url" data-id="${this.escapeHtml(item.id)}" placeholder="https://zoom.us/… o Meet">
                         <button type="button" class="btn btn-primary btn-sm" data-agenda-confirm="${this.escapeHtml(item.id)}">Confirmar</button>
                         <button type="button" class="btn btn-danger btn-sm" data-agenda-cancel="${this.escapeHtml(item.id)}">Cancelar</button>
                     </div>
@@ -5786,30 +5785,33 @@ class CVAnalyzer {
         const card = this.agendaPendingList?.querySelector(`[data-pending-id="${id}"]`);
         if (!card) return;
         const select = card.querySelector('.agenda-pending-vendor');
-        const urlInput = card.querySelector('.agenda-pending-url');
         const vendedorId = select ? select.value.trim() : '';
-        const urlReunion = urlInput ? urlInput.value.trim() : '';
         const gerenteEmail =
             select && select.selectedOptions[0]
                 ? select.selectedOptions[0].getAttribute('data-gerente') || ''
                 : '';
-        if (!vendedorId || !urlReunion) {
-            this.setAgendaPendingStatus('Elige vendedor y pega la liga');
+        if (!vendedorId) {
+            this.setAgendaPendingStatus('Elige un vendedor');
             return;
         }
-        this.setAgendaPendingStatus('Confirmando…');
+        this.setAgendaPendingStatus('Confirmando… (el panel crea la sala de Meet)');
         try {
             const response = await fetch(`/api/agenda/pending/${encodeURIComponent(id)}/confirm`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ vendedorId, urlReunion, gerenteEmail: gerenteEmail || undefined })
+                body: JSON.stringify({ vendedorId, gerenteEmail: gerenteEmail || undefined })
             });
             const data = await response.json();
             if (!response.ok || data.success === false) {
                 throw new Error(data.error || `Error ${response.status}`);
             }
             const wa = data.whatsapp && data.whatsapp.sent ? 'WhatsApp enviado' : 'reunión OK (revisa WhatsApp)';
-            this.setAgendaPendingStatus(`Confirmada · ${wa}`);
+            const urlModerador = data.urlReunionModerador || null;
+            const meetWarning = data.panel?.meetWarning || null;
+            let statusMsg = `Confirmada · ${wa}`;
+            if (urlModerador) statusMsg += ` · Tu liga: ${urlModerador}`;
+            if (meetWarning) statusMsg += ` · ⚠️ ${meetWarning}`;
+            this.setAgendaPendingStatus(statusMsg);
             await this.loadAgendaPending();
         } catch (error) {
             this.setAgendaPendingStatus(error.message);
@@ -6099,7 +6101,6 @@ class CVAnalyzer {
     async confirmAgendarReunion() {
         const vendedorId = this.agendarVendedor?.value;
         const slotRaw = this.agendarSlot?.value;
-        const urlReunion = (this.agendarUrlReunion?.value || '').trim();
         const gerenteEmail = (this.agendarGerenteEmail?.value || '').trim();
         const leadCorreo = (this.agendarLeadCorreo?.value || '').trim();
 
@@ -6109,10 +6110,6 @@ class CVAnalyzer {
         }
         if (!slotRaw) {
             this.setAgendarStatus('Selecciona un horario', 'error');
-            return;
-        }
-        if (!urlReunion) {
-            this.setAgendarStatus('La liga de videollamada es obligatoria', 'error');
             return;
         }
 
@@ -6140,7 +6137,6 @@ class CVAnalyzer {
                     fecha: slot.fecha,
                     horaInicio: slot.horaInicio,
                     horaFin: slot.horaFin,
-                    urlReunion,
                     gerenteEmail: gerenteEmail || undefined,
                     leadCorreo: leadCorreo || undefined,
                     leadNombre: this.agendarLeadNombre || undefined,
@@ -6166,19 +6162,24 @@ class CVAnalyzer {
             }
 
             const lead = data.leadExtraido || data.reunion || {};
-            const reunionId = data.reunion?.id || '';
-            const msg = [
-                'Reunión creada.',
-                lead.leadNombre ? ` Lead: ${lead.leadNombre}` : '',
-                lead.leadCorreo ? ` <${lead.leadCorreo}>` : '',
-                reunionId ? ` (#${reunionId})` : ''
-            ].join('');
-            this.setAgendarStatus(msg, 'success');
-            this.showStatus(msg, 'success');
+            const reunionId = data.reunion?.id || data.id || '';
+            const urlLead = data.urlReunion || data.reunion?.urlReunion || null;
+            const meetWarning = data.meetWarning || null;
+
+            let msg = ['Reunión creada.'];
+            if (lead.leadNombre) msg.push(` Lead: ${lead.leadNombre}`);
+            if (lead.leadCorreo) msg.push(` <${lead.leadCorreo}>`);
+            if (reunionId) msg.push(` (#${reunionId})`);
+            if (urlLead) msg.push(` Liga candidato: ${urlLead}`);
+            if (meetWarning) msg.push(` ⚠️ ${meetWarning}`);
+
+            const msgStr = msg.join('');
+            this.setAgendarStatus(msgStr, meetWarning ? 'warning' : 'success');
+            this.showStatus(msgStr, meetWarning ? 'warning' : 'success');
             this.disponibilidadCacheAt = 0;
             this.loadDisponibilidadCalendar({ force: true, silent: true });
             if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;
-            setTimeout(() => this.closeAgendarModal(), 1800);
+            setTimeout(() => this.closeAgendarModal(), meetWarning ? 3500 : 1800);
         } catch (error) {
             this.setAgendarStatus(error.message || 'Error de conexión', 'error');
             if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;

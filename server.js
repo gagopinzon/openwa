@@ -2024,13 +2024,12 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
 
     const body = req.body || {};
     const vendedorId = String(body.vendedorId || '').trim();
-    const urlReunion = String(body.urlReunion || '').trim();
     let gerenteEmail = String(body.gerenteEmail || '').trim().toLowerCase();
 
-    if (!vendedorId || !urlReunion) {
+    if (!vendedorId) {
       return res.status(400).json({
         success: false,
-        error: 'vendedorId y urlReunion son obligatorios'
+        error: 'vendedorId es obligatorio'
       });
     }
 
@@ -2065,7 +2064,6 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
       fecha: pending.fecha,
       horaInicio: pending.horaInicio,
       horaFin: pending.horaFin,
-      urlReunion,
       cvUrl,
       titulo: `Sesión — ${pending.contactName || cv?.nombre || 'candidato'}`,
       leadNombre: pending.contactName || cv?.nombre,
@@ -2076,9 +2074,16 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
     const panelReunionId =
       (panelData && (panelData.id || panelData.reunionId || panelData.reunion?.id)) || null;
 
+    // El panel genera las ligas; usamos las que devuelve
+    const urlReunionLead =
+      (panelData && (panelData.urlReunion || panelData.reunion?.urlReunion)) || null;
+    const urlReunionModerador =
+      (panelData && (panelData.urlReunionModerador || panelData.reunion?.urlReunionModerador)) ||
+      null;
+
     const confirmed = agendaPendingStore.confirmPending(pending.id, {
       vendedorId,
-      urlReunion,
+      urlReunion: urlReunionLead || '',
       gerenteEmail,
       panelReunionId
     });
@@ -2088,7 +2093,7 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
     const chatId =
       pending.chatId ||
       (pending.telefono ? formatPhoneToChatId(pending.telefono) : null);
-    if (openwaSessionId && chatId) {
+    if (openwaSessionId && chatId && urlReunionLead) {
       const senderName = pending.logicalSessionId
         ? sessionsStore.getSessionSenderName(pending.logicalSessionId)
         : 'Pro Talent';
@@ -2096,7 +2101,7 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
         contactName: pending.contactName,
         fecha: pending.fecha,
         horaInicio: pending.horaInicio,
-        urlReunion,
+        urlReunion: urlReunionLead,
         senderName
       });
       try {
@@ -2106,6 +2111,8 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
         whatsapp = { sent: false, error: waErr.message };
         console.warn('[agenda] confirm WhatsApp failed:', waErr.message);
       }
+    } else if (openwaSessionId && chatId && !urlReunionLead) {
+      whatsapp = { sent: false, error: 'Sin liga de participante (meetWarning)' };
     } else {
       whatsapp = { sent: false, error: 'Sin openwaSessionId/chatId para notificar' };
     }
@@ -2115,6 +2122,8 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
       success: true,
       item: confirmed,
       panel: panelData,
+      urlReunionLead,
+      urlReunionModerador,
       whatsapp
     });
   } catch (error) {
@@ -2263,7 +2272,6 @@ app.post('/api/panel/reuniones', async (req, res) => {
       fecha,
       horaInicio,
       horaFin,
-      urlReunion,
       gerenteEmail,
       titulo,
       leadCorreo,
@@ -2273,11 +2281,11 @@ app.post('/api/panel/reuniones', async (req, res) => {
       leadEstado
     } = body;
 
-    if (!cvId || !vendedorId || !fecha || !horaInicio || !horaFin || !urlReunion) {
+    if (!cvId || !vendedorId || !fecha || !horaInicio || !horaFin) {
       return res.status(400).json({
         success: false,
         error: 'Faltan campos obligatorios',
-        required: ['cvId', 'vendedorId', 'fecha', 'horaInicio', 'horaFin', 'urlReunion']
+        required: ['cvId', 'vendedorId', 'fecha', 'horaInicio', 'horaFin']
       });
     }
 
@@ -2308,7 +2316,6 @@ app.post('/api/panel/reuniones', async (req, res) => {
       fecha,
       horaInicio,
       horaFin,
-      urlReunion: String(urlReunion).trim(),
       cvUrl,
       titulo:
         titulo ||

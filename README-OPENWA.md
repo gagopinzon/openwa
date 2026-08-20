@@ -54,8 +54,8 @@ Con la integración al panel puedes, desde la tabla de CVs, pulsar **Agendar**:
 
 1. Guarda tu **correo de gerente** en la sección *Tu correo en Panel* (debe existir en panel.protalentconnections.com).
 2. Se consulta disponibilidad del equipo de ese gerente.
-3. Eliges vendedor + slot y pegas la liga Zoom/Meet/Teams.
-4. Msg envía `cvUrl` pública; el panel descarga el PDF, lo analiza con DeepSeek y crea la reunión.
+3. Eliges vendedor + slot y confirmas.
+4. Msg envía `cvUrl` pública; el panel descarga el PDF, lo analiza con DeepSeek, crea la reunión y genera la liga de Meet automáticamente.
 
 Requisitos: `MSG_INTEGRATION_API_KEY`, correo de gerente (perfil o `MSG_GERENTE_EMAIL`) y `WEBHOOK_PUBLIC_URL` alcanzable desde el servidor del panel.
 

@@ -2,7 +2,7 @@ const axios = require('axios');
 
 const DEFAULT_PANEL_BASE = 'https://panel.protalentconnections.com';
 const GET_TIMEOUT_MS = 20000;
-const POST_TIMEOUT_MS = 90000;
+const POST_TIMEOUT_MS = 150000;
 
 function panelBaseUrl() {
   return String(process.env.PANEL_BASE_URL || DEFAULT_PANEL_BASE)
@@ -91,7 +91,6 @@ async function getDisponibilidad(opts = {}) {
  *   fecha: string,
  *   horaInicio: string,
  *   horaFin: string,
- *   urlReunion: string,
  *   cvUrl: string,
  *   titulo?: string,
  *   descripcion?: string,
@@ -111,7 +110,6 @@ async function crearReunion(body = {}) {
     fecha: body.fecha,
     horaInicio: body.horaInicio,
     horaFin: body.horaFin,
-    urlReunion: body.urlReunion,
     cvUrl: body.cvUrl
   };
 
