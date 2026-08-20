@@ -5132,7 +5132,6 @@ class CVAnalyzer {
         this.agendarGerenteEmail = document.getElementById('agendarGerenteEmail');
         this.agendarVendedor = document.getElementById('agendarVendedor');
         this.agendarSlot = document.getElementById('agendarSlot');
-        this.agendarUrlReunion = document.getElementById('agendarUrlReunion');
         this.agendarLeadCorreo = document.getElementById('agendarLeadCorreo');
         this.agendarHint = document.getElementById('agendarHint');
         this.agendarStatus = document.getElementById('agendarStatus');
@@ -5162,6 +5161,29 @@ class CVAnalyzer {
         }
         if (this.agendarConfirmBtn) {
             this.agendarConfirmBtn.addEventListener('click', () => this.confirmAgendarReunion());
+        }
+        if (this.agendarGerenteEmail) {
+            const reloadSlots = () => {
+                const email = (this.agendarGerenteEmail.value || '').trim();
+                if (!email) {
+                    this.applyAgendarSoftWarnings();
+                    return;
+                }
+                this.fetchDisponibilidad(email, true)
+                    .then((data) => {
+                        this.disponibilidadData = data;
+                        this.populateAgendarVendedores(data);
+                        this.setAgendarStatus('', '');
+                    })
+                    .catch((error) => {
+                        this.setAgendarStatus(
+                            error.message || 'No se pudo cargar disponibilidad',
+                            'error'
+                        );
+                    });
+            };
+            this.agendarGerenteEmail.addEventListener('change', reloadSlots);
+            this.agendarGerenteEmail.addEventListener('blur', reloadSlots);
         }
         if (this.agendarCvSelect) {
             this.agendarCvSelect.addEventListener('change', () => this.onAgendarCvSelectChange());
@@ -5289,6 +5311,10 @@ class CVAnalyzer {
         this.agendarLeadNombre = cv.nombre || this.agendarLeadNombre || '';
         if (!this.agendarLeadTelefono) this.agendarLeadTelefono = cv.telefono || '';
         if (this.agendarCvFile) this.agendarCvFile.value = '';
+        if (this.agendarLeadCorreo && !this.agendarLeadCorreo.value.trim()) {
+            const correo = String(cv.correo || cv.email || cv.leadCorreo || '').trim();
+            if (correo) this.agendarLeadCorreo.value = correo;
+        }
         if (this.agendarCvLabel) {
             this.agendarCvLabel.textContent = `CV reciclado: ${cv.nombre || cv.archivoOriginal} (${cv.archivoOriginal})`;
         }
@@ -5303,25 +5329,32 @@ class CVAnalyzer {
             );
             return false;
         }
-        const gerentePreview =
+        return true;
+    }
+
+    /**
+     * Avisos suaves dentro del modal (no bloquean abrirlo).
+     * El modal sirve para completar lo que falte.
+     */
+    applyAgendarSoftWarnings() {
+        const gerente =
+            (this.agendarGerenteEmail && this.agendarGerenteEmail.value.trim()) ||
             (this.currentUser && this.currentUser.gerenteEmail) ||
             this.panelConfig.gerenteEmail ||
             '';
-        if (!gerentePreview) {
-            this.showStatus(
-                'Guarda tu correo de gerente arriba (Tu correo en Panel) antes de agendar.',
-                'error'
+        if (!gerente) {
+            this.setAgendarStatus(
+                'Escribe el correo del gerente para cargar vendedores y horarios.',
+                'warning'
             );
-            return false;
+            return;
         }
         if (!this.panelConfig.publicCvUrlConfigured) {
-            this.showStatus(
-                'Configura WEBHOOK_PUBLIC_URL para que el panel pueda descargar el CV.',
-                'error'
+            this.setAgendarStatus(
+                'Falta WEBHOOK_PUBLIC_URL: el panel no podrá descargar el CV hasta configurarla.',
+                'warning'
             );
-            return false;
         }
-        return true;
     }
 
     normalizePhoneDigits(raw) {
@@ -5342,6 +5375,7 @@ class CVAnalyzer {
         label,
         leadNombre,
         leadTelefono,
+        leadCorreo = '',
         cvId,
         needsUpload,
         showCvPicker = false,
@@ -5368,14 +5402,7 @@ class CVAnalyzer {
             }
             if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
             this.agendarNeedsCvUpload = false;
-            const via =
-                matchSource === 'historial'
-                    ? 'ligado al envío de WhatsApp'
-                    : 'coincidente con el teléfono del chat';
-            this.setAgendarStatus(
-                `CV asignado automáticamente (${via}). Es el mismo lead del mensaje.`,
-                'info'
-            );
+            // El status de CV se pone después de soft warnings
         } else if (showCvPicker) {
             if (this.agendarCvSelect) this.agendarCvSelect.disabled = false;
             const reusable = this.populateAgendarCvSelect({
@@ -5415,14 +5442,17 @@ class CVAnalyzer {
 
         if (this.agendarCvFile) this.agendarCvFile.value = '';
 
+        // Autocompletar lo que ya tenemos
         if (this.agendarGerenteEmail) {
             this.agendarGerenteEmail.value =
                 (this.currentUser && this.currentUser.gerenteEmail) ||
                 this.panelConfig.gerenteEmail ||
                 '';
         }
-        if (this.agendarUrlReunion) this.agendarUrlReunion.value = '';
-        if (this.agendarLeadCorreo) this.agendarLeadCorreo.value = '';
+        if (this.agendarLeadCorreo) {
+            const fromCv = this.resolveLeadCorreoFromCv(cvId) || leadCorreo || '';
+            this.agendarLeadCorreo.value = fromCv;
+        }
         if (!lockMatchedCv && !this.agendarCvId) this.setAgendarStatus('');
         if (this.agendarVendedor) {
             this.agendarVendedor.innerHTML = '<option value="">Cargando disponibilidad…</option>';
@@ -5433,13 +5463,38 @@ class CVAnalyzer {
             this.agendarSlot.disabled = true;
         }
 
+        // Abrir siempre: el modal es el lugar para completar datos
         if (this.agendarModal) {
             this.agendarModal.style.display = 'flex';
             this.agendarModal.setAttribute('aria-hidden', 'false');
         }
+        this.applyAgendarSoftWarnings();
+        if (lockMatchedCv && cvId) {
+            const gerenteOk = Boolean((this.agendarGerenteEmail?.value || '').trim());
+            if (gerenteOk && this.panelConfig.publicCvUrlConfigured) {
+                const via =
+                    matchSource === 'historial'
+                        ? 'ligado al envío de WhatsApp'
+                        : 'coincidente con el teléfono del chat';
+                this.setAgendarStatus(
+                    `CV asignado automáticamente (${via}). Es el mismo lead del mensaje.`,
+                    'info'
+                );
+            }
+        }
+
+        const gerenteEmail = (this.agendarGerenteEmail?.value || '').trim();
+        if (!gerenteEmail) {
+            if (this.agendarVendedor) {
+                this.agendarVendedor.innerHTML =
+                    '<option value="">Escribe el correo del gerente primero</option>';
+                this.agendarVendedor.disabled = true;
+            }
+            return;
+        }
 
         try {
-            const data = await this.fetchDisponibilidad(this.agendarGerenteEmail?.value);
+            const data = await this.fetchDisponibilidad(gerenteEmail);
             this.disponibilidadData = data;
             this.populateAgendarVendedores(data);
             if (presetSlot && presetSlot.vendedorId) {
@@ -5451,6 +5506,15 @@ class CVAnalyzer {
                 this.agendarVendedor.innerHTML = '<option value="">Sin disponibilidad</option>';
             }
         }
+    }
+
+    resolveLeadCorreoFromCv(cvId) {
+        if (!cvId) return '';
+        const cv =
+            this.getReusableCvs().find((c) => c.cvId === cvId) ||
+            (this.cvsData || []).find((c) => c && c.cvId === cvId);
+        if (!cv) return '';
+        return String(cv.correo || cv.email || cv.leadCorreo || '').trim();
     }
 
     applyPresetAgendarSlot(preset) {
@@ -5504,6 +5568,7 @@ class CVAnalyzer {
             label: `CV: ${cv.nombre || cv.archivoOriginal} (${cv.archivoOriginal})`,
             leadNombre: cv.nombre || '',
             leadTelefono: cv.telefono || '',
+            leadCorreo: cv.correo || cv.email || cv.leadCorreo || '',
             cvId: cv.cvId,
             needsUpload: false,
             showCvPicker: false
@@ -5563,9 +5628,11 @@ class CVAnalyzer {
             label,
             leadNombre: (matched && matched.nombre) || name,
             leadTelefono: phone ? `+${phone}` : (matched && matched.telefono) || '',
+            leadCorreo:
+                (matched && (matched.correo || matched.email || matched.leadCorreo)) || '',
             cvId: matched ? matched.cvId : null,
             needsUpload: !matched,
-            showCvPicker: false,
+            showCvPicker: !matched,
             preferredPhone: phone,
             lockMatchedCv: Boolean(matched),
             matchSource
@@ -6018,9 +6085,11 @@ class CVAnalyzer {
             label,
             leadNombre: (matched && matched.nombre) || leadNombre || '',
             leadTelefono: leadTelefono || (matched && matched.telefono) || '',
+            leadCorreo:
+                (matched && (matched.correo || matched.email || matched.leadCorreo)) || '',
             cvId: matched ? matched.cvId : null,
             needsUpload: !matched,
-            showCvPicker: false,
+            showCvPicker: !matched,
             preferredPhone,
             lockMatchedCv: lockMatched,
             matchSource: lockMatched ? 'telefono' : '',
@@ -6106,6 +6175,10 @@ class CVAnalyzer {
 
         if (!vendedorId) {
             this.setAgendarStatus('Selecciona un vendedor', 'error');
+            return;
+        }
+        if (!gerenteEmail) {
+            this.setAgendarStatus('Escribe el correo del gerente', 'error');
             return;
         }
         if (!slotRaw) {
@@ -7549,13 +7622,15 @@ class CVAnalyzer {
     }
 
     showStatus(message, type = 'info') {
+        if (!this.statusMessage) return;
         this.statusMessage.textContent = message;
-        this.statusMessage.className = `status-message ${type}`;
+        this.statusMessage.className = `status-message status-toast ${type}`;
         this.statusMessage.style.display = 'block';
 
         // Auto-hide después de 5 segundos
-        setTimeout(() => {
-            this.statusMessage.style.display = 'none';
+        clearTimeout(this._statusHideTimer);
+        this._statusHideTimer = setTimeout(() => {
+            if (this.statusMessage) this.statusMessage.style.display = 'none';
         }, 5000);
     }
 

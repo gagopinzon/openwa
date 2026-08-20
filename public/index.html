@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sistema de Análisis de CVs con IA</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=agendar-toast-2">
 </head>
 
 <body>
@@ -565,8 +565,6 @@
                 </div>
             </div>
 
-            <div class="status-message" id="statusMessage"></div>
-
             <div class="table-container">
                 <table class="cvs-table" id="cvsTable">
                     <thead>
@@ -625,6 +623,9 @@
         </div>
     </div>
 
+    <!-- Toast global (fuera de sections ocultas; visible desde cualquier pantalla) -->
+    <div class="status-message status-toast" id="statusMessage" style="display: none;" role="status" aria-live="polite"></div>
+
     <!-- Modal Agendar reunión (Panel) -->
     <div class="agendar-modal-overlay" id="agendarModal" style="display: none;" aria-hidden="true">
         <div class="agendar-modal" role="dialog" aria-labelledby="agendarModalTitle">
@@ -666,7 +667,8 @@
                 <input type="email" id="agendarLeadCorreo" class="agendar-input" placeholder="Solo si el CV no trae email visible" />
 
                 <p class="agendar-hint" id="agendarHint">
-                    El panel descarga el CV, lo analiza con DeepSeek y crea la reunión.
+                    Completa o confirma los datos. Lo que ya tengamos (gerente, CV, lead) se precarga.
+                    El panel analiza el CV, crea la reunión y genera la liga de Meet automáticamente.
                 </p>
                 <p class="agendar-status" id="agendarStatus" style="display: none;"></p>
             </div>
@@ -677,7 +679,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=disp-calendar-1"></script>
+    <script src="app.js?v=agendar-autocomplete-3"></script>
     <script>
         (async function initAuthUi() {
             try {
