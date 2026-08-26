@@ -2,6 +2,7 @@ const androidGatewayStore = require('./androidGatewayStore');
 const sessionsStore = require('./sessionsStore');
 const { applySenderName } = require('./messageSignature');
 const { buildOutboundMessageParts } = require('./aiService');
+const contactHistory = require('./contactHistoryStore');
 
 /**
  * Arma el texto de outreach para Android (saludo + cuerpo) con remitente de la línea.
@@ -135,6 +136,9 @@ async function runAndroidSendJob({
       channel: 'android',
       jobId: job.id
     };
+    if (job.status === 'sent') {
+      contactHistory.rememberSuccessfulSend(job.telefono);
+    }
     results.push(row);
     if (typeof onMessageResult === 'function') {
       try {

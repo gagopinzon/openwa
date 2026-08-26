@@ -852,19 +852,7 @@ async function prepareCvsForSend(cvsFromClient) {
     };
   }
 
-  const seenPhones = new Set();
-  const uniqueCvsToSend = [];
-  const duplicates = [];
-
-  for (const cv of cvsToSend) {
-    const phoneKey = cv.telefono.trim().toLowerCase();
-    if (!seenPhones.has(phoneKey)) {
-      seenPhones.add(phoneKey);
-      uniqueCvsToSend.push(cv);
-    } else {
-      duplicates.push(cv);
-    }
-  }
+  const { unique: uniqueCvsToSend, duplicates } = contactHistory.dedupeCvsByPhone(cvsToSend);
 
   if (duplicates.length > 0) {
     console.log(
@@ -929,13 +917,30 @@ async function dispatchQueuedBatch(_user, batchId = null) {
       : ['default']
     : batch.selectedSessions;
 
-  broadcastEvent('sendQueueStarted', { batchId: batch.id, total: batch.total });
+  let finalCvsToSend = Array.isArray(batch.cvs) ? [...batch.cvs] : [];
+  let skippedAlreadyContacted = [];
+  if (contactHistory.mongoUriConfigured() && finalCvsToSend.length) {
+    try {
+      const filtered = await contactHistory.filterOutAlreadyContacted(finalCvsToSend);
+      finalCvsToSend = filtered.toSend;
+      skippedAlreadyContacted = filtered.skippedAlreadyContacted;
+    } catch (err) {
+      console.warn('⚠️ contactHistory: filtro en dispatch omitido:', err.message);
+    }
+  }
+  const { unique, duplicates: queuedDupes } = contactHistory.dedupeCvsByPhone(finalCvsToSend);
+  finalCvsToSend = unique;
+  if (queuedDupes.length) {
+    console.log(`⚠️ Cola: ${queuedDupes.length} teléfono(s) duplicado(s) omitidos al disparar.`);
+  }
+
+  broadcastEvent('sendQueueStarted', { batchId: batch.id, total: finalCvsToSend.length });
   broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
   runWhatsAppSendJob({
-    finalCvsToSend: batch.cvs,
+    finalCvsToSend,
     sessionIds,
     sessionWeights: batch.sessionWeights,
-    skippedAlreadyContacted: [],
+    skippedAlreadyContacted,
     mongoRecordHook,
     testMode: TEST_MODE,
     channel: batch.channel || 'auto',

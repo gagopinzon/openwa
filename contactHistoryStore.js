@@ -55,6 +55,64 @@ function mongoUriConfigured() {
   return Boolean(process.env.MONGODB_URI && String(process.env.MONGODB_URI).trim());
 }
 
+/** Teléfonos ya enviados en este proceso (cubre reintentos aunque Mongo vaya lento). */
+const sentLocal = new Set();
+
+function rememberSuccessfulSend(telefono) {
+  const n = normalizePhone(telefono);
+  if (!n) return;
+  sentLocal.add(n);
+  if (n.length >= 10) sentLocal.add(n.slice(-10));
+}
+
+function wasAlreadySentLocal(telefono) {
+  const n = normalizePhone(telefono);
+  if (!n) return false;
+  if (sentLocal.has(n)) return true;
+  if (n.length >= 10 && sentLocal.has(n.slice(-10))) return true;
+  for (const existing of sentLocal) {
+    if (phonesMatch(existing, n)) return true;
+  }
+  return false;
+}
+
+function clearLocalSentCache() {
+  sentLocal.clear();
+}
+
+/**
+ * true = hay que enviar; false = ya se envió (memoria o Mongo).
+ * @param {string} telefono
+ * @returns {Promise<boolean>}
+ */
+async function shouldSendToPhone(telefono) {
+  if (wasAlreadySentLocal(telefono)) return false;
+  const status = await lookupContactStatus(telefono);
+  if (status.alreadyContacted) {
+    rememberSuccessfulSend(telefono);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Un CV por número, tolerando +52 / 521 / últimos 10 dígitos.
+ * @param {Array<{ telefono?: string }>} cvsArray
+ * @returns {{ unique: Array, duplicates: Array }}
+ */
+function dedupeCvsByPhone(cvsArray) {
+  const unique = [];
+  const duplicates = [];
+  for (const cv of Array.isArray(cvsArray) ? cvsArray : []) {
+    const phone = cv && cv.telefono;
+    const exists =
+      Boolean(phone) && unique.some((u) => phonesMatch(u.telefono, phone));
+    if (exists) duplicates.push(cv);
+    else unique.push(cv);
+  }
+  return { unique, duplicates };
+}
+
 async function getCollection() {
   if (!mongoUriConfigured()) return null;
 
@@ -130,6 +188,7 @@ async function filterOutAlreadyContacted(cvsArray) {
       if (doc) existingByNorm.set(norm, doc);
     }
     if (doc) {
+      rememberSuccessfulSend(norm);
       skippedAlreadyContacted.push({
         nombre: cv.nombre,
         telefono: cv.telefono,
@@ -228,6 +287,7 @@ async function recordSuccessfulContact({
   cvId,
   archivoOriginal
 }) {
+  if (normalizedPhone) rememberSuccessfulSend(normalizedPhone);
   if (!normalizedPhone || !mongoUriConfigured()) return;
 
   let coll;
@@ -535,6 +595,11 @@ module.exports = {
   normalizePhone,
   phonesMatch,
   mongoUriConfigured,
+  rememberSuccessfulSend,
+  wasAlreadySentLocal,
+  clearLocalSentCache,
+  shouldSendToPhone,
+  dedupeCvsByPhone,
   filterOutAlreadyContacted,
   annotateAlreadyContacted,
   lookupContactStatus,

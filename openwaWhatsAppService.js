@@ -9,6 +9,7 @@ const { getSessionSenderName } = require('./sessionsStore');
 const { applySenderName } = require('./messageSignature');
 const { resolveExactCounts, buildQueuesFromCounts } = require('./sessionDistribution');
 const { buildOutboundMessageParts } = require('./aiService');
+const contactHistory = require('./contactHistoryStore');
 const {
   getFailoverConfig,
   classifySendError,
@@ -227,6 +228,17 @@ class OpenWAWhatsAppService {
 
       const result = await sendTextMessage(this.openwaSessionId, chatId, finalMessage);
       console.log(`Mensaje enviado a ${phone} (id: ${result.messageId || 'n/a'})`);
+      contactHistory.rememberSuccessfulSend(phone);
+      contactHistory
+        .recordSuccessfulContact({
+          normalizedPhone: contactHistory.normalizePhone(phone),
+          name: options.contactName,
+          logicalSessionId: this.logicalSessionId,
+          openwaSessionId: this.openwaSessionId,
+          cvId: options.cvId || null,
+          archivoOriginal: options.archivoOriginal || null
+        })
+        .catch((err) => console.error('contactHistory sendMessage:', err.message));
       return true;
     } catch (error) {
       const msg = error.message || String(error);
@@ -249,6 +261,11 @@ class OpenWAWhatsAppService {
    * @returns {Promise<boolean>}
    */
   async sendContactWithGreeting(contact) {
+    if (!(await contactHistory.shouldSendToPhone(contact.telefono))) {
+      console.log(`📇 Omitiendo ${contact.telefono}: ya se le envió mensaje`);
+      return true;
+    }
+
     const parts = buildOutboundMessageParts(contact);
     console.log(
       `Burst → ${contact.telefono}: ${parts.length} mensaje${parts.length === 1 ? '' : 's'}`
@@ -261,7 +278,10 @@ class OpenWAWhatsAppService {
       console.log(`${i + 1}/${parts.length} → "${preview}"`);
 
       const ok = await this.sendMessage(contact.telefono, part, {
-        skipHumanDelay: i > 0
+        skipHumanDelay: i > 0,
+        contactName: contact.nombre,
+        cvId: contact.cvId || null,
+        archivoOriginal: contact.archivoOriginal || null
       });
       if (!ok) return false;
 
@@ -640,7 +660,12 @@ async function sendSessionQueue(
     let lastErr = null;
     const maxAttempts = failoverCtx ? cfg.localRetries + 1 : 1;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (!(await contactHistory.shouldSendToPhone(contact.telefono))) {
+      console.log(`📇 Sesión ${logicalSessionId}: ${contact.telefono} ya enviado, no se reenvía`);
+      success = true;
+    }
+
+    for (let attempt = 0; !success && attempt < maxAttempts; attempt++) {
       try {
         if (attempt > 0 && onProgress) {
           onProgress({
