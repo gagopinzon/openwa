@@ -83,7 +83,14 @@ async function confirmPendingInPanel(pending, opts = {}) {
     (panelData && (panelData.id || panelData.reunionId || panelData.reunion?.id)) ||
     null;
   const urlReunionLead =
-    (panelData && (panelData.urlReunion || panelData.reunion?.urlReunion)) || null;
+    (panelData &&
+      (panelData.urlReunion ||
+        panelData.reunion?.urlReunion ||
+        panelData.meetUrl ||
+        panelData.reunion?.meetUrl ||
+        panelData.link ||
+        panelData.reunion?.link)) ||
+    null;
 
   const confirmed = agendaPendingStore.confirmPending(pending.id, {
     vendedorId: vendor.vendedorId,

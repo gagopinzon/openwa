@@ -12,6 +12,7 @@ const agendaPendingStore = require('./agendaPendingStore');
 const agendaAwaitingCvStore = require('./agendaAwaitingCvStore');
 const agendaConfirmService = require('./agendaConfirmService');
 const cvIngestService = require('./cvIngestService');
+const cvFileStore = require('./cvFileStore');
 const { resolveMessageMedia } = require('./conversationMediaService');
 const {
   sendTextMessage,
@@ -446,6 +447,31 @@ function isPdfMimetype(mimetype) {
   return mime.includes('pdf') || mime === 'application/octet-stream';
 }
 
+/**
+ * Solo devuelve cvId si el PDF existe en disco (evita ids viejos en Mongo sin archivo).
+ */
+function resolveUsableCvId({ leadCv, contactSession }) {
+  const candidates = [
+    leadCv && leadCv.cvId,
+    contactSession && contactSession.cvId
+  ]
+    .map((id) => String(id || '').trim())
+    .filter(Boolean);
+  for (const id of candidates) {
+    if (cvFileStore.getCvFileMeta(id)) return id;
+  }
+  return null;
+}
+
+function isCvRelatedConfirmError(error) {
+  const msg = String((error && error.message) || '').toLowerCase();
+  return (
+    (error && error.status === 404) ||
+    msg.includes('cv') ||
+    msg.includes('archivo del cv')
+  );
+}
+
 async function finalizeAgendaBooking({
   normalizedPhone,
   chosen,
@@ -497,17 +523,53 @@ async function finalizeAgendaBooking({
           pendingId: pending.id,
           urlReunion: confirmed.urlReunionLead
         };
+      } else if (confirmed.confirmed) {
+        replyText = buildConfirmedMeetingReply({
+          contactName,
+          fecha: pending.fecha,
+          horaInicio: pending.horaInicio,
+          urlReunion: null,
+          senderName: logicalSessionId
+            ? sessionsStore.getSessionSenderName(logicalSessionId)
+            : 'Pro Talent'
+        });
+        agendaMeta = {
+          reason: 'meeting_confirmed_no_url',
+          pendingId: pending.id
+        };
       }
       if (broadcastEvent) {
         broadcastEvent('agendaPendingConfirmed', confirmed.confirmed);
       }
     } catch (error) {
-      console.warn('[auto-reply] auto-confirm falló:', error.message);
-      agendaMeta = {
-        reason: 'pending_created_confirm_failed',
-        pendingId: pending.id,
-        error: error.message
-      };
+      console.warn(
+        '[auto-reply] auto-confirm falló:',
+        error.message,
+        error.panelBody ? JSON.stringify(error.panelBody).slice(0, 300) : ''
+      );
+      try {
+        agendaPendingStore.cancelPending(pending.id);
+      } catch (cancelErr) {
+        console.warn('[auto-reply] cancel pending:', cancelErr.message);
+      }
+
+      if (isCvRelatedConfirmError(error)) {
+        agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+          chosen,
+          contactName,
+          chatId: identity.chatId || chatId,
+          logicalSessionId,
+          openwaSessionId
+        });
+        replyText = buildAskCvReply(contactName, chosen);
+        agendaMeta = { reason: 'awaiting_cv', error: error.message };
+      } else {
+        replyText = buildConfirmFailedReply(contactName, chosen, error.message);
+        agendaMeta = {
+          reason: 'confirm_failed',
+          error: error.message
+        };
+      }
     }
   }
 
@@ -753,10 +815,7 @@ async function handleIncomingWebhook({
 
     const leadCv =
       typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone) : null;
-    const cvId =
-      (leadCv && leadCv.cvId) ||
-      (contactSession && contactSession.cvId) ||
-      null;
+    const cvId = resolveUsableCvId({ leadCv, contactSession });
 
     // Empieza "escribiendo…" mientras se arma la respuesta (más natural).
     const typingStartedAt = Date.now();
@@ -1041,6 +1100,19 @@ function buildCvDownloadFailedReply(contactName) {
   );
 }
 
+function buildConfirmFailedReply(contactName, slot, errorMessage) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot.label || `${slot.fecha} ${slot.horaInicio}`;
+  const detail = String(errorMessage || '').trim();
+  const hint = detail
+    ? ` (${detail.slice(0, 120)})`
+    : '';
+  return (
+    `Gracias, ${name}. Tu horario ${when} quedó registrado, pero hubo un problema al generar la liga${hint}. ` +
+    `Un asesor te contactará en breve para confirmar. 💙`
+  );
+}
+
 function buildNoCvAgendaReply(contactName, senderName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   return `Gracias, ${name}. Para agendar necesito que un asesor valide tu CV primero; te contactamos enseguida. 💙`;
@@ -1053,7 +1125,7 @@ function buildConfirmedMeetingReply({ contactName, fecha, horaInicio, urlReunion
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const ligaLine = urlReunion
     ? `\nLiga para unirte: ${urlReunion}`
-    : '';
+    : '\nTe enviaremos la liga en un momento.';
   return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}.${ligaLine}\n\n¡Nos vemos! ☺️`;
 }
 
