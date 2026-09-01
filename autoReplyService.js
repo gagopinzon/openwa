@@ -9,6 +9,10 @@ const agendaAvailability = require('./agendaAvailability');
 const agendaIntent = require('./agendaIntent');
 const agendaOfferStore = require('./agendaOfferStore');
 const agendaPendingStore = require('./agendaPendingStore');
+const agendaAwaitingCvStore = require('./agendaAwaitingCvStore');
+const agendaConfirmService = require('./agendaConfirmService');
+const cvIngestService = require('./cvIngestService');
+const { resolveMessageMedia } = require('./conversationMediaService');
 const {
   sendTextMessage,
   sendChatState,
@@ -17,7 +21,8 @@ const {
   listWebhooks,
   getSessionStatus,
   isConnectedStatus,
-  getContact
+  getContact,
+  downloadMessageMedia
 } = require('./openwaClient');
 const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
 
@@ -424,6 +429,170 @@ function captureIncomingMessage({ payload, broadcastEvent = null, idempotencyKey
  * @param {Function|null} params.getLeadCv
  * @param {boolean} [params.testMode]
  */
+function isDocumentMessage(msg) {
+  const type = String(msg.type || msg.mediaType || '').toLowerCase();
+  const mime = String(msg.mimetype || msg.mimeType || '').toLowerCase();
+  return (
+    type === 'document' ||
+    type === 'file' ||
+    mime.includes('pdf') ||
+    mime.includes('msword') ||
+    mime.includes('wordprocessingml')
+  );
+}
+
+function isPdfMimetype(mimetype) {
+  const mime = String(mimetype || '').toLowerCase();
+  return mime.includes('pdf') || mime === 'application/octet-stream';
+}
+
+async function finalizeAgendaBooking({
+  normalizedPhone,
+  chosen,
+  cvId,
+  contactName,
+  identity,
+  chatId,
+  logicalSessionId,
+  openwaSessionId,
+  broadcastEvent,
+  testMode
+}) {
+  const pending = agendaPendingStore.createPending({
+    telefono: normalizedPhone,
+    chatId: identity.chatId || chatId,
+    contactName,
+    cvId,
+    fecha: chosen.fecha,
+    horaInicio: chosen.horaInicio,
+    horaFin: chosen.horaFin,
+    label: chosen.label,
+    logicalSessionId,
+    openwaSessionId,
+    candidateVendors: chosen.candidates || []
+  });
+  agendaOfferStore.clearOffer(normalizedPhone);
+  agendaAwaitingCvStore.clearAwaiting(normalizedPhone);
+
+  let replyText = buildPendingCreatedReply(contactName, chosen);
+  let agendaMeta = { reason: 'pending_created', pendingId: pending.id };
+
+  if (agendaConfirmService.autoConfirmEnabled() && !testMode) {
+    try {
+      const confirmed = await agendaConfirmService.confirmPendingInPanel(pending, {
+        buildConfirmedMeetingReply
+      });
+      if (confirmed.urlReunionLead) {
+        replyText = buildConfirmedMeetingReply({
+          contactName,
+          fecha: pending.fecha,
+          horaInicio: pending.horaInicio,
+          urlReunion: confirmed.urlReunionLead,
+          senderName: logicalSessionId
+            ? sessionsStore.getSessionSenderName(logicalSessionId)
+            : 'Pro Talent'
+        });
+        agendaMeta = {
+          reason: 'meeting_confirmed',
+          pendingId: pending.id,
+          urlReunion: confirmed.urlReunionLead
+        };
+      }
+      if (broadcastEvent) {
+        broadcastEvent('agendaPendingConfirmed', confirmed.confirmed);
+      }
+    } catch (error) {
+      console.warn('[auto-reply] auto-confirm falló:', error.message);
+      agendaMeta = {
+        reason: 'pending_created_confirm_failed',
+        pendingId: pending.id,
+        error: error.message
+      };
+    }
+  }
+
+  if (broadcastEvent) {
+    broadcastEvent('agendaPending', pending);
+  }
+  console.log(
+    `[auto-reply] agenda ${agendaMeta.reason} ${pending.id} phone=${normalizedPhone} ${chosen.fecha} ${chosen.horaInicio}`
+  );
+
+  return { replyText, agendaMeta, agendaPendingId: pending.id };
+}
+
+async function tryIngestCvAndBook(params) {
+  const {
+    msg,
+    openwaSessionId,
+    chatId,
+    normalizedPhone,
+    contactName,
+    identity,
+    logicalSessionId,
+    broadcastEvent,
+    testMode
+  } = params;
+
+  const awaiting = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
+  if (!awaiting || !awaiting.chosen) return null;
+
+  const messageId = normalizeWhatsAppMessageId(msg.id || msg.messageId || null);
+  if (!messageId) return null;
+
+  let media;
+  try {
+    media = await resolveMessageMedia(
+      openwaSessionId,
+      identity.chatId || chatId,
+      messageId,
+      downloadMessageMedia
+    );
+  } catch (error) {
+    console.warn('[auto-reply] CV media download:', error.message);
+    return {
+      replyText: buildCvDownloadFailedReply(contactName),
+      agendaMeta: { reason: 'cv_download_failed', error: error.message }
+    };
+  }
+
+  if (!media || !media.buffer || !isPdfMimetype(media.mimetype)) {
+    return {
+      replyText: buildAskCvReply(contactName, awaiting.chosen),
+      agendaMeta: { reason: 'cv_not_pdf' }
+    };
+  }
+
+  const originalName =
+    msg.filename ||
+    msg.fileName ||
+    (String(msg.caption || '').trim().endsWith('.pdf') ? msg.caption : null) ||
+    'cv.pdf';
+
+  const ingested = await cvIngestService.ingestLeadCvFromBuffer(
+    media.buffer,
+    originalName,
+    {
+      telefono: normalizedPhone,
+      nombre: contactName,
+      fromConversation: true
+    }
+  );
+
+  return finalizeAgendaBooking({
+    normalizedPhone,
+    chosen: awaiting.chosen,
+    cvId: ingested.cvId,
+    contactName,
+    identity,
+    chatId,
+    logicalSessionId,
+    openwaSessionId,
+    broadcastEvent,
+    testMode
+  });
+}
+
 async function handleIncomingWebhook({
   payload,
   idempotencyKey,
@@ -455,8 +624,9 @@ async function handleIncomingWebhook({
   if (msg.fromMe === true) return { handled: false, reason: 'from_me' };
   if (msg.isGroup === true) return { handled: false, reason: 'is_group' };
 
-  const body = String(msg.body || msg.text || '').trim();
-  if (!body) return { handled: false, reason: 'no_text_body' };
+  const body = String(msg.body || msg.text || msg.caption || '').trim();
+  const incomingDocument = isDocumentMessage(msg);
+  if (!body && !incomingDocument) return { handled: false, reason: 'no_text_body' };
 
   const chatId = msg.from || msg.chatId || msg.sender;
   const identity = await resolveContactIdentity(openwaSessionId, chatId, msg);
@@ -526,7 +696,7 @@ async function handleIncomingWebhook({
     : idempotencyKey ||
       payload.idempotencyKey ||
       payload.deliveryId ||
-      `msg_${openwaSessionId}_${body.slice(0, 32)}`;
+      `msg_${openwaSessionId}_${(body || 'media').slice(0, 32)}`;
   if (!markIdempotent(dedupeKey)) {
     return { handled: false, reason: 'duplicate' };
   }
@@ -602,17 +772,51 @@ async function handleIncomingWebhook({
     let agendaPendingId = null;
     let agendaMeta = null;
 
+    if (incomingDocument) {
+      const cvBooked = await tryIngestCvAndBook({
+        msg,
+        openwaSessionId,
+        chatId,
+        normalizedPhone,
+        contactName: contactSession?.name || contactName,
+        identity,
+        logicalSessionId,
+        broadcastEvent,
+        testMode
+      });
+      if (cvBooked) {
+        replyText = cvBooked.replyText;
+        agendaMeta = cvBooked.agendaMeta;
+        agendaPendingId = cvBooked.agendaPendingId || null;
+      }
+    }
+
     // Fase 2: el lead elige un horario previamente ofrecido
     const priorOffer = agendaOfferStore.getOffer(normalizedPhone);
-    if (priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
+    const awaitingCv = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
+    if (!replyText && awaitingCv && body && !incomingDocument) {
+      replyText = buildAskCvReply(
+        contactSession?.name || contactName,
+        awaitingCv.chosen
+      );
+      agendaMeta = { reason: 'awaiting_cv_reminder' };
+    }
+    if (!replyText && priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
       const chosen = agendaIntent.matchSlotFromMessage(body, priorOffer.slots);
       if (chosen) {
         if (!cvId) {
-          replyText = buildNoCvAgendaReply(
-            contactSession?.name || 'contacto',
-            senderName
+          agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+            chosen,
+            contactName: contactSession?.name || contactName,
+            chatId: identity.chatId || chatId,
+            logicalSessionId,
+            openwaSessionId
+          });
+          replyText = buildAskCvReply(
+            contactSession?.name || contactName,
+            chosen
           );
-          agendaMeta = { reason: 'no_cv_for_pending' };
+          agendaMeta = { reason: 'awaiting_cv', slot: chosen.label || chosen.horaInicio };
         } else if (
           agendaPendingStore.isSlotHeld(
             chosen.fecha,
@@ -626,33 +830,21 @@ async function handleIncomingWebhook({
           // cae a Fase 1 para ofrecer otros horarios
         } else {
           try {
-            const pending = agendaPendingStore.createPending({
-              telefono: normalizedPhone,
-              chatId: identity.chatId || chatId,
-              contactName: contactSession?.name || contactName,
+            const booked = await finalizeAgendaBooking({
+              normalizedPhone,
+              chosen,
               cvId,
-              fecha: chosen.fecha,
-              horaInicio: chosen.horaInicio,
-              horaFin: chosen.horaFin,
-              label: chosen.label,
+              contactName: contactSession?.name || contactName,
+              identity,
+              chatId,
               logicalSessionId,
               openwaSessionId,
-              candidateVendors: chosen.candidates || []
+              broadcastEvent,
+              testMode
             });
-            agendaOfferStore.clearOffer(normalizedPhone);
-            agendaPendingId = pending.id;
-            replyText = buildPendingCreatedReply(
-              contactSession?.name || 'contacto',
-              chosen,
-              senderName
-            );
-            agendaMeta = { reason: 'pending_created', pendingId: pending.id };
-            if (broadcastEvent) {
-              broadcastEvent('agendaPending', pending);
-            }
-            console.log(
-              `[auto-reply] agenda pending ${pending.id} phone=${normalizedPhone} ${chosen.fecha} ${chosen.horaInicio}`
-            );
+            replyText = booked.replyText;
+            agendaMeta = booked.agendaMeta;
+            agendaPendingId = booked.agendaPendingId;
           } catch (error) {
             if (error.code === 'slot_held' || error.status === 409) {
               agendaOfferStore.clearOffer(normalizedPhone);
@@ -831,6 +1023,22 @@ function buildPendingCreatedReply(contactName, slot, senderName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot.label || `${slot.fecha} ${slot.horaInicio}`;
   return `Perfecto, ${name}. Quedó anotado el ${when}. En breve te enviamos la liga de la sesión. ☺️`;
+}
+
+function buildAskCvReply(contactName, slot) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
+  return (
+    `Perfecto, ${name}. Anoto ${when} para tu sesión de 15 minutos. ` +
+    `Para confirmarla, envíame tu CV en PDF por aquí mismo. ☺️`
+  );
+}
+
+function buildCvDownloadFailedReply(contactName) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  return (
+    `Gracias, ${name}. No pude abrir el archivo. ¿Puedes reenviar tu CV en PDF? 💙`
+  );
 }
 
 function buildNoCvAgendaReply(contactName, senderName) {

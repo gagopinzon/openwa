@@ -258,7 +258,9 @@ function liveArchiveCvs() {
  * @param {{ cvId?: string|null }} [hints]
  */
 function findCvForPhone(phone, hints = {}) {
-  const reusable = liveArchiveCvs();
+  const reusable = cvFileStore.loadCvsManifest().filter(
+    (c) => c && c.procesado && c.cvId && !cvFileStore.isCvExpired(c)
+  );
   if (hints.cvId) {
     const byId = reusable.find((c) => c.cvId === hints.cvId);
     if (byId) return byId;
