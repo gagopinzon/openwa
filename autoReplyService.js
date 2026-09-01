@@ -1088,6 +1088,131 @@ function getStatus() {
   return status;
 }
 
+/** @returns {boolean} */
+function isAutoActivateWebhooksEnabled() {
+  const raw = process.env.AUTO_ACTIVATE_WEBHOOKS;
+  if (raw != null && String(raw).trim() !== '') {
+    const v = String(raw).trim().toLowerCase();
+    return v !== 'false' && v !== '0' && v !== 'no';
+  }
+  return Boolean(autoReplyStore.getWebhookUrl());
+}
+
+function getStartupWebhookRetryMs() {
+  const v = parseInt(process.env.AUTO_ACTIVATE_WEBHOOKS_RETRY_MS || '30000', 10);
+  return Number.isFinite(v) && v >= 5000 ? v : 30000;
+}
+
+function getStartupWebhookMaxAttempts() {
+  const v = parseInt(process.env.AUTO_ACTIVATE_WEBHOOKS_MAX_ATTEMPTS || '0', 10);
+  return Number.isFinite(v) && v >= 0 ? v : 0;
+}
+
+function getStartupWebhookDelayMs() {
+  const v = parseInt(process.env.AUTO_ACTIVATE_WEBHOOKS_DELAY_MS || '3000', 10);
+  return Number.isFinite(v) && v >= 0 ? v : 3000;
+}
+
+/** @type {ReturnType<typeof setTimeout>|null} */
+let startupWebhookTimer = null;
+
+function isRetryableWebhookError(message) {
+  const msg = String(message || '').toLowerCase();
+  return (
+    msg.includes('no conectada') ||
+    msg.includes('not connected') ||
+    msg.includes('econnrefused') ||
+    msg.includes('etimedout') ||
+    msg.includes('no hay sesiones')
+  );
+}
+
+function isFatalWebhookError(message) {
+  const msg = String(message || '').toLowerCase();
+  return (
+    msg.includes('destination address is not allowed') ||
+    msg.includes('webhook_public_url no está configurado') ||
+    msg.includes('bad request')
+  );
+}
+
+/**
+ * Registra webhooks OpenWA al arrancar (reintenta si las sesiones aún no están CONNECTED).
+ * @param {number} [attempt]
+ */
+async function tryActivateWebhooksOnStartup(attempt = 1) {
+  if (!isAutoActivateWebhooksEnabled()) {
+    if (attempt === 1) {
+      console.log(
+        '[webhooks] auto-activate omitido (AUTO_ACTIVATE_WEBHOOKS=false o sin WEBHOOK_PUBLIC_URL)'
+      );
+    }
+    return;
+  }
+
+  const maxAttempts = getStartupWebhookMaxAttempts();
+  if (maxAttempts > 0 && attempt > maxAttempts) {
+    console.warn(
+      `[webhooks] auto-activate: se alcanzó AUTO_ACTIVATE_WEBHOOKS_MAX_ATTEMPTS=${maxAttempts}`
+    );
+    return;
+  }
+
+  try {
+    const result = await activateWebhooks();
+    const ok = result.results.filter((r) => r.success).length;
+    const failed = result.results.filter((r) => !r.success);
+
+    if (failed.length === 0) {
+      console.log(
+        `[webhooks] auto-activate OK al arranque (${ok}/${result.results.length}) → ${result.webhookUrl}`
+      );
+      return;
+    }
+
+    const errors = failed.map((r) => r.error || 'unknown').join('; ');
+    if (failed.some((r) => isFatalWebhookError(r.error))) {
+      console.error(`[webhooks] auto-activate falló (sin reintento): ${errors}`);
+      return;
+    }
+
+    if (failed.some((r) => isRetryableWebhookError(r.error))) {
+      const retryMs = getStartupWebhookRetryMs();
+      console.warn(
+        `[webhooks] auto-activate parcial ${ok}/${result.results.length}; reintento ${attempt + 1} en ${retryMs}ms (${errors})`
+      );
+      startupWebhookTimer = setTimeout(
+        () => tryActivateWebhooksOnStartup(attempt + 1),
+        retryMs
+      );
+      return;
+    }
+
+    console.warn(`[webhooks] auto-activate parcial ${ok}/${result.results.length}: ${errors}`);
+  } catch (err) {
+    if (isFatalWebhookError(err.message)) {
+      console.error(`[webhooks] auto-activate falló (sin reintento): ${err.message}`);
+      return;
+    }
+    const retryMs = getStartupWebhookRetryMs();
+    console.warn(
+      `[webhooks] auto-activate intento ${attempt} error: ${err.message}; reintento en ${retryMs}ms`
+    );
+    startupWebhookTimer = setTimeout(
+      () => tryActivateWebhooksOnStartup(attempt + 1),
+      retryMs
+    );
+  }
+}
+
+function scheduleStartupWebhookActivation() {
+  if (!isAutoActivateWebhooksEnabled()) return;
+  if (startupWebhookTimer) clearTimeout(startupWebhookTimer);
+  const delayMs = getStartupWebhookDelayMs();
+  console.log(`[webhooks] auto-activate programado en ${delayMs}ms`);
+  startupWebhookTimer = setTimeout(() => tryActivateWebhooksOnStartup(1), delayMs);
+}
+
 module.exports = {
   handleIncomingWebhook,
   captureIncomingMessage,
@@ -1095,6 +1220,9 @@ module.exports = {
   normalizeWhatsAppMessageId,
   activateWebhooks,
   deactivateWebhooks,
+  scheduleStartupWebhookActivation,
+  tryActivateWebhooksOnStartup,
+  isAutoActivateWebhooksEnabled,
   getStatus,
   verifySignature,
   findLogicalSessionByOpenwaId,

@@ -5217,6 +5217,7 @@ app.listen(PORT, () => {
   } else {
     console.log('⚠️  Autenticación desactivada: define AUTH_USERNAME y AUTH_PASSWORD en .env para proteger la interfaz');
   }
+  autoReplyService.scheduleStartupWebhookActivation();
 });
 
 module.exports = app;
