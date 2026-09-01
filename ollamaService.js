@@ -22,6 +22,12 @@ function getTimeoutMs() {
   return Number.isFinite(v) && v >= 5000 ? v : 120000;
 }
 
+function getThinkEnabled() {
+  const raw = String(process.env.OLLAMA_THINK || '').trim().toLowerCase();
+  if (!raw) return false;
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
 function isExplicitlyEnabled() {
   const p = String(process.env.AI_REPLY_PROVIDER || '').trim().toLowerCase();
   return p === 'ollama';
@@ -52,6 +58,7 @@ async function chatReply(userPrompt, opts = {}) {
         { role: 'system', content: system },
         { role: 'user', content: String(userPrompt || '').trim() }
       ],
+      think: getThinkEnabled(),
       stream: false
     },
     {
@@ -79,6 +86,7 @@ async function chatReply(userPrompt, opts = {}) {
 module.exports = {
   getChatUrl,
   getModel,
+  getThinkEnabled,
   isConfigured,
   isExplicitlyEnabled,
   chatReply,
