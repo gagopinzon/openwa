@@ -3703,9 +3703,18 @@ app.post('/api/webhooks/openwa', async (req, res) => {
     const secret = String(process.env.WEBHOOK_SECRET || '').trim();
     const signature = req.headers['x-openwa-signature'];
     const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const preview = (() => {
+      try {
+        const p = JSON.parse(rawBody.toString('utf8'));
+        return `event=${p.event || p.type || '?'} session=${p.sessionId || '?'}`;
+      } catch {
+        return 'body no-json';
+      }
+    })();
+    console.log(`[webhook] POST recibido (${preview})`);
 
     if (secret && !autoReplyService.verifySignature(rawBody, signature, secret)) {
-      console.warn('Webhook OpenWA: firma HMAC inválida');
+      console.warn('Webhook OpenWA: firma HMAC inválida (revisa WEBHOOK_SECRET vs secreto al activar webhooks)');
       return;
     }
 
@@ -3718,6 +3727,10 @@ app.post('/api/webhooks/openwa', async (req, res) => {
       broadcastEvent,
       idempotencyKey
     });
+
+    if (!inboxRecord) {
+      console.log('[webhook] ignorado (sin texto, fromMe, grupo o evento no soportado)');
+    }
 
     const replyResult = await autoReplyService.handleIncomingWebhook({
       payload,
