@@ -264,6 +264,10 @@ function isPublicPath(pathname) {
   if (pathOnly === '/api/android/jobs/next') return true;
   if (/^\/api\/android\/devices\/[^/]+\/heartbeat$/.test(pathOnly)) return true;
   if (/^\/api\/android\/jobs\/[^/]+\/result$/.test(pathOnly)) return true;
+  // Hermes Agent (Windows) — auth por HERMES_BRIDGE_TOKEN en la ruta
+  if (pathOnly === '/api/hermes/health') return true;
+  if (pathOnly === '/api/hermes/inbox') return true;
+  if (pathOnly === '/api/hermes/ack') return true;
   return false;
 }
 

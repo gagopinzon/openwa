@@ -43,6 +43,7 @@ const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
 const autoReplyStore = require('./autoReplyStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
+const hermesBridge = require('./hermesBridge');
 const usersStore = require('./usersStore');
 const cvFileStore = require('./cvFileStore');
 const panelMsgClient = require('./panelMsgClient');
@@ -3774,6 +3775,64 @@ app.get('/api/incoming-messages', (req, res) => {
     res.json({ success: true, messages, total: messages.length });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// --- Hermes Agent bridge (polling desde Windows → WSL) ---
+
+app.get('/api/hermes/health', (req, res) => {
+  if (!hermesBridge.verifyRequest(req, res)) return;
+  res.json({
+    success: true,
+    service: 'hermes-bridge',
+    configured: hermesBridge.isConfigured(),
+    serverTime: new Date().toISOString()
+  });
+});
+
+app.get('/api/hermes/inbox', (req, res) => {
+  if (!hermesBridge.verifyRequest(req, res)) return;
+  try {
+    const since = req.query.since != null ? String(req.query.since) : undefined;
+    if (since !== undefined && !hermesBridge.parseSince(since)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Parámetro since inválido (ISO 8601 o unix ms)'
+      });
+    }
+
+    const includeHandled =
+      String(req.query.includeHandled || '').trim().toLowerCase() === 'true' ||
+      req.query.includeHandled === '1';
+
+    const payload = hermesBridge.listInbox({
+      since,
+      limit: req.query.limit,
+      sessionId: req.query.sessionId ? String(req.query.sessionId) : undefined,
+      openwaSessionId: req.query.openwaSessionId
+        ? String(req.query.openwaSessionId)
+        : undefined,
+      includeHandled
+    });
+
+    res.json({ success: true, ...payload });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/hermes/ack', (req, res) => {
+  if (!hermesBridge.verifyRequest(req, res)) return;
+  try {
+    const result = hermesBridge.ackMessages({
+      ids: req.body?.ids,
+      messageIds: req.body?.messageIds,
+      status: req.body?.status,
+      replyMessage: req.body?.replyMessage
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
   }
 });
 
