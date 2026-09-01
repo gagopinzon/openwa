@@ -15,14 +15,20 @@ import sqlite3
 import random
 import requests
 from datetime import datetime, timezone
+from urllib.parse import quote
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
+def normalize_host_url(url: str) -> str:
+    """Evita localhost → ::1 (IPv6) en WSL/Windows; OpenWA suele escuchar solo IPv4."""
+    return (url or "").replace("://localhost", "://127.0.0.1").strip()
+
+
 def normalize_openwa_base(url: str) -> str:
-    """Asegura http://localhost:2785/api (con /api)."""
-    base = (url or "").strip().rstrip("/")
+    """Asegura http://127.0.0.1:2785/api (con /api)."""
+    base = normalize_host_url(url).rstrip("/")
     if not base:
         return ""
     if not base.endswith("/api"):
@@ -30,9 +36,9 @@ def normalize_openwa_base(url: str) -> str:
     return base
 
 
-BRIDGE_URL = os.getenv("HERMES_BRIDGE_URL", "http://127.0.0.1:3445").rstrip("/")
+BRIDGE_URL = normalize_host_url(os.getenv("HERMES_BRIDGE_URL", "http://127.0.0.1:3445")).rstrip("/")
 BRIDGE_TOKEN = os.getenv("HERMES_BRIDGE_TOKEN", "").strip()
-OPENWA_BASE_URL = normalize_openwa_base(os.getenv("OPENWA_BASE_URL", "http://localhost:2785/api"))
+OPENWA_BASE_URL = normalize_openwa_base(os.getenv("OPENWA_BASE_URL", "http://127.0.0.1:2785/api"))
 OPENWA_API_KEY = os.getenv("OPENWA_API_KEY", "").strip()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:27b")
@@ -80,15 +86,28 @@ def phone_from_chat_id(chat_id: str) -> str:
     return "".join(c for c in str(chat_id or "") if c.isdigit())
 
 
+def safe_int(val, default=0):
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return default
+
+
 def wa_ts_to_iso(ts) -> str:
-    if ts is None:
+    """Convierte timestamp WA a ISO; evita OSError 22 en Windows/WSL con fechas inválidas."""
+    try:
+        if ts is None or ts == "":
+            return datetime.now(timezone.utc).isoformat()
+        n = float(ts)
+        if n != n or n <= 0:  # NaN o negativo
+            return datetime.now(timezone.utc).isoformat()
+        if n > 1e12:
+            n = n / 1000.0
+        if n > 4102444800:  # > año 2100 en segundos
+            return datetime.now(timezone.utc).isoformat()
+        return datetime.fromtimestamp(n, tz=timezone.utc).isoformat()
+    except (OSError, ValueError, OverflowError):
         return datetime.now(timezone.utc).isoformat()
-    n = float(ts)
-    if n > 1e12:
-        n = n / 1000.0
-    elif n < 1e11:
-        n = n * 1000.0 if n < 1e10 else n
-    return datetime.fromtimestamp(n, tz=timezone.utc).isoformat()
 
 
 class CapatazEngine:
@@ -99,6 +118,8 @@ class CapatazEngine:
 
         self.db_path = db_path
         self.last_poll_ts = None
+        self.http = requests.Session()
+        self.http.headers.update(OPENWA_HEADERS)
         self._init_db()
         self.check_connectivity()
 
@@ -166,9 +187,8 @@ class CapatazEngine:
 
         # OpenWA
         try:
-            r = requests.get(
+            r = self.http.get(
                 f"{OPENWA_BASE_URL}/sessions",
-                headers=OPENWA_HEADERS,
                 params={"status": "CONNECTED", "limit": 20},
                 timeout=10,
             )
@@ -275,9 +295,8 @@ class CapatazEngine:
         if OPENWA_SESSION_IDS:
             return OPENWA_SESSION_IDS
         try:
-            r = requests.get(
+            r = self.http.get(
                 f"{OPENWA_BASE_URL}/sessions",
-                headers=OPENWA_HEADERS,
                 params={"status": "CONNECTED", "limit": 50},
                 timeout=10,
             )
@@ -308,13 +327,13 @@ class CapatazEngine:
         found = []
         for session_id in sessions:
             try:
-                r = requests.get(
+                r = self.http.get(
                     f"{OPENWA_BASE_URL}/sessions/{session_id}/chats",
-                    headers=OPENWA_HEADERS,
                     params={"limit": 40},
                     timeout=15,
                 )
                 if r.status_code >= 400:
+                    print(f"[!] OpenWA chats HTTP {r.status_code} sesión={session_id[:8]}…")
                     continue
                 data = r.json()
                 chats = data if isinstance(data, list) else data.get("data") or data.get("chats") or []
@@ -325,14 +344,13 @@ class CapatazEngine:
                     chat_id = chat.get("id") or chat.get("chatId")
                     if not chat_id or "@g.us" in str(chat_id):
                         continue
-                    unread = int(chat.get("unreadCount") or 0)
+                    unread = safe_int(chat.get("unreadCount"), 0)
                     if unread <= 0:
                         continue
 
-                    enc = requests.utils.quote(str(chat_id), safe="")
-                    hr = requests.get(
+                    enc = quote(str(chat_id), safe="")
+                    hr = self.http.get(
                         f"{OPENWA_BASE_URL}/sessions/{session_id}/messages/{enc}/history",
-                        headers=OPENWA_HEADERS,
                         params={"limit": 8},
                         timeout=15,
                     )
@@ -378,8 +396,15 @@ class CapatazEngine:
                             }
                         )
                         break
+            except OSError as e:
+                print(
+                    f"[!] OpenWA poll sesión {session_id}: {e} "
+                    f"(¿OpenWA en {OPENWA_BASE_URL}? prueba 127.0.0.1 en vez de localhost)"
+                )
+            except requests.RequestException as e:
+                print(f"[!] OpenWA poll sesión {session_id} (HTTP): {e}")
             except Exception as e:
-                print(f"[!] OpenWA poll sesión {session_id}: {e}")
+                print(f"[!] OpenWA poll sesión {session_id}: {type(e).__name__}: {e}")
 
         if found:
             print(f"[~] OpenWA directo: {len(found)} mensaje(s) sin leer")
@@ -405,9 +430,8 @@ class CapatazEngine:
     def send_whatsapp(self, session_id, chat_id, text):
         try:
             typing_url = f"{OPENWA_BASE_URL}/sessions/{session_id}/chats/typing"
-            requests.post(
+            self.http.post(
                 typing_url,
-                headers=OPENWA_HEADERS,
                 json={"chatId": chat_id, "state": "typing"},
                 timeout=5,
             )
@@ -417,9 +441,8 @@ class CapatazEngine:
 
         try:
             send_url = f"{OPENWA_BASE_URL}/sessions/{session_id}/messages/send-text"
-            resp = requests.post(
+            resp = self.http.post(
                 send_url,
-                headers=OPENWA_HEADERS,
                 json={"chatId": chat_id, "text": text},
                 timeout=15,
             )

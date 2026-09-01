@@ -1,12 +1,36 @@
 const axios = require('axios');
 require('dotenv').config();
 const { SENDER_PLACEHOLDER } = require('./messageSignature');
+const ollamaService = require('./ollamaService');
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const API_KEY = process.env.DEEPSEEK_API_KEY;
 
-if (!API_KEY) {
-  console.error('Error: DEEPSEEK_API_KEY no está configurada en el archivo .env');
+function getReplyProvider() {
+  const explicit = String(process.env.AI_REPLY_PROVIDER || '').trim().toLowerCase();
+  if (explicit === 'ollama') return 'ollama';
+  if (explicit === 'deepseek') return 'deepseek';
+  if (ollamaService.isConfigured()) return 'ollama';
+  return 'deepseek';
+}
+
+function hasDeepSeekKey() {
+  return Boolean(
+    API_KEY && !String(API_KEY).includes('test') && !String(API_KEY).includes('tu_api_key')
+  );
+}
+
+/** @param {string} message */
+function cleanReplyText(message) {
+  let text = String(message || '').trim();
+  const separators = ['---', '***', '===', '\n\n\n'];
+  for (const separator of separators) {
+    if (text.includes(separator)) {
+      text = text.split(separator)[0].trim();
+      break;
+    }
+  }
+  return text.replace(/\n*\s*Atte:\s*\n?[\s\S]*$/i, '').trim();
 }
 
 const GREETING_TEMPLATES = [
@@ -483,7 +507,11 @@ async function generateReplyMessage({
     ? `\nHORARIOS REALES DISPONIBLES (sustituyen cualquier XXXX / XXXXXXX del playbook; NO inventes otros):\n${agendaContext}`
     : '';
 
-  if (!API_KEY || API_KEY.includes('test') || API_KEY.includes('tu_api_key')) {
+  const provider = getReplyProvider();
+  const canUseDeepSeek = provider === 'deepseek' && hasDeepSeekKey();
+  const canUseOllama = provider === 'ollama' && ollamaService.isConfigured();
+
+  if (!canUseDeepSeek && !canUseOllama) {
     if (agendaContext) {
       const name = extractFirstName(contactName);
       const hi = allowGreeting ? `Hola ${name}, ` : '';
@@ -535,6 +563,26 @@ ${agendaInstructions}
 
 Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.`;
 
+  if (canUseOllama) {
+    try {
+      const message = await ollamaService.chatReply(prompt, {
+        basePrompt: basePrompt || undefined
+      });
+      return cleanReplyText(message);
+    } catch (error) {
+      console.error(
+        `[auto-reply] Ollama (${ollamaService.getModel()}):`,
+        error.message
+      );
+      return generateBasicReply({
+        contactName,
+        incomingBody,
+        matchedRule,
+        senderName: sender
+      });
+    }
+  }
+
   try {
     const response = await axios.post(
       DEEPSEEK_API_URL,
@@ -554,17 +602,7 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
     );
 
     if (response.data?.choices?.length > 0) {
-      let message = response.data.choices[0].message.content.trim();
-      const separators = ['---', '***', '===', '\n\n\n'];
-      for (const separator of separators) {
-        if (message.includes(separator)) {
-          message = message.split(separator)[0].trim();
-          break;
-        }
-      }
-      // Quitar firma Atte si el modelo la añade por costumbre
-      message = message.replace(/\n*\s*Atte:\s*\n?[\s\S]*$/i, '').trim();
-      return message;
+      return cleanReplyText(response.data.choices[0].message.content);
     }
     throw new Error('Respuesta inválida de DeepSeek');
   } catch (error) {
@@ -582,6 +620,7 @@ module.exports = {
   generatePersonalizedMessage,
   generateBulkMessages,
   generateReplyMessage,
+  getReplyProvider,
   buildGreeting,
   buildOutboundMessageParts,
   splitSpeechParts,

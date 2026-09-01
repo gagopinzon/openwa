@@ -3,7 +3,8 @@ const contactHistory = require('./contactHistoryStore');
 const autoReplyStore = require('./autoReplyStore');
 const sessionsStore = require('./sessionsStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
-const { generateReplyMessage, splitSpeechParts } = require('./aiService');
+const { generateReplyMessage, splitSpeechParts, getReplyProvider } = require('./aiService');
+const ollamaService = require('./ollamaService');
 const agendaAvailability = require('./agendaAvailability');
 const agendaIntent = require('./agendaIntent');
 const agendaOfferStore = require('./agendaOfferStore');
@@ -1076,7 +1077,9 @@ function getStatus() {
     canListen,
     /** Alias: activar webhooks solo requiere URL pública + sesiones (para ver mensajes). */
     canActivate: canListen,
-    canAutoReply: Boolean(canListen && contactHistory.mongoUriConfigured())
+    canAutoReply: Boolean(canListen && contactHistory.mongoUriConfigured()),
+    aiProvider: getReplyProvider(),
+    ollamaModel: getReplyProvider() === 'ollama' ? ollamaService.getModel() : null
   };
 
   console.log(

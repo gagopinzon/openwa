@@ -5224,7 +5224,11 @@ app.listen(PORT, () => {
   console.log(`🚀 Servidor iniciado en http://localhost:${PORT}`);
   console.log(`📁 Interfaz web disponible en http://localhost:${PORT}`);
   console.log(`📋 Sesiones WhatsApp: data/sessions.json (${sessionsStore.getAllSessions().length} configurada(s))`);
-  console.log(`📋 Asegúrate de configurar DEEPSEEK_API_KEY y OPENWA_API_KEY en el archivo .env`);
+  console.log(`📋 Asegúrate de configurar OPENWA_API_KEY en el archivo .env`);
+  const { getReplyProvider } = require('./aiService');
+  console.log(
+    `🤖 Auto-respuesta IA: ${getReplyProvider()}${getReplyProvider() === 'ollama' ? ` (${process.env.OLLAMA_MODEL || 'gemma2:27b'})` : ''}`
+  );
   if (isAuthEnabled()) {
     console.log('🔐 Autenticación activa (AUTH_USERNAME / AUTH_PASSWORD en .env)');
   } else {
