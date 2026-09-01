@@ -544,7 +544,14 @@ async function handleIncomingWebhook({
 
   if (contactSession && contactSession.openwaSessionId) {
     if (contactSession.openwaSessionId !== openwaSessionId) {
-      return { handled: false, reason: 'wrong_session_for_contact' };
+      console.log(
+        `[auto-reply] session mismatch ${contactSession.openwaSessionId} → ${openwaSessionId} phone=${normalizedPhone}, reassigning`
+      );
+      await contactHistory.assignContactSession(normalizedPhone, {
+        logicalSessionId,
+        openwaSessionId
+      });
+      contactSession = await contactHistory.getContactSession(normalizedPhone);
     }
   } else if (logicalSessionId) {
     await contactHistory.assignContactSession(normalizedPhone, {

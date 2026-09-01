@@ -41,7 +41,7 @@ BRIDGE_TOKEN = os.getenv("HERMES_BRIDGE_TOKEN", "").strip()
 OPENWA_BASE_URL = normalize_openwa_base(os.getenv("OPENWA_BASE_URL", "http://127.0.0.1:2785/api"))
 OPENWA_API_KEY = os.getenv("OPENWA_API_KEY", "").strip()
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:27b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b")
 
 POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL_SEC", 3))
 TYPING_MIN = int(os.getenv("TYPING_MIN_SEC", 2))

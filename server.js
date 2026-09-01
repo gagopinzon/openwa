@@ -4462,12 +4462,12 @@ app.get('/api/conversations/contact-status', async (req, res) => {
 
     const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
     let aiPaused = false;
-    let knownContact = false;
+    /** Cualquier chat 1:1 con teléfono válido puede pausar/reactivar IA */
+    let knownContact = Boolean(phone);
     let linkedCvId = null;
     if (phone) {
       const contactDoc = await contactHistory.getContactByPhone(phone);
       if (contactDoc) {
-        knownContact = true;
         aiPaused = Boolean(contactDoc.aiPaused);
         linkedCvId = contactDoc.cvId || null;
       }
@@ -4548,7 +4548,21 @@ app.post('/api/conversations/ai-control', async (req, res) => {
       return res.status(400).json({ success: false, error: 'No se pudo obtener el teléfono del chat' });
     }
 
-    const result = await contactHistory.setContactAiPaused(phone, req.body.aiPaused);
+    let contactName = null;
+    try {
+      const contact = await getContact(session.openwaSessionId, chatId);
+      contactName = contact.name || null;
+    } catch {
+      /* nombre opcional */
+    }
+
+    const result = await contactHistory.setContactAiPaused(phone, req.body.aiPaused, {
+      name: contactName || undefined,
+      logicalSessionId: session.id,
+      openwaSessionId: session.openwaSessionId,
+      chatId,
+      source: 'ai_control'
+    });
     if (!result.ok) {
       return res.status(400).json({ success: false, error: result.error || 'No se pudo actualizar' });
     }
@@ -5227,7 +5241,7 @@ app.listen(PORT, () => {
   console.log(`📋 Asegúrate de configurar OPENWA_API_KEY en el archivo .env`);
   const { getReplyProvider } = require('./aiService');
   console.log(
-    `🤖 Auto-respuesta IA: ${getReplyProvider()}${getReplyProvider() === 'ollama' ? ` (${process.env.OLLAMA_MODEL || 'gemma2:27b'})` : ''}`
+    `🤖 Auto-respuesta IA: ${getReplyProvider()}${getReplyProvider() === 'ollama' ? ` (${process.env.OLLAMA_MODEL || 'gemma4:12b'})` : ''}`
   );
   if (isAuthEnabled()) {
     console.log('🔐 Autenticación activa (AUTH_USERNAME / AUTH_PASSWORD en .env)');

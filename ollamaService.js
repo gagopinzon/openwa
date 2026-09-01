@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 const DEFAULT_CHAT_URL = 'http://127.0.0.1:11434/api/chat';
-const DEFAULT_MODEL = 'gemma2:27b';
+const DEFAULT_MODEL = 'gemma4:12b';
 
 const MONICA_SYSTEM =
   'Eres Mónica, asistente de reclutamiento de Pro Talent. Objetivo: agendar reuniones. ' +

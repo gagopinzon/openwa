@@ -2443,19 +2443,16 @@ class CVAnalyzer {
                 'Elimina el chat en WhatsApp y limpia el historial local (también pausa la IA)';
         }
         if (this.conversationsAiPauseBtn) {
-            const known = this.activeConversationKnownContact;
             const paused = this.activeConversationAiPaused;
             this.conversationsAiPauseBtn.textContent = paused ? 'Reactivar IA' : 'Pausar IA';
             this.conversationsAiPauseBtn.className = paused
                 ? 'btn btn-success btn-sm'
                 : 'btn btn-warning btn-sm';
-            this.conversationsAiPauseBtn.disabled = !canControl || isGroup || !known;
+            this.conversationsAiPauseBtn.disabled = !canControl || isGroup;
             this.conversationsAiPauseBtn.style.display = isGroup ? 'none' : '';
-            this.conversationsAiPauseBtn.title = !known
-                ? 'Solo contactos del historial (mensaje masivo) tienen auto-respuesta IA'
-                : paused
-                  ? 'Volver a dejar que la IA responda a este remitente'
-                  : 'Detener la IA en este chat para contestar tú';
+            this.conversationsAiPauseBtn.title = paused
+                ? 'Volver a dejar que la IA responda a este remitente'
+                : 'Detener la IA en este chat para contestar tú';
         }
         if (this.conversationsAgendarBtn) {
             this.conversationsAgendarBtn.disabled = !canControl || isGroup;
@@ -2477,10 +2474,7 @@ class CVAnalyzer {
                 aiBadge = '<span class="thread-ai-line-off">IA off en esta línea</span>';
             } else if (this.activeConversationAiPaused) {
                 aiBadge = '<span class="thread-ai-paused">IA pausada (tú contestas)</span>';
-            } else if (
-                this.activeConversationAutoReplyEnabled &&
-                this.activeConversationKnownContact
-            ) {
+            } else if (this.activeConversationAutoReplyEnabled) {
                 aiBadge = '<span class="thread-ai-active">IA activa</span>';
             }
         }
@@ -2531,14 +2525,6 @@ class CVAnalyzer {
             this.showStatus('La IA no se aplica a grupos', 'error');
             return;
         }
-        if (!this.activeConversationKnownContact) {
-            this.showStatus(
-                'Este número no está en el historial; la IA solo responde a contactos del envío masivo',
-                'error'
-            );
-            return;
-        }
-
         const willPause = !this.activeConversationAiPaused;
         const label = active.name || active.chatId;
 

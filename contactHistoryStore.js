@@ -549,11 +549,13 @@ async function assignContactSession(normalizedPhone, { logicalSessionId, openwaS
 
 /**
  * Pausa o reactiva la auto-respuesta IA para un contacto concreto.
+ * Crea el contacto en MongoDB si aún no existe (upsert).
  * @param {string} normalizedPhone
  * @param {boolean} paused
+ * @param {{ name?: string, logicalSessionId?: string, openwaSessionId?: string, chatId?: string, source?: string }} [meta]
  * @returns {Promise<{ ok: boolean, aiPaused?: boolean, error?: string }>}
  */
-async function setContactAiPaused(normalizedPhone, paused) {
+async function setContactAiPaused(normalizedPhone, paused, meta = {}) {
   if (!normalizedPhone) {
     return { ok: false, error: 'teléfono inválido' };
   }
@@ -571,14 +573,33 @@ async function setContactAiPaused(normalizedPhone, paused) {
   if (!coll) return { ok: false, error: 'MongoDB no disponible' };
 
   const aiPaused = Boolean(paused);
-  const update = aiPaused
-    ? { $set: { aiPaused: true, aiPausedAt: new Date() } }
-    : { $set: { aiPaused: false }, $unset: { aiPausedAt: '' } };
-
-  const result = await coll.updateOne({ normalizedPhone }, update);
-  if (result.matchedCount === 0) {
-    return { ok: false, error: 'Contacto no está en el historial' };
+  const now = new Date();
+  const $set = { aiPaused };
+  if (meta.name) $set.name = String(meta.name).trim();
+  if (meta.logicalSessionId) $set.logicalSessionId = String(meta.logicalSessionId);
+  if (meta.openwaSessionId) $set.openwaSessionId = String(meta.openwaSessionId);
+  if (meta.chatId) $set.chatId = String(meta.chatId);
+  if (aiPaused) {
+    $set.aiPausedAt = now;
   }
+
+  const update = aiPaused
+    ? { $set }
+    : { $set, $unset: { aiPausedAt: '' } };
+
+  await coll.updateOne(
+    { normalizedPhone },
+    {
+      ...update,
+      $setOnInsert: {
+        normalizedPhone,
+        contactedAt: now,
+        source: meta.source || 'ai_control',
+        enrolledFromInbound: true
+      }
+    },
+    { upsert: true }
+  );
   return { ok: true, aiPaused };
 }
 
