@@ -484,6 +484,79 @@ function resolveUsableCvId({ leadCv, contactSession }) {
   return null;
 }
 
+async function processChosenSlot({
+  chosen,
+  cvId,
+  normalizedPhone,
+  contactName,
+  identity,
+  chatId,
+  logicalSessionId,
+  openwaSessionId,
+  broadcastEvent,
+  testMode,
+  userWillSendCv = false
+}) {
+  const displayName = contactName || 'contacto';
+  if (!cvId) {
+    agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+      chosen,
+      contactName: displayName,
+      chatId: identity.chatId || chatId,
+      logicalSessionId,
+      openwaSessionId
+    });
+    return {
+      replyText: buildAskCvReply(displayName, chosen, { userWillSendCv }),
+      agendaMeta: { reason: 'awaiting_cv', slot: chosen.label || chosen.horaInicio },
+      agendaPendingId: null
+    };
+  }
+
+  if (
+    agendaPendingStore.isSlotHeld(chosen.fecha, chosen.horaInicio, chosen.horaFin, {
+      exceptTelefono: normalizedPhone
+    })
+  ) {
+    agendaOfferStore.clearOffer(normalizedPhone);
+    return {
+      replyText: null,
+      agendaMeta: { reason: 'slot_taken_reoffer' },
+      agendaPendingId: null
+    };
+  }
+
+  try {
+    const booked = await finalizeAgendaBooking({
+      normalizedPhone,
+      chosen,
+      cvId,
+      contactName: displayName,
+      identity,
+      chatId,
+      logicalSessionId,
+      openwaSessionId,
+      broadcastEvent,
+      testMode
+    });
+    return {
+      replyText: booked.replyText,
+      agendaMeta: booked.agendaMeta,
+      agendaPendingId: booked.agendaPendingId
+    };
+  } catch (error) {
+    if (error.code === 'slot_held' || error.status === 409) {
+      agendaOfferStore.clearOffer(normalizedPhone);
+      return {
+        replyText: null,
+        agendaMeta: { reason: 'slot_taken_reoffer', error: error.message },
+        agendaPendingId: null
+      };
+    }
+    throw error;
+  }
+}
+
 async function finalizeAgendaBooking({
   normalizedPhone,
   chosen,
@@ -909,56 +982,22 @@ async function handleIncomingWebhook({
     if (!replyText && priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
       const chosen = agendaIntent.matchSlotFromMessage(body, priorOffer.slots);
       if (chosen) {
-        if (!cvId) {
-          agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
-            chosen,
-            contactName: contactSession?.name || contactName,
-            chatId: identity.chatId || chatId,
-            logicalSessionId,
-            openwaSessionId
-          });
-          replyText = buildAskCvReply(
-            contactSession?.name || contactName,
-            chosen
-          );
-          agendaMeta = { reason: 'awaiting_cv', slot: chosen.label || chosen.horaInicio };
-        } else if (
-          agendaPendingStore.isSlotHeld(
-            chosen.fecha,
-            chosen.horaInicio,
-            chosen.horaFin,
-            { exceptTelefono: normalizedPhone }
-          )
-        ) {
-          agendaOfferStore.clearOffer(normalizedPhone);
-          agendaMeta = { reason: 'slot_taken_reoffer' };
-          // cae a Fase 1 para ofrecer otros horarios
-        } else {
-          try {
-            const booked = await finalizeAgendaBooking({
-              normalizedPhone,
-              chosen,
-              cvId,
-              contactName: contactSession?.name || contactName,
-              identity,
-              chatId,
-              logicalSessionId,
-              openwaSessionId,
-              broadcastEvent,
-              testMode
-            });
-            replyText = booked.replyText;
-            agendaMeta = booked.agendaMeta;
-            agendaPendingId = booked.agendaPendingId;
-          } catch (error) {
-            if (error.code === 'slot_held' || error.status === 409) {
-              agendaOfferStore.clearOffer(normalizedPhone);
-              agendaMeta = { reason: 'slot_taken_reoffer', error: error.message };
-            } else {
-              throw error;
-            }
-          }
-        }
+        const booked = await processChosenSlot({
+          chosen,
+          cvId,
+          normalizedPhone,
+          contactName: contactSession?.name || contactName,
+          identity,
+          chatId,
+          logicalSessionId,
+          openwaSessionId,
+          broadcastEvent,
+          testMode,
+          userWillSendCv: agendaIntent.userMentionsSendingCv(body)
+        });
+        replyText = booked.replyText;
+        agendaMeta = booked.agendaMeta;
+        agendaPendingId = booked.agendaPendingId;
       }
     }
 
@@ -1003,14 +1042,43 @@ async function handleIncomingWebhook({
 
         if (slots.length) {
           agendaOfferStore.rememberOffer(normalizedPhone, slots);
-          agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 3);
-          console.log(
-            `[auto-reply] agenda ${slots.length} slot(s) → prompt (${range.fechaInicio}…${range.fechaFin})`
-          );
-          // Si el primer día ofrecido es mañana (hoy ya venció), déjalo explícito
-          const firstFecha = slots[0] && slots[0].fecha;
-          if (firstFecha && firstFecha > today) {
-            agendaContext = `Hoy (${today}) ya no hay horarios disponibles. Ofrece a partir de estos días:\n${agendaContext}`;
+
+          // Lead ya dijo día+hora en el mismo mensaje → agendar sin pasar por IA
+          if (agendaIntent.hasExplicitTimeChoice(body)) {
+            const chosenInline = agendaIntent.matchSlotFromMessage(body, slots);
+            if (chosenInline) {
+              const booked = await processChosenSlot({
+                chosen: chosenInline,
+                cvId,
+                normalizedPhone,
+                contactName: contactSession?.name || contactName,
+                identity,
+                chatId,
+                logicalSessionId,
+                openwaSessionId,
+                broadcastEvent,
+                testMode,
+                userWillSendCv: agendaIntent.userMentionsSendingCv(body)
+              });
+              if (booked.replyText) {
+                replyText = booked.replyText;
+                agendaMeta = booked.agendaMeta;
+                agendaPendingId = booked.agendaPendingId;
+              } else if (booked.agendaMeta?.reason === 'slot_taken_reoffer') {
+                agendaMeta = booked.agendaMeta;
+              }
+            }
+          }
+
+          if (!replyText) {
+            agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 3);
+            console.log(
+              `[auto-reply] agenda ${slots.length} slot(s) → prompt (${range.fechaInicio}…${range.fechaFin})`
+            );
+            const firstFecha = slots[0] && slots[0].fecha;
+            if (firstFecha && firstFecha > today) {
+              agendaContext = `Hoy (${today}) ya no hay horarios disponibles. Ofrece a partir de estos días:\n${agendaContext}`;
+            }
           }
         } else {
           const errMsg =
@@ -1130,9 +1198,14 @@ function buildPendingCreatedReply(contactName, slot, senderName) {
   return `Perfecto, ${name}. Quedó anotado el ${when}. En breve te enviamos la liga de la sesión. ☺️`;
 }
 
-function buildAskCvReply(contactName, slot) {
+function buildAskCvReply(contactName, slot, opts = {}) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
+  if (opts.userWillSendCv) {
+    return (
+      `Perfecto, ${name}. Queda anotado ${when}. Quedo atento a tu CV en PDF por aquí para enviarte la liga. ☺️`
+    );
+  }
   return (
     `Perfecto, ${name}. Anoto ${when} para tu sesión de 15 minutos. ` +
     `Para confirmarla, envíame tu CV en PDF por aquí mismo. ☺️`

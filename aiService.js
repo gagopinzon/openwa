@@ -534,12 +534,11 @@ async function generateReplyMessage({
   const agendaInstructions = agendaContext
     ? `
 - PRIORIDAD MÁXIMA: los HORARIOS REALES de arriba sustituyen cualquier XXXX / ejemplo del playbook.
-- Ofrece disponibilidad como RANGOS por día ("miércoles de 8:00 a 18:00"), NO solo dos horas sueltas inventadas.
-- La sesión es de 15 minutos. Pide una hora de inicio dentro del rango (ej. "¿te queda a las 10?").
-- NUNCA ofrezcas horarios que ya pasaron ni horas que no estén dentro de esos rangos.
+- Si el lead YA dijo día y hora concretos en su mensaje (ej. "miércoles a las 18:00"), NO vuelvas a preguntar si le queda bien esa hora; confirma el paso siguiente (CV o liga).
+- Ofrece disponibilidad como RANGOS por día solo cuando el lead NO haya dicho una hora específica.
+- La sesión es de 15 minutos. No listes todos los bloques de 30 minutos.
 - NUNCA inventes horas ni digas nombres de vendedores.
-- Si el rango es amplio (casi todo el día), dilo así; no reduzcas a solo 2 opciones.
-- Si no hay huecos en esa lista, dilo y ofrece otro día; no inventes.`
+- Sé breve: una sola pregunta o confirmación por mensaje; evita confirmaciones redundantes.`
     : `
 - Si no hay lista de horarios reales inyectada, NO inventes horas concretas; invita a proponer día o espera a un asesor.`;
 

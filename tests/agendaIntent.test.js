@@ -4,6 +4,8 @@ const {
   looksLikeScheduleIntent,
   resolveDateRangeFromMessage,
   matchSlotFromMessage,
+  hasExplicitTimeChoice,
+  userMentionsSendingCv,
   addDaysYmd,
   todayYmd
 } = require('../agendaIntent');
@@ -37,5 +39,18 @@ describe('agendaIntent', () => {
     const hit = matchSlotFromMessage('me queda a las 10', slots);
     assert.ok(hit);
     assert.equal(hit.horaInicio, '10:00');
+  });
+
+  it('detecta hora explícita sin pedir confirmación', () => {
+    assert.equal(
+      hasExplicitTimeChoice('dame la liga el miercoles 2 a las 18:00 horas'),
+      true
+    );
+    assert.equal(hasExplicitTimeChoice('¿tienen horario mañana?'), false);
+  });
+
+  it('detecta si el lead dice que enviará CV', () => {
+    assert.equal(userMentionsSendingCv('ahorita te comparto mi cv ok'), true);
+    assert.equal(userMentionsSendingCv('quiero agendar'), false);
   });
 });

@@ -166,6 +166,25 @@ function extractTimesFromMessage(text) {
 }
 
 /**
+ * El lead ya dijo una hora concreta (no solo "mañana" o "miércoles").
+ * @param {string} text
+ */
+function hasExplicitTimeChoice(text) {
+  return extractTimesFromMessage(text).length > 0;
+}
+
+/**
+ * @param {string} text
+ */
+function userMentionsSendingCv(text) {
+  const raw = String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return /\b(cv|curriculum|curriculo|hoja\s+de\s+vida)\b/.test(raw);
+}
+
+/**
  * @param {string} text
  * @param {Array<{ fecha: string, horaInicio: string, horaFin: string }>} slots
  */
@@ -223,6 +242,8 @@ module.exports = {
   shouldOfferSlots,
   resolveDateRangeFromMessage,
   extractTimesFromMessage,
+  hasExplicitTimeChoice,
+  userMentionsSendingCv,
   matchSlotFromMessage,
   slotIdentity
 };
