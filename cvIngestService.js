@@ -14,6 +14,12 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
     err.status = 400;
     throw err;
   }
+  if (!cvFileStore.isValidPdfBuffer(buffer)) {
+    const err = new Error('El archivo no es un PDF válido');
+    err.status = 400;
+    err.code = 'invalid_pdf';
+    throw err;
+  }
 
   const saved = cvFileStore.saveCvFile(buffer, originalName || 'cv.pdf');
   let cvData = {
@@ -75,9 +81,16 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
 
   cvFileStore.saveCvsManifest(cvs);
 
-  if (norm) {
+  const contactKey = String(opts.contactKey || opts.telefono || '').trim();
+  if (contactKey) {
+    await contactHistory.linkCvToContact(contactKey, {
+      cvId: entry.cvId,
+      archivoOriginal: entry.archivoOriginal,
+      name: entry.nombre
+    });
+  } else if (contactHistory.normalizePhone(entry.telefono)) {
     await contactHistory.recordSuccessfulContact({
-      normalizedPhone: norm,
+      normalizedPhone: contactHistory.normalizePhone(entry.telefono),
       name: entry.nombre,
       cvId: entry.cvId,
       archivoOriginal: entry.archivoOriginal

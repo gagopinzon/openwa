@@ -612,6 +612,31 @@ async function isContactAiPaused(normalizedPhone) {
   return Boolean(doc && doc.aiPaused);
 }
 
+/**
+ * Liga un CV al contacto (soporta claves lid_* sin normalizar dígitos).
+ */
+async function linkCvToContact(normalizedPhone, { cvId, archivoOriginal, name } = {}) {
+  const key = String(normalizedPhone || '').trim();
+  const id = String(cvId || '').trim();
+  if (!key || !id || !mongoUriConfigured()) return null;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch (err) {
+    console.error('contactHistory linkCvToContact:', err.message);
+    return null;
+  }
+  if (!coll) return null;
+
+  const $set = { cvId: id };
+  if (archivoOriginal) $set.archivoOriginal = String(archivoOriginal);
+  if (name) $set.name = String(name);
+
+  await coll.updateOne({ normalizedPhone: key }, { $set });
+  return getContactByPhone(key);
+}
+
 module.exports = {
   normalizePhone,
   phonesMatch,
@@ -634,5 +659,6 @@ module.exports = {
   assignContactSession,
   touchLastAiGreeting,
   setContactAiPaused,
-  isContactAiPaused
+  isContactAiPaused,
+  linkCvToContact
 };

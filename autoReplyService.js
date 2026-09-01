@@ -13,7 +13,7 @@ const agendaAwaitingCvStore = require('./agendaAwaitingCvStore');
 const agendaConfirmService = require('./agendaConfirmService');
 const cvIngestService = require('./cvIngestService');
 const cvFileStore = require('./cvFileStore');
-const { resolveMessageMedia } = require('./conversationMediaService');
+const { resolveMessageMedia, resolveIncomingDocumentMedia } = require('./conversationMediaService');
 const {
   sendTextMessage,
   sendChatState,
@@ -444,7 +444,28 @@ function isDocumentMessage(msg) {
 
 function isPdfMimetype(mimetype) {
   const mime = String(mimetype || '').toLowerCase();
-  return mime.includes('pdf') || mime === 'application/octet-stream';
+  return mime.includes('pdf');
+}
+
+function isCvRelatedConfirmError(error) {
+  const msg = String((error && error.message) || '').toLowerCase();
+  if (isPanelCvProcessingError(error)) return false;
+  return (
+    (error && error.status === 404 && msg.includes('archivo del cv')) ||
+    msg.includes('cvurl') ||
+    msg.includes('falta cv')
+  );
+}
+
+function isPanelCvProcessingError(error) {
+  const msg = String((error && error.message) || '').toLowerCase();
+  return (
+    msg.includes('procesar el cv') ||
+    msg.includes('análisis deepseek') ||
+    msg.includes('analisis deepseek') ||
+    msg.includes('timeout') ||
+    msg.includes('descarga')
+  );
 }
 
 /**
@@ -461,15 +482,6 @@ function resolveUsableCvId({ leadCv, contactSession }) {
     if (cvFileStore.getCvFileMeta(id)) return id;
   }
   return null;
-}
-
-function isCvRelatedConfirmError(error) {
-  const msg = String((error && error.message) || '').toLowerCase();
-  return (
-    (error && error.status === 404) ||
-    msg.includes('cv') ||
-    msg.includes('archivo del cv')
-  );
 }
 
 async function finalizeAgendaBooking({
@@ -547,28 +559,39 @@ async function finalizeAgendaBooking({
         error.message,
         error.panelBody ? JSON.stringify(error.panelBody).slice(0, 300) : ''
       );
-      try {
-        agendaPendingStore.cancelPending(pending.id);
-      } catch (cancelErr) {
-        console.warn('[auto-reply] cancel pending:', cancelErr.message);
-      }
+      const localCvOk = cvFileStore.getCvFileMeta(cvId);
 
-      if (isCvRelatedConfirmError(error)) {
-        agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
-          chosen,
-          contactName,
-          chatId: identity.chatId || chatId,
-          logicalSessionId,
-          openwaSessionId
-        });
-        replyText = buildAskCvReply(contactName, chosen);
-        agendaMeta = { reason: 'awaiting_cv', error: error.message };
-      } else {
-        replyText = buildConfirmFailedReply(contactName, chosen, error.message);
+      if (localCvOk && isPanelCvProcessingError(error)) {
+        replyText = buildCvReceivedPendingReply(contactName, chosen);
         agendaMeta = {
-          reason: 'confirm_failed',
+          reason: 'pending_panel_cv_processing',
+          pendingId: pending.id,
           error: error.message
         };
+      } else {
+        try {
+          agendaPendingStore.cancelPending(pending.id);
+        } catch (cancelErr) {
+          console.warn('[auto-reply] cancel pending:', cancelErr.message);
+        }
+
+        if (!localCvOk || isCvRelatedConfirmError(error)) {
+          agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+            chosen,
+            contactName,
+            chatId: identity.chatId || chatId,
+            logicalSessionId,
+            openwaSessionId
+          });
+          replyText = buildAskCvReply(contactName, chosen);
+          agendaMeta = { reason: 'awaiting_cv', error: error.message };
+        } else {
+          replyText = buildConfirmFailedReply(contactName, chosen, error.message);
+          agendaMeta = {
+            reason: 'confirm_failed',
+            error: error.message
+          };
+        }
       }
     }
   }
@@ -604,10 +627,10 @@ async function tryIngestCvAndBook(params) {
 
   let media;
   try {
-    media = await resolveMessageMedia(
+    media = await resolveIncomingDocumentMedia(
       openwaSessionId,
       identity.chatId || chatId,
-      messageId,
+      msg,
       downloadMessageMedia
     );
   } catch (error) {
@@ -618,28 +641,51 @@ async function tryIngestCvAndBook(params) {
     };
   }
 
-  if (!media || !media.buffer || !isPdfMimetype(media.mimetype)) {
+  if (!media || !media.buffer) {
     return {
-      replyText: buildAskCvReply(contactName, awaiting.chosen),
-      agendaMeta: { reason: 'cv_not_pdf' }
+      replyText: buildCvDownloadFailedReply(contactName),
+      agendaMeta: { reason: 'cv_download_empty' }
+    };
+  }
+
+  if (media.invalidPdf || !cvFileStore.isValidPdfBuffer(media.buffer)) {
+    console.warn(
+      `[auto-reply] PDF inválido (${media.buffer.length} bytes, mime=${media.mimetype || '?'})`
+    );
+    return {
+      replyText: buildCvInvalidPdfReply(contactName),
+      agendaMeta: { reason: 'cv_invalid_pdf' }
     };
   }
 
   const originalName =
     msg.filename ||
     msg.fileName ||
+    media.filename ||
     (String(msg.caption || '').trim().endsWith('.pdf') ? msg.caption : null) ||
     'cv.pdf';
 
-  const ingested = await cvIngestService.ingestLeadCvFromBuffer(
-    media.buffer,
-    originalName,
-    {
-      telefono: normalizedPhone,
-      nombre: contactName,
-      fromConversation: true
+  let ingested;
+  try {
+    ingested = await cvIngestService.ingestLeadCvFromBuffer(
+      media.buffer,
+      originalName,
+      {
+        telefono: normalizedPhone,
+        contactKey: normalizedPhone,
+        nombre: contactName,
+        fromConversation: true
+      }
+    );
+  } catch (error) {
+    if (error.code === 'invalid_pdf') {
+      return {
+        replyText: buildCvInvalidPdfReply(contactName),
+        agendaMeta: { reason: 'cv_invalid_pdf', error: error.message }
+      };
     }
-  );
+    throw error;
+  }
 
   return finalizeAgendaBooking({
     normalizedPhone,
@@ -1097,6 +1143,23 @@ function buildCvDownloadFailedReply(contactName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   return (
     `Gracias, ${name}. No pude abrir el archivo. ¿Puedes reenviar tu CV en PDF? 💙`
+  );
+}
+
+function buildCvInvalidPdfReply(contactName) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  return (
+    `Gracias, ${name}. El archivo no se abrió como PDF (a veces pasa en WhatsApp). ` +
+    `¿Puedes reenviarlo como documento PDF, no como foto? 💙`
+  );
+}
+
+function buildCvReceivedPendingReply(contactName, slot) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
+  return (
+    `Listo, ${name}. Recibí tu CV y quedó anotada tu sesión para ${when}. ` +
+    `En breve te enviamos la liga de Meet. ☺️`
   );
 }
 

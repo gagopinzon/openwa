@@ -5,6 +5,85 @@
 
 const { getChatHistory } = require('./openwaClient');
 const mediaCacheStore = require('./mediaCacheStore');
+const cvFileStore = require('./cvFileStore');
+
+function normalizeMediaPayload(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  const media = msg.media && typeof msg.media === 'object' ? msg.media : null;
+  const mimetype =
+    (media && media.mimetype) || msg.mimetype || msg.mimeType || null;
+  const data =
+    (media && (media.data || media.base64)) || msg.mediaData || msg.base64 || null;
+  if (!data) return null;
+  return {
+    mimetype: mimetype ? String(mimetype) : null,
+    filename: (media && media.filename) || msg.filename || msg.fileName || null,
+    data: String(data)
+  };
+}
+
+function bufferFromMediaData(data) {
+  const raw = String(data || '').trim();
+  if (!raw) return null;
+  const comma = raw.indexOf(',');
+  const b64 =
+    raw.startsWith('data:') && comma >= 0 ? raw.slice(comma + 1) : raw.replace(/^base64,/i, '');
+  try {
+    const buffer = Buffer.from(b64, 'base64');
+    return buffer.length ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Intenta obtener el PDF del mensaje: webhook inline → download → hydrate + retry.
+ */
+async function resolveIncomingDocumentMedia(
+  openwaSessionId,
+  chatId,
+  msg,
+  downloadMessageMedia
+) {
+  const inline = normalizeMediaPayload(msg);
+  if (inline && inline.data) {
+    const buffer = bufferFromMediaData(inline.data);
+    if (buffer && cvFileStore.isValidPdfBuffer(buffer)) {
+      return {
+        buffer,
+        mimetype: inline.mimetype || 'application/pdf',
+        filename: inline.filename
+      };
+    }
+  }
+
+  const messageId = msg.id || msg.messageId;
+  if (!messageId) return null;
+
+  let media = await resolveMessageMedia(
+    openwaSessionId,
+    chatId,
+    messageId,
+    downloadMessageMedia
+  );
+  if (media && media.buffer && cvFileStore.isValidPdfBuffer(media.buffer)) {
+    return media;
+  }
+
+  await hydrateChatMedia(openwaSessionId, chatId, 80);
+  await new Promise((r) => setTimeout(r, 1500));
+  media = await resolveMessageMedia(
+    openwaSessionId,
+    chatId,
+    messageId,
+    downloadMessageMedia
+  );
+  if (media && media.buffer && cvFileStore.isValidPdfBuffer(media.buffer)) {
+    return media;
+  }
+
+  return media && media.buffer ? { ...media, invalidPdf: true } : null;
+}
 
 /** @type {Map<string, Promise<{ count: number, messages: Array }>>} */
 const inflight = new Map();
@@ -82,5 +161,6 @@ async function resolveMessageMedia(openwaSessionId, chatId, messageId, downloadM
 module.exports = {
   hydrateChatMedia,
   resolveMessageMedia,
+  resolveIncomingDocumentMedia,
   guessMimetypeFromType
 };

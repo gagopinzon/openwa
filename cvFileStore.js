@@ -115,6 +115,14 @@ function isPublicUrlConfigured() {
   return Boolean(publicBaseUrl());
 }
 
+/**
+ * @param {Buffer} buffer
+ */
+function isValidPdfBuffer(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 5) return false;
+  return buffer.slice(0, 5).toString('ascii') === '%PDF-';
+}
+
 function sanitizeExtension(originalName) {
   const ext = path.extname(String(originalName || '')).toLowerCase();
   if (['.pdf', '.docx', '.jpg', '.jpeg', '.png'].includes(ext)) return ext;
@@ -406,6 +414,7 @@ module.exports = {
   purgeExpiredCvs,
   sanitizeCvForPersist,
   isPublicUrlConfigured,
+  isValidPdfBuffer,
   isPanelIntegrationConfigured,
   publicBaseUrl,
   CV_FILES_DIR,
