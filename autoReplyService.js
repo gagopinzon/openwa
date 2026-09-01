@@ -648,9 +648,9 @@ async function tryIngestCvAndBook(params) {
     };
   }
 
-  if (media.invalidPdf || !cvFileStore.isValidPdfBuffer(media.buffer)) {
+  if (media.invalidPdf) {
     console.warn(
-      `[auto-reply] PDF inválido (${media.buffer.length} bytes, mime=${media.mimetype || '?'})`
+      `[auto-reply] PDF no legible (${media.buffer.length} bytes, mime=${media.mimetype || '?'})`
     );
     return {
       replyText: buildCvInvalidPdfReply(contactName),

@@ -1,16 +1,36 @@
 const pdfParse = require('pdf-parse');
 
 /**
+ * Comprueba que el buffer sea un PDF que pdf-parse pueda abrir (no solo el header %PDF-).
+ * @param {Buffer} buffer
+ * @returns {Promise<boolean>}
+ */
+async function verifyPdfReadable(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer) || buffer.length < 64) return false;
+  if (buffer.slice(0, 5).toString('ascii') !== '%PDF-') return false;
+  try {
+    await pdfParse(buffer, { max: 1 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Extrae texto de un PDF desde un buffer
  * @param {Buffer} buffer - Buffer del archivo PDF
+ * @param {{ silent?: boolean }} [opts]
  * @returns {Promise<string>} - Texto extraído del PDF
  */
-async function extractTextFromPDF(buffer) {
+async function extractTextFromPDF(buffer, opts = {}) {
+  const silent = Boolean(opts.silent);
   try {
     const data = await pdfParse(buffer);
     return data.text.trim();
   } catch (error) {
-    console.error('Error extrayendo texto del PDF:', error);
+    if (!silent) {
+      console.error('Error extrayendo texto del PDF:', error);
+    }
     throw new Error(`Error procesando PDF: ${error.message}`);
   }
 }
@@ -100,6 +120,7 @@ function extractExperienciaProfesional(text) {
 }
 
 module.exports = {
+  verifyPdfReadable,
   extractTextFromPDF,
   extractCVData
 };

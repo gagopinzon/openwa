@@ -5,7 +5,7 @@
 
 const { getChatHistory } = require('./openwaClient');
 const mediaCacheStore = require('./mediaCacheStore');
-const cvFileStore = require('./cvFileStore');
+const { verifyPdfReadable } = require('./pdfProcessor');
 
 function normalizeMediaPayload(msg) {
   if (!msg || typeof msg !== 'object') return null;
@@ -36,6 +36,12 @@ function bufferFromMediaData(data) {
   }
 }
 
+async function mediaIfReadablePdf(mediaLike) {
+  if (!mediaLike || !mediaLike.buffer) return null;
+  const ok = await verifyPdfReadable(mediaLike.buffer);
+  return ok ? mediaLike : { ...mediaLike, invalidPdf: true };
+}
+
 /**
  * Intenta obtener el PDF del mensaje: webhook inline → download → hydrate + retry.
  */
@@ -48,12 +54,13 @@ async function resolveIncomingDocumentMedia(
   const inline = normalizeMediaPayload(msg);
   if (inline && inline.data) {
     const buffer = bufferFromMediaData(inline.data);
-    if (buffer && cvFileStore.isValidPdfBuffer(buffer)) {
-      return {
+    if (buffer) {
+      const hit = await mediaIfReadablePdf({
         buffer,
         mimetype: inline.mimetype || 'application/pdf',
         filename: inline.filename
-      };
+      });
+      if (hit && !hit.invalidPdf) return hit;
     }
   }
 
@@ -66,23 +73,23 @@ async function resolveIncomingDocumentMedia(
     messageId,
     downloadMessageMedia
   );
-  if (media && media.buffer && cvFileStore.isValidPdfBuffer(media.buffer)) {
-    return media;
-  }
+  let readable = await mediaIfReadablePdf(media);
+  if (readable && !readable.invalidPdf) return readable;
 
   await hydrateChatMedia(openwaSessionId, chatId, 80);
-  await new Promise((r) => setTimeout(r, 1500));
-  media = await resolveMessageMedia(
-    openwaSessionId,
-    chatId,
-    messageId,
-    downloadMessageMedia
-  );
-  if (media && media.buffer && cvFileStore.isValidPdfBuffer(media.buffer)) {
-    return media;
+  for (const waitMs of [2000, 4000]) {
+    await new Promise((r) => setTimeout(r, waitMs));
+    media = await resolveMessageMedia(
+      openwaSessionId,
+      chatId,
+      messageId,
+      downloadMessageMedia
+    );
+    readable = await mediaIfReadablePdf(media);
+    if (readable && !readable.invalidPdf) return readable;
   }
 
-  return media && media.buffer ? { ...media, invalidPdf: true } : null;
+  return readable && readable.buffer ? readable : media && media.buffer ? { ...media, invalidPdf: true } : null;
 }
 
 /** @type {Map<string, Promise<{ count: number, messages: Array }>>} */

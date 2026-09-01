@@ -1,12 +1,12 @@
 const cvFileStore = require('./cvFileStore');
 const contactHistory = require('./contactHistoryStore');
-const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
+const { extractTextFromPDF, extractCVData, verifyPdfReadable } = require('./pdfProcessor');
 
 /**
  * Guarda un CV de lead (p. ej. PDF recibido por WhatsApp) en disco + manifiesto.
  * @param {Buffer} buffer
  * @param {string} originalName
- * @param {{ telefono?: string, nombre?: string, fromConversation?: boolean }} [opts]
+ * @param {{ telefono?: string, nombre?: string, contactKey?: string, fromConversation?: boolean }} [opts]
  */
 async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
   if (!buffer || !Buffer.isBuffer(buffer) || !buffer.length) {
@@ -14,8 +14,13 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
     err.status = 400;
     throw err;
   }
-  if (!cvFileStore.isValidPdfBuffer(buffer)) {
-    const err = new Error('El archivo no es un PDF válido');
+
+  const fromConversation = opts.fromConversation !== false;
+  const readable = await verifyPdfReadable(buffer);
+  if (!readable) {
+    const err = new Error(
+      'El archivo no es un PDF legible (WhatsApp a veces envía el documento sin descifrar)'
+    );
     err.status = 400;
     err.code = 'invalid_pdf';
     throw err;
@@ -30,16 +35,19 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
     procesado: true
   };
 
-  try {
-    const text = await extractTextFromPDF(buffer);
-    cvData = { ...extractCVData(text), procesado: true };
-    if (opts.telefono) cvData.telefono = String(opts.telefono).trim();
-    if (opts.nombre && String(opts.nombre).trim()) {
-      cvData.nombre = String(opts.nombre).trim();
+  // En conversación WhatsApp no hace falta parsear aquí: el panel analiza el cvUrl.
+  if (!fromConversation) {
+    try {
+      const text = await extractTextFromPDF(buffer, { silent: true });
+      cvData = { ...extractCVData(text), procesado: true };
+      if (opts.telefono) cvData.telefono = String(opts.telefono).trim();
+      if (opts.nombre && String(opts.nombre).trim()) {
+        cvData.nombre = String(opts.nombre).trim();
+      }
+    } catch (parseErr) {
+      console.warn('[cvIngest] parse parcial (masivo):', parseErr.message);
+      if (opts.nombre) cvData.nombre = String(opts.nombre).trim();
     }
-  } catch (parseErr) {
-    console.warn('[cvIngest] parse parcial:', parseErr.message);
-    if (opts.nombre) cvData.nombre = String(opts.nombre).trim();
   }
 
   const entry = {
@@ -50,7 +58,7 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
     saludo: '',
     mensajeIA: '',
     procesado: true,
-    fromConversation: opts.fromConversation !== false,
+    fromConversation,
     inWorkspace: false,
     savedAt: new Date().toISOString()
   };
@@ -101,5 +109,6 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
 }
 
 module.exports = {
-  ingestLeadCvFromBuffer
+  ingestLeadCvFromBuffer,
+  verifyPdfReadable
 };
