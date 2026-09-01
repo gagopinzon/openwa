@@ -19,6 +19,7 @@ const {
   isConnectedStatus,
   getContact
 } = require('./openwaClient');
+const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const processedKeys = new Map();
@@ -1084,7 +1085,10 @@ function getStatus() {
     canListen,
     /** Alias: activar webhooks solo requiere URL pública + sesiones (para ver mensajes). */
     canActivate: canListen,
-    canAutoReply: Boolean(canListen && contactHistory.mongoUriConfigured()),
+    canAutoReply: Boolean(
+      (canListen || isInboxPollEnabled()) && contactHistory.mongoUriConfigured()
+    ),
+    ...getInboxPollStatus(),
     aiProvider: getReplyProvider(),
     ollamaModel: getReplyProvider() === 'ollama' ? ollamaService.getModel() : null
   };

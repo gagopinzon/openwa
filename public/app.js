@@ -1379,6 +1379,9 @@ class CVAnalyzer {
             } else {
                 html += ' · Auto-respuesta global OFF';
             }
+            if (data.inboxPollEnabled) {
+                html += `<br>Poll inbox OpenWA: activo cada ${Number(data.inboxPollIntervalMs) || 3000} ms (entrega al pipeline de webhooks)`;
+            }
 
             const statusClass =
                 state.key === 'on' ? 'ok' : state.key === 'partial' ? 'ok' : 'warning';

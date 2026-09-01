@@ -43,6 +43,7 @@ const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
 const autoReplyStore = require('./autoReplyStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
+const openwaInboxPoller = require('./openwaInboxPoller');
 const hermesBridge = require('./hermesBridge');
 const usersStore = require('./usersStore');
 const cvFileStore = require('./cvFileStore');
@@ -3696,6 +3697,58 @@ function forbidUnlessAnyControl(req, res) {
   return true;
 }
 
+/**
+ * Misma ruta que usa POST /api/webhooks/openwa.
+ * El poller de inbox (Capataz) inyecta aquí payloads message.received.
+ * @param {object} payload
+ * @param {{ idempotencyKey?: string|null, source?: string }} [opts]
+ */
+async function processOpenWaIncomingEvent(payload, opts = {}) {
+  const idempotencyKey = opts.idempotencyKey || null;
+  const source = opts.source || 'webhook';
+  const preview = `event=${payload?.event || payload?.type || '?'} session=${payload?.sessionId || '?'}`;
+  console.log(`[webhook] ${source} (${preview})`);
+
+  const inboxRecord = autoReplyService.captureIncomingMessage({
+    payload,
+    broadcastEvent,
+    idempotencyKey
+  });
+
+  if (!inboxRecord) {
+    console.log(`[webhook] ignorado via ${source} (sin texto, fromMe, grupo o evento no soportado)`);
+  }
+
+  const replyResult = await autoReplyService.handleIncomingWebhook({
+    payload,
+    idempotencyKey,
+    broadcastEvent,
+    getCvContext: getCvContextForPhone,
+    getLeadCv: getLeadCvForPhone,
+    testMode: TEST_MODE
+  });
+
+  if (inboxRecord && replyResult) {
+    incomingMessagesStore.update(inboxRecord.id, {
+      autoReplyHandled: Boolean(replyResult.handled),
+      autoReplyReason: replyResult.handled ? 'replied' : replyResult.reason || null,
+      replyMessage: replyResult.replyMessage || null
+    });
+  }
+
+  if (replyResult?.handled) {
+    console.log(
+      `[auto-reply] replied phone=${replyResult.telefono || '?'} session=${replyResult.sessionId || replyResult.openwaSessionId}`
+    );
+  } else if (inboxRecord) {
+    console.log(
+      `[auto-reply] skip reason=${replyResult?.reason || 'unknown'} phone=${inboxRecord.telefono || '?'} session=${inboxRecord.sessionId || inboxRecord.openwaSessionId || '?'} body=${String(inboxRecord.body || '').slice(0, 80)}`
+    );
+  }
+
+  return { inboxRecord, replyResult };
+}
+
 app.post('/api/webhooks/openwa', async (req, res) => {
   res.status(200).json({ received: true });
 
@@ -3720,44 +3773,7 @@ app.post('/api/webhooks/openwa', async (req, res) => {
 
     const payload = req.body && Object.keys(req.body).length ? req.body : JSON.parse(rawBody.toString('utf8'));
     const idempotencyKey = req.headers['x-openwa-idempotency-key'];
-
-    // Siempre registrar el mensaje entrante para la bandeja (aunque no haya auto-respuesta).
-    const inboxRecord = autoReplyService.captureIncomingMessage({
-      payload,
-      broadcastEvent,
-      idempotencyKey
-    });
-
-    if (!inboxRecord) {
-      console.log('[webhook] ignorado (sin texto, fromMe, grupo o evento no soportado)');
-    }
-
-    const replyResult = await autoReplyService.handleIncomingWebhook({
-      payload,
-      idempotencyKey,
-      broadcastEvent,
-      getCvContext: getCvContextForPhone,
-      getLeadCv: getLeadCvForPhone,
-      testMode: TEST_MODE
-    });
-
-    if (inboxRecord && replyResult) {
-      incomingMessagesStore.update(inboxRecord.id, {
-        autoReplyHandled: Boolean(replyResult.handled),
-        autoReplyReason: replyResult.handled ? 'replied' : replyResult.reason || null,
-        replyMessage: replyResult.replyMessage || null
-      });
-    }
-
-    if (replyResult?.handled) {
-      console.log(
-        `[auto-reply] replied phone=${replyResult.telefono || '?'} session=${replyResult.sessionId || replyResult.openwaSessionId}`
-      );
-    } else if (inboxRecord) {
-      console.log(
-        `[auto-reply] skip reason=${replyResult?.reason || 'unknown'} phone=${inboxRecord.telefono || '?'} session=${inboxRecord.sessionId || inboxRecord.openwaSessionId || '?'} body=${String(inboxRecord.body || '').slice(0, 80)}`
-      );
-    }
+    await processOpenWaIncomingEvent(payload, { idempotencyKey, source: 'webhook' });
   } catch (err) {
     console.error('Webhook OpenWA error:', err.message);
   }
@@ -5206,6 +5222,7 @@ app.use((error, req, res, next) => {
 // Cerrar servicios locales al cerrar el servidor
 process.on('SIGINT', async () => {
   console.log('\nCerrando servidor...');
+  openwaInboxPoller.stopInboxPoller();
   for (const [sessionId, service] of whatsappServices) {
     await service.close();
     console.log(`Sesión ${sessionId} desvinculada`);
@@ -5215,6 +5232,7 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   console.log('\nCerrando servidor...');
+  openwaInboxPoller.stopInboxPoller();
   for (const [sessionId, service] of whatsappServices) {
     await service.close();
     console.log(`Sesión ${sessionId} desvinculada`);
@@ -5249,6 +5267,12 @@ app.listen(PORT, () => {
     console.log('⚠️  Autenticación desactivada: define AUTH_USERNAME y AUTH_PASSWORD en .env para proteger la interfaz');
   }
   autoReplyService.scheduleStartupWebhookActivation();
+  openwaInboxPoller.startInboxPoller({
+    deliver: (payload) => processOpenWaIncomingEvent(payload, { source: 'inbox-poll' }),
+    getSessions: () => sessionsStore.getAllSessions(),
+    listChats,
+    getChatHistory
+  });
 });
 
 module.exports = app;
