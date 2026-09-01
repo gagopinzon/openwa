@@ -925,6 +925,11 @@ async function activateWebhooks() {
       secret ? 'yes' : 'no'
     }`
   );
+  if (/127\.0\.0\.1|localhost|\[::1\]/i.test(webhookUrl)) {
+    console.warn(
+      '[auto-reply] WEBHOOK_PUBLIC_URL es loopback. Si OpenWA corre en Docker, 127.0.0.1 es el contenedor, no msg. Usa http://172.17.0.1:3445 y reactiva webhooks.'
+    );
+  }
 
   const prevIds = autoReplyStore.getConfig().webhookIdsBySession || {};
   const results = [];
