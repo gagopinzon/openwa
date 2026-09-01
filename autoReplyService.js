@@ -673,7 +673,7 @@ async function handleIncomingWebhook({
         const range =
           agendaIntent.resolveDateRangeFromMessage(body) || {
             fechaInicio: today,
-            fechaFin: agendaIntent.addDaysYmd(today, 2)
+            fechaFin: agendaIntent.addDaysYmd(today, 6)
           };
         let aggregated = await agendaAvailability.getAggregatedSlotsCached({
           fechaInicio: range.fechaInicio,
@@ -707,12 +707,22 @@ async function handleIncomingWebhook({
         if (slots.length) {
           agendaOfferStore.rememberOffer(normalizedPhone, slots);
           agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 3);
+          console.log(
+            `[auto-reply] agenda ${slots.length} slot(s) → prompt (${range.fechaInicio}…${range.fechaFin})`
+          );
           // Si el primer día ofrecido es mañana (hoy ya venció), déjalo explícito
           const firstFecha = slots[0] && slots[0].fecha;
           if (firstFecha && firstFecha > today) {
             agendaContext = `Hoy (${today}) ya no hay horarios disponibles. Ofrece a partir de estos días:\n${agendaContext}`;
           }
         } else {
+          const errMsg =
+            aggregated.erroresGerente && aggregated.erroresGerente[0]
+              ? aggregated.erroresGerente[0].error
+              : 'sin slots';
+          console.warn(
+            `[auto-reply] agenda vacía (${errMsg}). Configura MSG_GERENTE_EMAIL o guarda tu correo en Mi perfil.`
+          );
           agendaContext =
             '(Sin horarios libres en los próximos días. No inventes horas; ofrece otro día o paso a humano.)';
         }

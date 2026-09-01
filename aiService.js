@@ -464,11 +464,14 @@ async function generateBulkMessages(cvs, onProgress = null) {
   return messages;
 }
 
-function generateBasicReply({ contactName, incomingBody, matchedRule, senderName }) {
+function generateBasicReply({ contactName, incomingBody, matchedRule, senderName, agendaContext }) {
   const name = extractFirstName(contactName);
   if (matchedRule) {
     if (matchedRule.id === 'interes') {
-      return `¡Excelente, ${name}! Me da gusto saberlo. ¿Qué día y horario te acomoda para una sesión gratuita de diagnóstico?\n\nAtte:\n${senderName}`;
+      if (agendaContext) {
+        return `¡Excelente, ${name}! Me da gusto saberlo. Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál horario te acomoda mejor? ☺️`;
+      }
+      return `¡Excelente, ${name}! Me da gusto saberlo. ¿Qué día te acomoda para una sesión gratuita de diagnóstico?\n\nAtte:\n${senderName}`;
     }
     if (matchedRule.id === 'precio') {
       return `Hola ${name}, la sesión de diagnóstico es completamente gratuita y sin compromiso. ¿Te gustaría agendarla?\n\nAtte:\n${senderName}`;
@@ -521,7 +524,8 @@ async function generateReplyMessage({
       contactName,
       incomingBody,
       matchedRule,
-      senderName: sender
+      senderName: sender,
+      agendaContext
     });
   }
 
@@ -529,11 +533,12 @@ async function generateReplyMessage({
 
   const agendaInstructions = agendaContext
     ? `
-- Donde tu playbook diga XXXX / XXXXXXX / "espacios disponibles", usa SOLO los rangos de HORARIOS REALES de arriba.
-- La sesión es de 15 minutos. Ofrece disponibilidad como rangos ("sábado de 8:30 a 12:30"), NO listes bloques de 30 minutos.
-- Pide una hora de inicio dentro del rango (ej. "¿te queda a las 10?"). No digas que el calendario usa slots de 30 min.
-- NUNCA ofrezcas horarios que ya pasaron; usa solo la lista inyectada (ya viene filtrada).
+- PRIORIDAD MÁXIMA: los HORARIOS REALES de arriba sustituyen cualquier XXXX / ejemplo del playbook.
+- Ofrece disponibilidad como RANGOS por día ("miércoles de 8:00 a 18:00"), NO solo dos horas sueltas inventadas.
+- La sesión es de 15 minutos. Pide una hora de inicio dentro del rango (ej. "¿te queda a las 10?").
+- NUNCA ofrezcas horarios que ya pasaron ni horas que no estén dentro de esos rangos.
 - NUNCA inventes horas ni digas nombres de vendedores.
+- Si el rango es amplio (casi todo el día), dilo así; no reduzcas a solo 2 opciones.
 - Si no hay huecos en esa lista, dilo y ofrece otro día; no inventes.`
     : `
 - Si no hay lista de horarios reales inyectada, NO inventes horas concretas; invita a proponer día o espera a un asesor.`;
@@ -566,7 +571,8 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
   if (canUseOllama) {
     try {
       const message = await ollamaService.chatReply(prompt, {
-        basePrompt: basePrompt || undefined
+        basePrompt: basePrompt || undefined,
+        systemExtra: agendaInstructions
       });
       return cleanReplyText(message);
     } catch (error) {
@@ -578,7 +584,8 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
         contactName,
         incomingBody,
         matchedRule,
-        senderName: sender
+        senderName: sender,
+        agendaContext
       });
     }
   }
@@ -611,7 +618,8 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
       contactName,
       incomingBody,
       matchedRule,
-      senderName: sender
+      senderName: sender,
+      agendaContext
     });
   }
 }

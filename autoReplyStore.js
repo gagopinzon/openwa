@@ -14,7 +14,7 @@ const DEFAULT_RULES = [
     label: 'Muestra interés',
     keywords: ['sí', 'si', 'me interesa', 'claro', 'adelante', 'ok', 'vale'],
     instruction:
-      'Confirma entusiasmo y propón agendar una sesión gratuita de diagnóstico. Pregunta qué día u horario le acomoda.'
+      'Confirma entusiasmo y propón agendar una sesión gratuita de diagnóstico. Ofrece los HORARIOS REALES del sistema (rangos por día); no inventes horas ni preguntes "¿cuándo puedes?".'
   },
   {
     id: 'precio',
