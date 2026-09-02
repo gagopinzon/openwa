@@ -7,6 +7,7 @@ const {
   isRetryablePanelError,
   sleep
 } = require('./panelMeetUtils');
+const { logAgenda, warnAgenda, probeCvPublicUrl, redactCvUrl } = require('./agendaDebug');
 
 function syncRetryAttempts() {
   const raw = Number(process.env.AGENDA_PANEL_SYNC_RETRIES || 2);
@@ -69,11 +70,26 @@ async function crearReunionWithRetries(payload) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      logAgenda('agenda-confirm.crearReunion.intento', {
+        attempt,
+        maxAttempts,
+        vendedorId: payload.vendedorId,
+        fecha: payload.fecha,
+        horaInicio: payload.horaInicio
+      });
       return await panelMsgClient.crearReunion(payload);
     } catch (error) {
       lastError = error;
       if (attempt < maxAttempts && isRetryablePanelError(error)) {
         const delay = syncRetryDelayMs() * attempt;
+        warnAgenda('agenda-confirm.crearReunion.reintento', {
+          attempt: attempt + 1,
+          maxAttempts,
+          delayMs: delay,
+          message: error.message,
+          status: error.status || null,
+          panelBody: error.panelBody || null
+        });
         console.warn(
           `[agenda-confirm] reintento ${attempt + 1}/${maxAttempts} en ${delay}ms: ${error.message}`
         );
@@ -93,6 +109,15 @@ async function crearReunionWithRetries(payload) {
  * @param {object} pending
  */
 async function confirmPendingInPanel(pending, opts = {}) {
+  logAgenda('agenda-confirm.start', {
+    pendingId: pending?.id,
+    status: pending?.status,
+    cvId: pending?.cvId,
+    fecha: pending?.fecha,
+    horaInicio: pending?.horaInicio,
+    vendors: listVendors(pending?.candidateVendors || []).length
+  });
+
   if (!pending || !pending.id) {
     const err = new Error('Cita pendiente inválida');
     err.status = 400;
@@ -124,11 +149,21 @@ async function confirmPendingInPanel(pending, opts = {}) {
   }
 
   const cvId = String(pending.cvId || '').trim();
-  if (!cvFileStore.getCvFileMeta(cvId)) {
+  const cvMeta = cvFileStore.getCvFileMeta(cvId);
+  if (!cvMeta) {
+    warnAgenda('agenda-confirm.cvNoDisponible', { pendingId: pending.id, cvId });
     const err = new Error('Archivo del CV no está disponible');
     err.status = 404;
     throw err;
   }
+
+  logAgenda('agenda-confirm.cvMeta', {
+    pendingId: pending.id,
+    cvId,
+    fileName: cvMeta.fileName,
+    mime: cvMeta.mime,
+    publicBase: cvFileStore.publicBaseUrl() || null
+  });
 
   const vendors = listVendors(pending.candidateVendors);
   if (!vendors.length) {
@@ -145,6 +180,24 @@ async function confirmPendingInPanel(pending, opts = {}) {
   const enrichedCv = panelExtras.enriched || cv;
   const { leadExtraido, analisisCV, cvAnalizadoEnMsg } = panelExtras;
   const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
+  const cvProbe = await probeCvPublicUrl(cvUrl);
+  logAgenda('agenda-confirm.cvUrlProbe', {
+    pendingId: pending.id,
+    cvId,
+    cvUrl: redactCvUrl(cvUrl),
+    probe: cvProbe
+  });
+  if (!cvProbe.ok) {
+    warnAgenda('agenda-confirm.cvUrlNoAlcanzable', {
+      pendingId: pending.id,
+      cvId,
+      cvUrl: redactCvUrl(cvUrl),
+      probe: cvProbe,
+      hint:
+        'El panel descarga el CV desde WEBHOOK_PUBLIC_URL. Si probe falla aquí, el panel también fallará.'
+    });
+  }
+
   const leadNombre =
     pending.contactName || enrichedCv?.nombre || leadExtraido.leadNombre || undefined;
   const leadTelefono =
@@ -160,12 +213,25 @@ async function confirmPendingInPanel(pending, opts = {}) {
     undefined;
 
   if (!leadExtraido.leadCorreo) {
+    warnAgenda('agenda-confirm.sinEmail', {
+      pendingId: pending.id,
+      cvId,
+      leadExtraido
+    });
     const err = new Error(
       'No se encontró email en el CV. Pide al lead un CV con correo visible o que lo indique.'
     );
     err.status = 400;
     throw err;
   }
+
+  logAgenda('agenda-confirm.datosLead', {
+    pendingId: pending.id,
+    leadNombre,
+    leadCorreo,
+    leadTelefono: leadTelefono || null,
+    cvAnalizadoEnMsg
+  });
 
   let lastError = null;
   let panelData = null;
@@ -179,6 +245,11 @@ async function confirmPendingInPanel(pending, opts = {}) {
       continue;
     }
     try {
+      logAgenda('agenda-confirm.probandoVendedor', {
+        pendingId: pending.id,
+        vendedorId: vendor.vendedorId,
+        gerenteEmail
+      });
       panelData = await crearReunionWithRetries({
         gerenteEmail,
         vendedorId: vendor.vendedorId,
@@ -200,9 +271,21 @@ async function confirmPendingInPanel(pending, opts = {}) {
         origen: 'msg_auto_agenda'
       });
       usedVendor = { ...vendor, gerenteEmail };
+      logAgenda('agenda-confirm.vendedorOk', {
+        pendingId: pending.id,
+        vendedorId: usedVendor.vendedorId,
+        gerenteEmail: usedVendor.gerenteEmail
+      });
       break;
     } catch (error) {
       lastError = error;
+      warnAgenda('agenda-confirm.vendedorError', {
+        pendingId: pending.id,
+        vendedorId: vendor.vendedorId,
+        status: error.status || null,
+        message: error.message,
+        panelBody: error.panelBody || null
+      });
       if (error.status === 409) continue;
       throw error;
     }
@@ -216,6 +299,13 @@ async function confirmPendingInPanel(pending, opts = {}) {
     (panelData && (panelData.id || panelData.reunionId || panelData.reunion?.id)) ||
     null;
   const urlReunionLead = extractMeetUrlFromPanel(panelData);
+
+  logAgenda('agenda-confirm.panelRespuesta', {
+    pendingId: pending.id,
+    panelReunionId,
+    urlReunionLead: urlReunionLead || null,
+    panelKeys: panelData && typeof panelData === 'object' ? Object.keys(panelData) : []
+  });
 
   const confirmed = agendaPendingStore.confirmPending(pending.id, {
     vendedorId: usedVendor.vendedorId,

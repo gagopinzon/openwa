@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { logAgenda, warnAgenda, redactCvUrl } = require('./agendaDebug');
 
 const DEFAULT_PANEL_BASE = 'https://panel.protalentconnections.com';
 const GET_TIMEOUT_MS = 20000;
@@ -135,18 +136,54 @@ async function crearReunion(body = {}) {
   }
   if (body.origen) payload.origen = body.origen;
 
+  const endpoint = `${panelBaseUrl()}/api/external/msg/reuniones`;
+  logAgenda('panel.crearReunion.request', {
+    endpoint,
+    gerenteEmail,
+    vendedorId: payload.vendedorId,
+    fecha: payload.fecha,
+    horaInicio: payload.horaInicio,
+    horaFin: payload.horaFin,
+    cvUrl: redactCvUrl(payload.cvUrl),
+    leadCorreo: payload.leadCorreo || null,
+    leadNombre: payload.leadNombre || null,
+    cvAnalizadoEnMsg: payload.cvAnalizadoEnMsg === true,
+    tieneLeadExtraido: Boolean(payload.leadExtraido),
+    tieneAnalisisCV: Boolean(payload.analisisCV),
+    origen: payload.origen || null
+  });
+
+  const started = Date.now();
   try {
-    const { data } = await axios.post(
-      `${panelBaseUrl()}/api/external/msg/reuniones`,
-      payload,
-      {
-        headers,
-        timeout: POST_TIMEOUT_MS
-      }
-    );
+    const { data, status } = await axios.post(endpoint, payload, {
+      headers,
+      timeout: POST_TIMEOUT_MS
+    });
+    logAgenda('panel.crearReunion.ok', {
+      status,
+      ms: Date.now() - started,
+      reunionId:
+        (data && (data.id || data.reunionId || data.reunion?.id)) || null,
+      urlReunion:
+        (data &&
+          (data.urlReunion ||
+            data.urlReunionLead ||
+            data.reunion?.urlReunion ||
+            data.meetUrl)) ||
+        null,
+      keys: data && typeof data === 'object' ? Object.keys(data) : []
+    });
     return data;
   } catch (error) {
-    throw normalizePanelError(error);
+    const normalized = normalizePanelError(error);
+    warnAgenda('panel.crearReunion.error', {
+      ms: Date.now() - started,
+      status: normalized.status,
+      message: normalized.message,
+      axiosCode: error.code || null,
+      panelBody: normalized.panelBody || null
+    });
+    throw normalized;
   }
 }
 

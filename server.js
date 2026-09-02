@@ -1813,16 +1813,30 @@ app.get('/api/public/cv/:cvId', (req, res) => {
   try {
     const cvId = String(req.params.cvId || '').trim();
     const token = String(req.query.token || '').trim();
+    const clientIp =
+      String(req.headers['x-forwarded-for'] || req.ip || '')
+        .split(',')[0]
+        .trim() || 'unknown';
     if (!cvId || !token) {
+      console.warn('[public/cv] 400 sin cvId/token', { cvId: cvId || null, clientIp });
       return res.status(400).json({ success: false, error: 'cvId y token son obligatorios' });
     }
     if (!cvFileStore.verifySignedToken(cvId, token)) {
+      console.warn('[public/cv] 401 token inválido', { cvId, clientIp });
       return res.status(401).json({ success: false, error: 'Token inválido o expirado' });
     }
     const meta = cvFileStore.getCvFileMeta(cvId);
     if (!meta) {
+      console.warn('[public/cv] 404 CV no encontrado', { cvId, clientIp });
       return res.status(404).json({ success: false, error: 'CV no encontrado' });
     }
+    console.log('[public/cv] 200 sirviendo CV', {
+      cvId,
+      fileName: meta.fileName,
+      mime: meta.mime,
+      clientIp,
+      userAgent: String(req.headers['user-agent'] || '').slice(0, 120)
+    });
     res.setHeader('Content-Type', meta.mime);
     res.setHeader('Content-Disposition', `inline; filename="${meta.fileName}"`);
     return res.sendFile(meta.filePath);

@@ -3,6 +3,7 @@ const agendaConfirmService = require('./agendaConfirmService');
 const sessionsStore = require('./sessionsStore');
 const { sendTextMessage } = require('./openwaClient');
 const { extractMeetUrlFromPanel, isRetryablePanelError, sleep } = require('./panelMeetUtils');
+const { logAgenda, warnAgenda } = require('./agendaDebug');
 
 const scheduled = new Map();
 
@@ -54,6 +55,13 @@ function scheduleMeetLinkDelivery(pending, notify = {}) {
 
   const run = async () => {
     attempt += 1;
+    logAgenda('agenda-meet.intento', {
+      pendingId: pending.id,
+      attempt,
+      maxAttempts,
+      openwaSessionId,
+      chatId
+    });
     try {
       const fresh = agendaPendingStore.getById(pending.id);
       if (!fresh) {
@@ -74,10 +82,20 @@ function scheduleMeetLinkDelivery(pending, notify = {}) {
         return;
       }
       if (fresh.status !== agendaPendingStore.STATUS.PENDING_LINK) {
+        logAgenda('agenda-meet.estadoInesperado', {
+          pendingId: pending.id,
+          status: fresh.status
+        });
         scheduled.delete(pending.id);
         return;
       }
 
+      logAgenda('agenda-meet.confirmandoEnPanel', {
+        pendingId: fresh.id,
+        cvId: fresh.cvId,
+        fecha: fresh.fecha,
+        horaInicio: fresh.horaInicio
+      });
       const confirmed = await agendaConfirmService.confirmPendingInPanel(fresh);
       const url =
         confirmed.urlReunionLead ||
@@ -86,6 +104,7 @@ function scheduleMeetLinkDelivery(pending, notify = {}) {
         null;
 
       if (url) {
+        logAgenda('agenda-meet.ligaLista', { pendingId: fresh.id, url });
         const text = buildMeetLinkMessage(confirmed.confirmed || fresh, {
           contactName: fresh.contactName,
           fecha: fresh.fecha,
@@ -115,12 +134,28 @@ function scheduleMeetLinkDelivery(pending, notify = {}) {
     } catch (error) {
       if (attempt < maxAttempts && isRetryablePanelError(error)) {
         const delay = retryDelayMs(attempt);
+        warnAgenda('agenda-meet.errorReintento', {
+          pendingId: pending.id,
+          attempt,
+          maxAttempts,
+          delayMs: delay,
+          message: error.message,
+          status: error.status || null,
+          panelBody: error.panelBody || null
+        });
         console.warn(
           `[agenda-meet] error pending=${pending.id} (${error.message}); reintento en ${delay}ms`
         );
         scheduled.set(pending.id, setTimeout(run, delay));
         return;
       }
+      warnAgenda('agenda-meet.falloFinal', {
+        pendingId: pending.id,
+        attempt,
+        message: error.message,
+        status: error.status || null,
+        panelBody: error.panelBody || null
+      });
       console.warn(`[agenda-meet] falló pending=${pending.id}:`, error.message);
       scheduled.delete(pending.id);
     }

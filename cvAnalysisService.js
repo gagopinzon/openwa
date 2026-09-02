@@ -1,6 +1,7 @@
 const ollamaService = require('./ollamaService');
 const cvFileStore = require('./cvFileStore');
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
+const { logAgenda, warnAgenda } = require('./agendaDebug');
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 const PHONE_RE = /(?:\+?52)?\s*\(?\d{2,3}\)?[\s.-]?\d{3,4}[\s.-]?\d{4}/g;
@@ -155,14 +156,25 @@ async function analyzeCvBuffer(buffer, opts = {}) {
     emails: loose.emails
   };
 
+  logAgenda('cv.analyzeBuffer.start', {
+    bytes: buffer?.length || 0,
+    provider: getProvider(),
+    emailsEnPdf: loose.emails.length,
+    phonesEnPdf: loose.phones.length
+  });
+
   let text = '';
   try {
     text = await extractTextFromPDF(buffer, { silent: true, maxPages: 8 });
   } catch (error) {
-    console.warn('[cvAnalysis] pdf-parse:', error.message);
+    warnAgenda('cv.analyzeBuffer.pdfParseError', { message: error.message });
   }
 
   if (!text || text.length < 40) {
+    logAgenda('cv.analyzeBuffer.textoCorto', {
+      chars: text ? text.length : 0,
+      usandoHints: true
+    });
     const joined = [
       hints.nombre ? `Nombre: ${hints.nombre}` : '',
       hints.telefono ? `Teléfono: ${hints.telefono}` : '',
@@ -186,6 +198,13 @@ async function analyzeCvBuffer(buffer, opts = {}) {
   ) {
     analyzed.telefono = loose.phones[0];
   }
+  logAgenda('cv.analyzeBuffer.done', {
+    provider: analyzed.analysisProvider || getProvider(),
+    nombre: analyzed.nombre || null,
+    correo: analyzed.leadCorreo || analyzed.correo || null,
+    telefono: analyzed.telefono || null,
+    textoChars: String(analyzed.textoCompleto || text || '').length
+  });
   return analyzed;
 }
 
@@ -201,12 +220,27 @@ async function ensureCvAnalyzed(cvId, opts = {}) {
   const existing =
     (cvFileStore.loadCvsManifest() || []).find((c) => c && c.cvId === id) || null;
   const buffer = cvFileStore.readCvFileBuffer(id);
-  if (!buffer) return existing;
+  if (!buffer) {
+    warnAgenda('cv.ensureAnalyzed.sinArchivo', { cvId: id });
+    return existing;
+  }
 
   const hasEmail = [existing?.leadCorreo, existing?.correo, existing?.email].some(
     (value) => value && String(value).includes('@')
   );
-  if (hasEmail && !opts.force) return existing;
+  if (hasEmail && !opts.force) {
+    logAgenda('cv.ensureAnalyzed.cache', {
+      cvId: id,
+      correo: existing?.leadCorreo || existing?.correo || existing?.email
+    });
+    return existing;
+  }
+
+  logAgenda('cv.ensureAnalyzed.reanalizar', {
+    cvId: id,
+    force: Boolean(opts.force),
+    hadEmail: hasEmail
+  });
 
   const analyzed = await analyzeCvBuffer(buffer, {
     nombre: opts.nombre || existing?.nombre,
@@ -285,12 +319,20 @@ function buildPanelLeadExtraido(lead = {}) {
  * @param {{ nombre?: string, telefono?: string }} [opts]
  */
 async function buildPanelAgendaExtras(cvId, opts = {}) {
+  logAgenda('cv.buildPanelExtras.start', { cvId, provider: getProvider() });
   const enriched =
     (await ensureCvAnalyzed(cvId, { ...opts, force: true })) || null;
   const leadExtraido = buildPanelLeadExtraido(enriched || {});
   const analisisCV = buildPanelAnalisisCv(enriched || {});
   const cvAnalizadoEnMsg =
     Boolean(leadExtraido.leadCorreo) && getProvider() === 'ollama';
+  logAgenda('cv.buildPanelExtras.done', {
+    cvId,
+    leadCorreo: leadExtraido.leadCorreo || null,
+    leadNombre: leadExtraido.leadNombre || null,
+    cvAnalizadoEnMsg,
+    analysisProvider: enriched?.analysisProvider || getProvider()
+  });
   return { enriched, leadExtraido, analisisCV, cvAnalizadoEnMsg };
 }
 
