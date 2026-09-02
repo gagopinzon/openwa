@@ -48,7 +48,6 @@ const incomingMessagesStore = require('./incomingMessagesStore');
 const openwaInboxPoller = require('./openwaInboxPoller');
 const hermesBridge = require('./hermesBridge');
 const usersStore = require('./usersStore');
-const cvFileStore = require('./cvFileStore');
 const panelMsgClient = require('./panelMsgClient');
 const agendaAvailability = require('./agendaAvailability');
 const agendaPendingStore = require('./agendaPendingStore');
