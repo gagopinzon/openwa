@@ -469,18 +469,18 @@ function generateBasicReply({ contactName, incomingBody, matchedRule, senderName
   if (matchedRule) {
     if (matchedRule.id === 'interes') {
       if (agendaContext) {
-        return `¡Excelente, ${name}! Me da gusto saberlo. Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál horario te acomoda mejor? ☺️`;
+        return `¡Qué bien, ${name}! Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál te acomoda mejor? ☺️`;
       }
-      return `¡Excelente, ${name}! Me da gusto saberlo. ¿Qué día te acomoda para una sesión gratuita de diagnóstico?\n\nAtte:\n${senderName}`;
+      return `¡Me da gusto, ${name}! Cuando quieras podemos agendar una sesión gratuita de diagnóstico. ¿Te gustaría ver horarios disponibles? ☺️`;
     }
     if (matchedRule.id === 'precio') {
-      return `Hola ${name}, la sesión de diagnóstico es completamente gratuita y sin compromiso. ¿Te gustaría agendarla?\n\nAtte:\n${senderName}`;
+      return `Hola ${name}, la sesión de diagnóstico es completamente gratuita y sin compromiso. Si más adelante te interesa, con gusto te ayudamos a agendar. ☺️`;
     }
     if (matchedRule.id === 'no') {
       return `Entendido, ${name}. Gracias por tu tiempo. ¡Mucho éxito!\n\nAtte:\n${senderName}`;
     }
   }
-  return `Hola ${name}, gracias por tu mensaje. ¿En qué puedo ayudarte con respecto a tu desarrollo profesional?\n\nAtte:\n${senderName}`;
+  return `Hola ${name}, gracias por tu mensaje. Cuéntame, ¿en qué te puedo ayudar? ☺️`;
 }
 
 /**
@@ -573,7 +573,7 @@ async function generateReplyMessage({
 - NUNCA inventes horas ni digas nombres de vendedores.
 - Sé breve: una sola pregunta o confirmación por mensaje; evita confirmaciones redundantes.`
     : `
-- Si no hay lista de horarios reales inyectada, NO inventes horas concretas; invita a proponer día o espera a un asesor.`;
+- Si no hay lista de horarios reales inyectada, NO inventes horas concretas ni empujes agendar; responde lo que preguntó el lead y deja la puerta abierta sin presionar.`;
 
   const greetingInstructions = allowGreeting
     ? `- Puedes abrir con un saludo breve (Hola / gusto saludarte) si encaja.`
@@ -587,7 +587,9 @@ Mensaje que te escribió:
 ${ruleHint}${contextBlock}${historyBlock}${agendaBlock}
 
 INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
-- Responde en español como Mónica (si el playbook lo indica): amable, breve, un poquito coqueta, fiera y persuasiva para agendar (sin vulgaridad ni exceso de emojis).
+- Responde en español como Mónica (si el playbook lo indica): amable, cercana y natural; no seas insistente ni apresures a agendar.
+- Si el lead hace una PREGUNTA (servicio, proceso, tiempos, dudas): responde ESA pregunta primero. No cambies de tema ni metas horarios si no los pidió.
+- Solo ofrece agendar o comparte horarios cuando el lead muestre interés en la sesión o pregunte por disponibilidad/horarios.
 - Zona horaria: México (CDMX).
 - No firmes con "Atte:" ni con nombre de sesión; ya te presentaste.
 - Emojis: solo 💙 y ☺️ si el playbook los usa; no uses otros.

@@ -29,6 +29,10 @@ const SCHEDULE_RE =
 const REJECT_RE =
   /\b(no\s+me\s+interesa|no\s+gracias|deja\s+de\s+escribir|bloquear|spam|no\s+molestar)\b/i;
 
+/** Interés explícito en agendar (no un "ok" genérico a otra pregunta). */
+const BOOKING_INTEREST_RE =
+  /\b(me interesa|si me interesa|sí me interesa|claro que si|claro que sí|quiero agendar|me gustaria agendar|me gustaría agendar|agendemos|cuando pueden|cuando podemos|cuándo pueden|cuándo podemos|quiero la sesion|quiero la sesión|me gustaria la sesion|me gustaría la sesión)\b/i;
+
 /**
  * @param {Date} [now]
  * @returns {string} YYYY-MM-DD en CDMX
@@ -73,15 +77,26 @@ function looksLikeScheduleIntent(text) {
 }
 
 /**
- * En el playbook de Mónica casi siempre se cierran con horarios.
- * Solo se omite en rechazos claros.
+ * El lead muestra interés concreto en agendar (no solo afirmación genérica).
+ * @param {string} text
+ */
+function looksLikeBookingInterest(text) {
+  return BOOKING_INTEREST_RE.test(foldAgendaText(text));
+}
+
+/**
+ * ¿Debemos inyectar horarios reales en el prompt?
+ * Solo cuando el lead pide agenda, confirma hora o dice explícitamente que le interesa agendar.
  * @param {string} text
  */
 function shouldOfferSlots(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
   if (REJECT_RE.test(raw)) return false;
-  return true;
+  if (looksLikeScheduleIntent(raw)) return true;
+  if (hasExplicitTimeChoice(raw)) return true;
+  if (looksLikeBookingInterest(raw)) return true;
+  return false;
 }
 
 /**
@@ -460,6 +475,7 @@ module.exports = {
   todayYmd,
   addDaysYmd,
   looksLikeScheduleIntent,
+  looksLikeBookingInterest,
   shouldOfferSlots,
   resolveDateRangeFromMessage,
   extractTimesFromMessage,

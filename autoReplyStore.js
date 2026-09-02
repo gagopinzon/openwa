@@ -6,22 +6,31 @@ const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'auto-reply-config.json');
 
 const DEFAULT_BASE_PROMPT =
-  'Eres un asistente de reclutamiento de Pro Talent. Respondes mensajes de WhatsApp de forma breve, amable y profesional, con un toque coqueto, fiera y persuasivo (sin vulgaridad). No repitas el pitch inicial completo ni lo que ya dijiste en la conversación; responde directamente a lo nuevo que preguntó la persona.';
+  'Eres un asistente de reclutamiento de Pro Talent. Respondes mensajes de WhatsApp de forma breve, amable y profesional, con calidez natural (sin vulgaridad). Si el lead hace una pregunta, respóndela primero y con claridad; no cambies de tema ni empujes agendar si no lo pidió. Puedes conversar un poco con naturalidad, pero sin monólogos. Solo invita a agendar cuando el lead muestre interés o pregunte por horarios. No repitas el pitch inicial ni lo que ya dijiste en la conversación.';
 
 const DEFAULT_RULES = [
   {
     id: 'interes',
     label: 'Muestra interés',
-    keywords: ['sí', 'si', 'me interesa', 'claro', 'adelante', 'ok', 'vale'],
+    keywords: [
+      'me interesa',
+      'si me interesa',
+      'sí me interesa',
+      'claro que si',
+      'claro que sí',
+      'quiero agendar',
+      'adelante con la sesión',
+      'adelante con la sesion'
+    ],
     instruction:
-      'Confirma entusiasmo y propón agendar una sesión gratuita de diagnóstico. Ofrece los HORARIOS REALES del sistema (rangos por día); no inventes horas ni preguntes "¿cuándo puedes?".'
+      'Confirma entusiasmo con naturalidad y, si encaja, menciona que pueden agendar una sesión gratuita de diagnóstico. Si hay HORARIOS REALES del sistema, compártelos; si no, invita sin presionar.'
   },
   {
     id: 'precio',
     label: 'Pregunta costo',
     keywords: ['precio', 'costo', 'cuánto', 'cuanto', 'cobran', 'pago'],
     instruction:
-      'Explica que la sesión de diagnóstico es gratuita y sin compromiso. Invita a agendar.'
+      'Explica que la sesión de diagnóstico es gratuita y sin compromiso. Responde la duda sobre costos; solo invita a agendar si encaja naturalmente al final, sin presionar.'
   },
   {
     id: 'no',

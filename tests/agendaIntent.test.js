@@ -2,6 +2,8 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   looksLikeScheduleIntent,
+  looksLikeBookingInterest,
+  shouldOfferSlots,
   resolveDateRangeFromMessage,
   matchSlotFromMessage,
   hasExplicitTimeChoice,
@@ -21,6 +23,17 @@ describe('agendaIntent', () => {
   it('detecta intención de agenda', () => {
     assert.equal(looksLikeScheduleIntent('¿tienen horario mañana?'), true);
     assert.equal(looksLikeScheduleIntent('ok gracias'), false);
+  });
+
+  it('shouldOfferSlots solo con intención real de agendar', () => {
+    assert.equal(shouldOfferSlots('¿qué incluye la consultoría?'), false);
+    assert.equal(shouldOfferSlots('¿cuánto cuesta el servicio completo?'), false);
+    assert.equal(shouldOfferSlots('ok gracias'), false);
+    assert.equal(shouldOfferSlots('me interesa'), true);
+    assert.equal(shouldOfferSlots('¿tienen horario mañana?'), true);
+    assert.equal(shouldOfferSlots('no gracias'), false);
+    assert.equal(looksLikeBookingInterest('si me interesa'), true);
+    assert.equal(looksLikeBookingInterest('si'), false);
   });
 
   it('resuelve mañana y jueves', () => {
