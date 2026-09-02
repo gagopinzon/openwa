@@ -1,6 +1,21 @@
 const agendaPendingStore = require('./agendaPendingStore');
 const panelMsgClient = require('./panelMsgClient');
 const cvFileStore = require('./cvFileStore');
+const {
+  extractMeetUrlFromPanel,
+  isRetryablePanelError,
+  sleep
+} = require('./panelMeetUtils');
+
+function syncRetryAttempts() {
+  const raw = Number(process.env.AGENDA_PANEL_SYNC_RETRIES || 2);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
+}
+
+function syncRetryDelayMs() {
+  const raw = Number(process.env.AGENDA_PANEL_SYNC_RETRY_MS || 20000);
+  return Number.isFinite(raw) && raw > 0 ? raw : 20000;
+}
 
 function autoConfirmEnabled() {
   const raw = String(process.env.AUTO_AGENDA_CONFIRM || 'true').trim().toLowerCase();
@@ -45,6 +60,33 @@ function resolveCvEntry(cvId) {
 }
 
 /**
+ * @param {object} payload
+ */
+async function crearReunionWithRetries(payload) {
+  const maxAttempts = syncRetryAttempts() + 1;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await panelMsgClient.crearReunion(payload);
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts && isRetryablePanelError(error)) {
+        const delay = syncRetryDelayMs() * attempt;
+        console.warn(
+          `[agenda-confirm] reintento ${attempt + 1}/${maxAttempts} en ${delay}ms: ${error.message}`
+        );
+        await sleep(delay);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error('No se pudo crear la reunión en el panel');
+}
+
+/**
  * Crea la reunión en el panel (misma API que Agendar reunión en la UI).
  * Prueba cada vendedor disponible en el slot hasta que el panel acepte.
  * @param {object} pending
@@ -53,6 +95,20 @@ async function confirmPendingInPanel(pending, opts = {}) {
   if (!pending || !pending.id) {
     const err = new Error('Cita pendiente inválida');
     err.status = 400;
+    throw err;
+  }
+  if (pending.status === agendaPendingStore.STATUS.CONFIRMED) {
+    const existingUrl = String(pending.urlReunion || '').trim();
+    if (existingUrl) {
+      return {
+        confirmed: pending,
+        panel: null,
+        urlReunionLead: existingUrl,
+        vendedorId: pending.vendedorId || null
+      };
+    }
+    const err = new Error('La reunión ya fue confirmada pero sin liga de Meet');
+    err.status = 409;
     throw err;
   }
   if (!panelMsgClient.isConfigured()) {
@@ -103,7 +159,7 @@ async function confirmPendingInPanel(pending, opts = {}) {
       continue;
     }
     try {
-      panelData = await panelMsgClient.crearReunion({
+      panelData = await crearReunionWithRetries({
         gerenteEmail,
         vendedorId: vendor.vendedorId,
         fecha: pending.fecha,
@@ -136,15 +192,7 @@ async function confirmPendingInPanel(pending, opts = {}) {
   const panelReunionId =
     (panelData && (panelData.id || panelData.reunionId || panelData.reunion?.id)) ||
     null;
-  const urlReunionLead =
-    (panelData &&
-      (panelData.urlReunion ||
-        panelData.reunion?.urlReunion ||
-        panelData.meetUrl ||
-        panelData.reunion?.meetUrl ||
-        panelData.link ||
-        panelData.reunion?.link)) ||
-    null;
+  const urlReunionLead = extractMeetUrlFromPanel(panelData);
 
   const confirmed = agendaPendingStore.confirmPending(pending.id, {
     vendedorId: usedVendor.vendedorId,

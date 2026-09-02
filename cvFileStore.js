@@ -183,6 +183,31 @@ function getCvFileMeta(cvId) {
   };
 }
 
+/**
+ * @param {string} cvId
+ * @returns {Buffer|null}
+ */
+function readCvFileBuffer(cvId) {
+  const meta = getCvFileMeta(cvId);
+  if (!meta) return null;
+  try {
+    return fs.readFileSync(meta.filePath);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} cvId
+ */
+function getCvDisplayFilename(cvId) {
+  const meta = getCvFileMeta(cvId);
+  const entry = (loadCvsManifest() || []).find((c) => c && c.cvId === cvId);
+  const original = String(entry?.archivoOriginal || '').trim();
+  if (original) return original;
+  return meta?.fileName || 'CV.pdf';
+}
+
 function signToken(cvId, expiresAt) {
   const payload = `${cvId}:${expiresAt}`;
   const sig = crypto.createHmac('sha256', signingSecret()).update(payload).digest('hex');
@@ -402,6 +427,8 @@ module.exports = {
   mergeIncomingBatch,
   saveCvFile,
   getCvFileMeta,
+  readCvFileBuffer,
+  getCvDisplayFilename,
   deleteCvFile,
   buildSignedToken,
   verifySignedToken,

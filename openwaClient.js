@@ -271,6 +271,39 @@ async function sendTextMessage(openwaSessionId, chatId, text) {
 }
 
 /**
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {{ buffer: Buffer, filename?: string, mimetype?: string, caption?: string }} input
+ */
+async function sendDocumentMessage(openwaSessionId, chatId, input = {}) {
+  const id = String(chatId || '').trim();
+  const buffer = input.buffer;
+  if (!id) throw new Error('chatId es obligatorio');
+  if (!buffer || !Buffer.isBuffer(buffer) || !buffer.length) {
+    throw new Error('buffer del documento es obligatorio');
+  }
+
+  const payload = {
+    chatId: id,
+    base64: buffer.toString('base64'),
+    mimetype: String(input.mimetype || 'application/pdf').trim(),
+    filename: String(input.filename || 'documento.pdf').trim().slice(0, 255)
+  };
+  const caption = String(input.caption || '').trim();
+  if (caption) payload.caption = caption.slice(0, 1024);
+
+  const data = await openwaRequest(
+    'POST',
+    `/sessions/${openwaSessionId}/messages/send-document`,
+    payload
+  );
+  return {
+    messageId: data.id || data.messageId,
+    raw: data
+  };
+}
+
+/**
  * Indicador de presencia en un chat (escribiendo / grabando / pausado).
  * WhatsApp suele apagar "typing" ~25s; hay que reenviarlo si se simula más tiempo.
  * @param {string} openwaSessionId
@@ -816,6 +849,7 @@ module.exports = {
   getSessionStatus,
   isDisconnectError,
   sendTextMessage,
+  sendDocumentMessage,
   sendChatState,
   markChatRead,
   editMessage,

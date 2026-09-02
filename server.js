@@ -2084,8 +2084,7 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
       (panelData && (panelData.id || panelData.reunionId || panelData.reunion?.id)) || null;
 
     // El panel genera las ligas; usamos las que devuelve
-    const urlReunionLead =
-      (panelData && (panelData.urlReunion || panelData.reunion?.urlReunion)) || null;
+    const urlReunionLead = require('./panelMeetUtils').extractMeetUrlFromPanel(panelData);
     const urlReunionModerador =
       (panelData && (panelData.urlReunionModerador || panelData.reunion?.urlReunionModerador)) ||
       null;

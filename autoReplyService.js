@@ -10,12 +10,15 @@ const agendaIntent = require('./agendaIntent');
 const agendaOfferStore = require('./agendaOfferStore');
 const agendaPendingStore = require('./agendaPendingStore');
 const agendaAwaitingCvStore = require('./agendaAwaitingCvStore');
+const agendaCvConfirm = require('./agendaCvConfirm');
 const agendaConfirmService = require('./agendaConfirmService');
+const agendaMeetDeliveryService = require('./agendaMeetDeliveryService');
 const cvIngestService = require('./cvIngestService');
 const cvFileStore = require('./cvFileStore');
 const { resolveMessageMedia, resolveIncomingDocumentMedia } = require('./conversationMediaService');
 const {
   sendTextMessage,
+  sendDocumentMessage,
   sendChatState,
   createWebhook,
   deleteWebhook,
@@ -484,6 +487,46 @@ function resolveUsableCvId({ leadCv, contactSession }) {
   return null;
 }
 
+async function sendCvPreviewDocument({
+  cvId,
+  openwaSessionId,
+  chatId,
+  contactName,
+  slot,
+  testMode
+}) {
+  const buffer = cvFileStore.readCvFileBuffer(cvId);
+  const meta = cvFileStore.getCvFileMeta(cvId);
+  if (!buffer || !meta) {
+    return { sent: false, reason: 'missing_file' };
+  }
+
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot?.label || (slot ? `${slot.fecha} a las ${slot.horaInicio}` : '');
+  const caption =
+    `Hola ${name}, este es el CV que tenemos registrado` +
+    (when ? ` para tu sesión del ${when}` : '') +
+    `. ¿Es el correcto?`;
+
+  if (testMode) {
+    console.log(`[auto-reply] test skip CV preview cvId=${cvId}`);
+    return { sent: true, testMode: true };
+  }
+
+  try {
+    const result = await sendDocumentMessage(openwaSessionId, chatId, {
+      buffer,
+      filename: cvFileStore.getCvDisplayFilename(cvId),
+      mimetype: meta.mime,
+      caption
+    });
+    return { sent: true, messageId: result.messageId || null };
+  } catch (error) {
+    console.warn('[auto-reply] CV preview send:', error.message);
+    return { sent: false, reason: error.message };
+  }
+}
+
 async function processChosenSlot({
   chosen,
   cvId,
@@ -498,9 +541,11 @@ async function processChosenSlot({
   userWillSendCv = false
 }) {
   const displayName = contactName || 'contacto';
-  if (!cvId) {
+  const effectiveCvId = userWillSendCv ? null : cvId;
+  if (!effectiveCvId) {
     agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
       chosen,
+      stage: 'need_upload',
       contactName: displayName,
       chatId: identity.chatId || chatId,
       logicalSessionId,
@@ -526,35 +571,37 @@ async function processChosenSlot({
     };
   }
 
-  try {
-    const booked = await finalizeAgendaBooking({
-      normalizedPhone,
-      chosen,
+  agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+    chosen,
+    cvId: effectiveCvId,
+    stage: 'confirm_cv',
+    contactName: displayName,
+    chatId: identity.chatId || chatId,
+    logicalSessionId,
+    openwaSessionId
+  });
+
+  const preview = await sendCvPreviewDocument({
+    cvId: effectiveCvId,
+    openwaSessionId,
+    chatId: identity.chatId || chatId,
+    contactName: displayName,
+    slot: chosen,
+    testMode
+  });
+
+  return {
+    replyText: preview.sent
+      ? buildAskCvConfirmReply(displayName, chosen)
+      : buildAskCvConfirmFallbackReply(displayName, chosen),
+    agendaMeta: {
+      reason: preview.sent ? 'awaiting_cv_confirm' : 'awaiting_cv_confirm_send_failed',
+      slot: chosen.label || chosen.horaInicio,
       cvId,
-      contactName: displayName,
-      identity,
-      chatId,
-      logicalSessionId,
-      openwaSessionId,
-      broadcastEvent,
-      testMode
-    });
-    return {
-      replyText: booked.replyText,
-      agendaMeta: booked.agendaMeta,
-      agendaPendingId: booked.agendaPendingId
-    };
-  } catch (error) {
-    if (error.code === 'slot_held' || error.status === 409) {
-      agendaOfferStore.clearOffer(normalizedPhone);
-      return {
-        replyText: null,
-        agendaMeta: { reason: 'slot_taken_reoffer', error: error.message },
-        agendaPendingId: null
-      };
-    }
-    throw error;
-  }
+      cvPreviewSent: preview.sent
+    },
+    agendaPendingId: null
+  };
 }
 
 async function finalizeAgendaBooking({
@@ -641,6 +688,11 @@ async function finalizeAgendaBooking({
           pendingId: pending.id,
           error: error.message
         };
+        agendaMeetDeliveryService.scheduleMeetLinkDelivery(pending, {
+          openwaSessionId,
+          chatId: identity.chatId || chatId,
+          logicalSessionId
+        });
       } else {
         try {
           agendaPendingStore.cancelPending(pending.id);
@@ -969,10 +1021,46 @@ async function handleIncomingWebhook({
       }
     }
 
+    // Confirmación de CV existente (sí / no / otro PDF)
+    const awaitingCv = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
+    if (!replyText && awaitingCv && agendaCvConfirm.isAwaitingCvConfirm(awaitingCv.stage) && body && !incomingDocument) {
+      const displayName = contactSession?.name || contactName;
+      if (agendaCvConfirm.looksLikeCvConfirmYes(body)) {
+        const booked = await finalizeAgendaBooking({
+          normalizedPhone,
+          chosen: awaitingCv.chosen,
+          cvId: awaitingCv.cvId,
+          contactName: displayName,
+          identity,
+          chatId,
+          logicalSessionId,
+          openwaSessionId,
+          broadcastEvent,
+          testMode
+        });
+        replyText = booked.replyText;
+        agendaMeta = booked.agendaMeta;
+        agendaPendingId = booked.agendaPendingId;
+      } else if (agendaCvConfirm.looksLikeCvConfirmNo(body)) {
+        agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+          chosen: awaitingCv.chosen,
+          stage: 'need_upload',
+          contactName: displayName,
+          chatId: identity.chatId || chatId,
+          logicalSessionId,
+          openwaSessionId
+        });
+        replyText = buildAskReplaceCvReply(displayName, awaitingCv.chosen);
+        agendaMeta = { reason: 'awaiting_cv_replace' };
+      } else {
+        replyText = buildCvConfirmReminderReply(displayName);
+        agendaMeta = { reason: 'awaiting_cv_confirm_reminder' };
+      }
+    }
+
     // Fase 2: el lead elige un horario previamente ofrecido
     const priorOffer = agendaOfferStore.getOffer(normalizedPhone);
-    const awaitingCv = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
-    if (!replyText && awaitingCv && body && !incomingDocument) {
+    if (!replyText && awaitingCv && body && !incomingDocument && !agendaCvConfirm.isAwaitingCvConfirm(awaitingCv.stage)) {
       replyText = buildAskCvReply(
         contactSession?.name || contactName,
         awaitingCv.chosen
@@ -1212,6 +1300,40 @@ function buildAskCvReply(contactName, slot, opts = {}) {
   );
 }
 
+function buildAskCvConfirmReply(contactName, slot) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
+  return (
+    `Perfecto, ${name}. Te acabo de enviar el CV que tenemos para ${when}. ` +
+    `¿Es el correcto? Responde *sí* para confirmar o envíame otro PDF si no lo es. ☺️`
+  );
+}
+
+function buildAskCvConfirmFallbackReply(contactName, slot) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
+  return (
+    `Perfecto, ${name}. Para ${when}, ¿el CV que ya tenemos es el correcto? ` +
+    `Responde *sí* para confirmar o envíame tu CV en PDF si quieres usar otro. ☺️`
+  );
+}
+
+function buildAskReplaceCvReply(contactName, slot) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
+  return (
+    `Entendido, ${name}. Envíame tu CV correcto en PDF por aquí para confirmar ${when}. ☺️`
+  );
+}
+
+function buildCvConfirmReminderReply(contactName) {
+  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  return (
+    `Gracias, ${name}. ¿El CV que te envié es el correcto? ` +
+    `Responde *sí* para confirmar o manda otro PDF si no lo es. ☺️`
+  );
+}
+
 function buildCvDownloadFailedReply(contactName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   return (
@@ -1232,7 +1354,7 @@ function buildCvReceivedPendingReply(contactName, slot) {
   const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
   return (
     `Listo, ${name}. Recibí tu CV y quedó anotada tu sesión para ${when}. ` +
-    `En breve te enviamos la liga de Meet. ☺️`
+    `En unos momentos te envío la liga de Meet por aquí. ☺️`
   );
 }
 

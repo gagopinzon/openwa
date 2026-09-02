@@ -535,6 +535,7 @@ async function generateReplyMessage({
     ? `
 - PRIORIDAD MÁXIMA: los HORARIOS REALES de arriba sustituyen cualquier XXXX / ejemplo del playbook.
 - Si el lead YA dijo día y hora concretos en su mensaje (ej. "miércoles a las 18:00"), NO vuelvas a preguntar si le queda bien esa hora; confirma el paso siguiente (CV o liga).
+- Si el sistema ya envió un PDF de CV para confirmar, no vuelvas a pedir el horario; espera que diga sí o envíe otro PDF.
 - Ofrece disponibilidad como RANGOS por día solo cuando el lead NO haya dicho una hora específica.
 - La sesión es de 15 minutos. No listes todos los bloques de 30 minutos.
 - NUNCA inventes horas ni digas nombres de vendedores.
