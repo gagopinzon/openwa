@@ -3229,11 +3229,11 @@ class CVAnalyzer {
             const minMs =
                 config.minDelayMs != null && Number.isFinite(Number(config.minDelayMs))
                     ? Number(config.minDelayMs)
-                    : 3000;
+                    : 400;
             const maxMs =
                 config.maxDelayMs != null && Number.isFinite(Number(config.maxDelayMs))
                     ? Number(config.maxDelayMs)
-                    : 35000;
+                    : 3000;
             if (this.autoReplyMinDelaySec) {
                 this.autoReplyMinDelaySec.value = String(Math.round(minMs / 1000));
             }

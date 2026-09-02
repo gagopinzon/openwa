@@ -369,17 +369,18 @@
                             </button>
                             <div class="accordion-body accordion-body-collapsed" id="accordionTypingDelay">
                                 <p style="font-size: 12px; color: #64748b; margin: 0 0 10px;">
-                                    La duración sigue siendo proporcional a la longitud del mensaje.
-                                    Aquí solo ajustas el mínimo y máximo (segundos).
+                                    La duración sigue siendo proporcional a la longitud del mensaje,
+                                    con un tope de 3 segundos por defecto. AUTO_REPLY_SKIP_DELAYS=true
+                                    en el .env omite estas esperas (útil en pruebas).
                                 </p>
                                 <div class="send-delay-settings-row">
                                     <label class="send-delay-field">
                                         <span>Mín (seg)</span>
-                                        <input type="number" id="autoReplyMinDelaySec" min="0" max="300" step="1" value="3">
+                                        <input type="number" id="autoReplyMinDelaySec" min="0" max="300" step="1" value="0">
                                     </label>
                                     <label class="send-delay-field">
                                         <span>Máx (seg)</span>
-                                        <input type="number" id="autoReplyMaxDelaySec" min="1" max="300" step="1" value="35">
+                                        <input type="number" id="autoReplyMaxDelaySec" min="1" max="300" step="1" value="3">
                                     </label>
                                 </div>
                             </div>

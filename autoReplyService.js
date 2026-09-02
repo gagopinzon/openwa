@@ -13,6 +13,7 @@ const agendaAwaitingCvStore = require('./agendaAwaitingCvStore');
 const agendaCvConfirm = require('./agendaCvConfirm');
 const agendaConfirmService = require('./agendaConfirmService');
 const agendaMeetDeliveryService = require('./agendaMeetDeliveryService');
+const agendaLeadFields = require('./agendaLeadFields');
 const cvIngestService = require('./cvIngestService');
 const cvFileStore = require('./cvFileStore');
 const { resolveMessageMedia, resolveIncomingDocumentMedia } = require('./conversationMediaService');
@@ -97,45 +98,62 @@ function shouldAllowGreeting(lastAiGreetingAt, now = new Date()) {
   return now.getTime() - last >= getGreetingCooldownMs();
 }
 
+function envFlag(name) {
+  const v = String(process.env[name] || '').trim().toLowerCase();
+  return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+}
+
+/**
+ * Pruebas: sin esperas de visto/escribiendo (sigue enviando WhatsApp real).
+ * Env: AUTO_REPLY_SKIP_DELAYS=true
+ */
+function skipAutoReplyDelays() {
+  return envFlag('AUTO_REPLY_SKIP_DELAYS');
+}
+
 function getMinDelayMs() {
+  if (skipAutoReplyDelays()) return 0;
   const cfg = autoReplyStore.getConfig();
   if (cfg.minDelayMs != null && Number.isFinite(cfg.minDelayMs) && cfg.minDelayMs >= 0) {
     return cfg.minDelayMs;
   }
-  const v = parseInt(process.env.AUTO_REPLY_MIN_DELAY_MS || '3000', 10);
-  return Number.isFinite(v) && v >= 0 ? v : 3000;
+  const v = parseInt(process.env.AUTO_REPLY_MIN_DELAY_MS || '400', 10);
+  return Number.isFinite(v) && v >= 0 ? v : 400;
 }
 
 function getMaxDelayMs() {
+  if (skipAutoReplyDelays()) return 0;
   const min = getMinDelayMs();
   const cfg = autoReplyStore.getConfig();
   if (cfg.maxDelayMs != null && Number.isFinite(cfg.maxDelayMs) && cfg.maxDelayMs >= min) {
     return cfg.maxDelayMs;
   }
-  const v = parseInt(process.env.AUTO_REPLY_MAX_DELAY_MS || '35000', 10);
-  return Number.isFinite(v) && v >= min ? v : Math.max(min, 35000);
+  const v = parseInt(process.env.AUTO_REPLY_MAX_DELAY_MS || '3000', 10);
+  return Number.isFinite(v) && v >= min ? v : Math.max(min, 3000);
 }
 
 function getTypingMsPerChar() {
-  const v = parseFloat(process.env.AUTO_REPLY_TYPING_MS_PER_CHAR || '200');
-  return Number.isFinite(v) && v > 0 ? v : 200;
+  const v = parseFloat(process.env.AUTO_REPLY_TYPING_MS_PER_CHAR || '15');
+  return Number.isFinite(v) && v > 0 ? v : 15;
 }
 
 function getTypingBaseMs() {
-  const v = parseInt(process.env.AUTO_REPLY_TYPING_BASE_MS || '2500', 10);
-  return Number.isFinite(v) && v >= 0 ? v : 2500;
+  const v = parseInt(process.env.AUTO_REPLY_TYPING_BASE_MS || '400', 10);
+  return Number.isFinite(v) && v >= 0 ? v : 400;
 }
 
-/** Ms antes de marcar el chat como leído (visto). Default 4s. */
+/** Ms antes de marcar el chat como leído (visto). Default 0.6s. */
 function getSeenDelayMs() {
+  if (skipAutoReplyDelays()) return 0;
   const v = parseInt(process.env.AUTO_REPLY_SEEN_DELAY_MS, 10);
-  return Number.isFinite(v) && v >= 0 ? v : 4000;
+  return Number.isFinite(v) && v >= 0 ? v : 600;
 }
 
-/** Ms adicionales tras el "visto" antes de mostrar "escribiendo…". Default 3.5s. */
+/** Ms adicionales tras el "visto" antes de mostrar "escribiendo…". Default 0.3s. */
 function getTypingAfterSeenDelayMs() {
+  if (skipAutoReplyDelays()) return 0;
   const v = parseInt(process.env.AUTO_REPLY_TYPING_AFTER_SEEN_MS, 10);
-  return Number.isFinite(v) && v >= 0 ? v : 3500;
+  return Number.isFinite(v) && v >= 0 ? v : 300;
 }
 
 function jitterMs(base, spread = 0.25) {
@@ -151,12 +169,13 @@ function sleep(ms) {
 
 /**
  * Tiempo de "escribiendo…" según longitud del mensaje.
- * ~200ms/char → un párrafo de ~150 caracteres ≈ 30s (+ base).
- * Respeta min/max desde auto-reply-config.json o AUTO_REPLY_MIN/MAX_DELAY_MS.
+ * Default: BASE 400ms + ~15ms/char, acotado a 3s (AUTO_REPLY_MAX_DELAY_MS).
+ * AUTO_REPLY_SKIP_DELAYS=true → 0.
  * @param {string} text
  * @returns {number}
  */
 function typingDurationMsForText(text) {
+  if (skipAutoReplyDelays()) return 0;
   const body = String(text || '');
   const chars = body.length;
   const raw = getTypingBaseMs() + chars * getTypingMsPerChar();
@@ -183,7 +202,8 @@ function splitReplyIntoMessages(text, maxParts = 5) {
 }
 
 function interMessageGapMs() {
-  return 700 + Math.floor(Math.random() * 1100); // 0.7–1.8s entre burbujas
+  if (skipAutoReplyDelays()) return 0;
+  return 400 + Math.floor(Math.random() * 500); // 0.4–0.9s entre burbujas
 }
 
 /**
@@ -221,8 +241,9 @@ function createTypingRefresher(openwaSessionId, chatId) {
 }
 
 /**
- * Simula lectura humana: espera → visto → espera → escribiendo…
- * Corre en paralelo al procesamiento de la IA.
+ * Simula lectura humana: espera → visto → espera.
+ * El indicador "escribiendo…" no se enciende aquí: se muestra solo al enviar
+ * (máx. ~3s), para no dejarlo activo todo el tiempo que tarda la IA.
  * @param {string} openwaSessionId
  * @param {string} chatId
  * @param {{ receivedAt?: number, isCancelled?: () => boolean }} [opts]
@@ -230,6 +251,15 @@ function createTypingRefresher(openwaSessionId, chatId) {
 async function runPresenceLeadIn(openwaSessionId, chatId, opts = {}) {
   const receivedAt = opts.receivedAt || Date.now();
   const isCancelled = () => Boolean(opts.isCancelled && opts.isCancelled());
+
+  if (skipAutoReplyDelays()) {
+    try {
+      await markChatRead(openwaSessionId, chatId);
+    } catch (err) {
+      console.warn('[auto-reply] mark read:', err.message);
+    }
+    return { typingStartedAt: Date.now(), refresher: null, receivedAt };
+  }
 
   const seenDelay = jitterMs(getSeenDelayMs());
   if (seenDelay > 0) await sleep(seenDelay);
@@ -249,13 +279,7 @@ async function runPresenceLeadIn(openwaSessionId, chatId, opts = {}) {
   if (afterSeen > 0) await sleep(afterSeen);
   if (isCancelled()) return { typingStartedAt: Date.now(), refresher: null, cancelled: true };
 
-  const typingStartedAt = Date.now();
-  const refresher = createTypingRefresher(openwaSessionId, chatId);
-  console.log(
-    `[auto-reply] escribiendo ~${Math.round((typingStartedAt - receivedAt) / 1000)}s tras mensaje → ${chatId}`
-  );
-
-  return { typingStartedAt, refresher, receivedAt };
+  return { typingStartedAt: Date.now(), refresher: null, receivedAt };
 }
 
 /**
@@ -268,7 +292,7 @@ async function runPresenceLeadIn(openwaSessionId, chatId, opts = {}) {
  */
 async function simulateHumanTyping(openwaSessionId, chatId, durationMs, opts = {}) {
   const total = Math.max(0, Number(durationMs) || 0);
-  if (total <= 0 || opts.testMode) return;
+  if (total <= 0 || opts.testMode || skipAutoReplyDelays()) return;
 
   const sendTyping = async (state) => {
     try {
@@ -728,6 +752,33 @@ async function processChosenSlot({
   };
 }
 
+async function gateLeadFieldsBeforeBooking(params) {
+  if (params.skipLeadFieldGate) return null;
+
+  const missing = await agendaLeadFields.getMissingLeadFieldsForCv(params.cvId, {
+    nombre: params.contactName,
+    telefono: params.normalizedPhone
+  });
+  if (!missing.length) return null;
+
+  agendaAwaitingCvStore.rememberAwaiting(params.normalizedPhone, {
+    chosen: params.chosen,
+    cvId: params.cvId,
+    stage: 'need_lead_data',
+    missingFields: missing,
+    contactName: params.contactName,
+    chatId: params.identity?.chatId || params.chatId,
+    logicalSessionId: params.logicalSessionId,
+    openwaSessionId: params.openwaSessionId
+  });
+
+  return {
+    replyText: agendaLeadFields.buildAskMissingLeadFieldsReply(params.contactName, missing),
+    agendaMeta: { reason: 'awaiting_lead_data', missingFields: missing, cvId: params.cvId },
+    agendaPendingId: null
+  };
+}
+
 async function finalizeAgendaBooking({
   normalizedPhone,
   chosen,
@@ -738,8 +789,22 @@ async function finalizeAgendaBooking({
   logicalSessionId,
   openwaSessionId,
   broadcastEvent,
-  testMode
+  testMode,
+  skipLeadFieldGate = false
 }) {
+  const gated = await gateLeadFieldsBeforeBooking({
+    normalizedPhone,
+    chosen,
+    cvId,
+    contactName,
+    identity,
+    chatId,
+    logicalSessionId,
+    openwaSessionId,
+    skipLeadFieldGate
+  });
+  if (gated) return gated;
+
   const pending = agendaPendingStore.createPending({
     telefono: normalizedPhone,
     chatId: identity.chatId || chatId,
@@ -1116,7 +1181,6 @@ async function handleIncomingWebhook({
     const cvId = resolveUsableCvId({ leadCv, contactSession });
 
     const receivedAt = Date.now();
-    let typingStartedAt = receivedAt;
     presenceRefresher = null;
     presenceCancelled = false;
     const presencePromise = !testMode
@@ -1152,8 +1216,65 @@ async function handleIncomingWebhook({
       }
     }
 
-    // Confirmación de CV existente (sí / no / otro PDF)
+    // Datos faltantes del CV (ciudad, estado, etc.)
     const awaitingCv = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
+    if (
+      !replyText &&
+      awaitingCv &&
+      agendaLeadFields.isAwaitingLeadData(awaitingCv.stage) &&
+      body &&
+      !incomingDocument
+    ) {
+      const parsed = await agendaLeadFields.parseLeadFieldsReplyAsync(
+        body,
+        awaitingCv.missingFields || []
+      );
+      if (awaitingCv.cvId && Object.keys(parsed).length) {
+        agendaLeadFields.applyLeadFieldsToCv(awaitingCv.cvId, parsed);
+      }
+      const stillMissing = await agendaLeadFields.getMissingLeadFieldsForCv(
+        awaitingCv.cvId,
+        {
+          nombre: awaitingCv.contactName || contactName,
+          telefono: normalizedPhone
+        }
+      );
+      if (stillMissing.length) {
+        agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+          ...awaitingCv,
+          stage: 'need_lead_data',
+          missingFields: stillMissing
+        });
+        replyText = agendaLeadFields.buildAskMissingLeadFieldsReply(
+          awaitingCv.contactName || contactName,
+          stillMissing
+        );
+        agendaMeta = {
+          reason: 'awaiting_lead_data_reminder',
+          missingFields: stillMissing,
+          cvId: awaitingCv.cvId
+        };
+      } else {
+        const booked = await finalizeAgendaBooking({
+          normalizedPhone,
+          chosen: awaitingCv.chosen,
+          cvId: awaitingCv.cvId,
+          contactName: awaitingCv.contactName || contactName,
+          identity,
+          chatId,
+          logicalSessionId,
+          openwaSessionId,
+          broadcastEvent,
+          testMode,
+          skipLeadFieldGate: true
+        });
+        replyText = booked.replyText;
+        agendaMeta = booked.agendaMeta;
+        agendaPendingId = booked.agendaPendingId;
+      }
+    }
+
+    // Confirmación de CV existente (sí / no / otro PDF)
     if (!replyText && awaitingCv && agendaCvConfirm.isAwaitingCvConfirm(awaitingCv.stage) && body && !incomingDocument) {
       const displayName = contactSession?.name || contactName;
       if (agendaCvConfirm.looksLikeCvConfirmYes(body)) {
@@ -1191,10 +1312,18 @@ async function handleIncomingWebhook({
 
     // Fase 2: el lead elige un horario previamente ofrecido
     const priorOffer = agendaOfferStore.getOffer(normalizedPhone);
-    if (!replyText && awaitingCv && body && !incomingDocument && !agendaCvConfirm.isAwaitingCvConfirm(awaitingCv.stage)) {
+    const awaitingCvAfterLeadData = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
+    if (
+      !replyText &&
+      awaitingCvAfterLeadData &&
+      body &&
+      !incomingDocument &&
+      !agendaCvConfirm.isAwaitingCvConfirm(awaitingCvAfterLeadData.stage) &&
+      !agendaLeadFields.isAwaitingLeadData(awaitingCvAfterLeadData.stage)
+    ) {
       replyText = buildAskCvReply(
         contactSession?.name || contactName,
-        awaitingCv.chosen
+        awaitingCvAfterLeadData.chosen
       );
       agendaMeta = { reason: 'awaiting_cv_reminder' };
     }
@@ -1348,10 +1477,7 @@ async function handleIncomingWebhook({
     }
 
     if (presencePromise) {
-      const presence = await presencePromise;
-      if (presence && presence.typingStartedAt) {
-        typingStartedAt = presence.typingStartedAt;
-      }
+      await presencePromise;
       if (presenceRefresher) {
         presenceRefresher.stop();
         presenceRefresher = null;
@@ -1372,9 +1498,7 @@ async function handleIncomingWebhook({
       totalTypingMs += targetTypingMs;
 
       let waitMs = targetTypingMs;
-      if (i === 0) {
-        waitMs = Math.max(0, targetTypingMs - (Date.now() - typingStartedAt));
-      } else if (!testMode) {
+      if (i > 0 && !testMode) {
         await sleep(interMessageGapMs());
       }
 
@@ -1942,5 +2066,6 @@ module.exports = {
   buildConfirmedMeetingReply,
   typingDurationMsForText,
   splitReplyIntoMessages,
-  simulateHumanTyping
+  simulateHumanTyping,
+  skipAutoReplyDelays
 };
