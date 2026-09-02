@@ -92,7 +92,9 @@ async function getDisponibilidad(opts = {}) {
  *   fecha: string,
  *   horaInicio: string,
  *   horaFin: string,
- *   cvUrl: string,
+ *   cvUrl?: string,
+ *   cvBase64?: string,
+ *   cvFileName?: string,
  *   titulo?: string,
  *   descripcion?: string,
  *   leadCorreo?: string,
@@ -110,13 +112,28 @@ async function crearReunion(body = {}) {
   const gerenteEmail = body.gerenteEmail || defaultGerenteEmail();
   const headers = buildHeaders(gerenteEmail);
 
+  const cvBase64 = String(body.cvBase64 || '').trim();
+  const cvUrl = String(body.cvUrl || '').trim();
+  if (!cvBase64 && !cvUrl) {
+    const err = new Error('Falta cvBase64 o cvUrl para enviar el CV al panel');
+    err.status = 400;
+    throw err;
+  }
+
   const payload = {
     vendedorId: body.vendedorId,
     fecha: body.fecha,
     horaInicio: body.horaInicio,
-    horaFin: body.horaFin,
-    cvUrl: body.cvUrl
+    horaFin: body.horaFin
   };
+
+  if (cvBase64) {
+    payload.cvBase64 = cvBase64;
+    const cvFileName = String(body.cvFileName || '').trim();
+    if (cvFileName) payload.cvFileName = cvFileName;
+  } else {
+    payload.cvUrl = cvUrl;
+  }
 
   if (body.titulo) payload.titulo = body.titulo;
   if (body.descripcion) payload.descripcion = body.descripcion;
@@ -144,7 +161,10 @@ async function crearReunion(body = {}) {
     fecha: payload.fecha,
     horaInicio: payload.horaInicio,
     horaFin: payload.horaFin,
-    cvUrl: redactCvUrl(payload.cvUrl),
+    cvDelivery: payload.cvBase64 ? 'base64' : 'url',
+    cvBase64Bytes: payload.cvBase64 ? payload.cvBase64.length : null,
+    cvFileName: payload.cvFileName || null,
+    cvUrl: payload.cvUrl ? redactCvUrl(payload.cvUrl) : null,
     leadCorreo: payload.leadCorreo || null,
     leadNombre: payload.leadNombre || null,
     cvAnalizadoEnMsg: payload.cvAnalizadoEnMsg === true,

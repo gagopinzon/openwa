@@ -191,6 +191,43 @@ function panelUnreachableCvUrlError(url) {
   );
 }
 
+function hostFromUrl(url) {
+  try {
+    return new URL(String(url || '')).hostname || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Probe a CV_PUBLIC_URL falló: el PDF no está en ese host o el token no es de ese msg.
+ * @param {string} cvUrl
+ * @param {{ status?: number, reason?: string }} [probe]
+ */
+function describeCvProbeFailure(cvUrl, probe = {}) {
+  const host = hostFromUrl(cvUrl) || '(CV_PUBLIC_URL)';
+  const status = Number(probe && probe.status);
+  if (status === 401 || status === 403) {
+    return (
+      `${host} rechazó el token del CV (${status}). ` +
+      `El PDF y el token se firmaron en ESTA máquina; ${host} es otro msg. ` +
+      `CV_PUBLIC_URL debe ser una URL pública de esta PC (túnel Cloudflare/ngrok al puerto 3445), ` +
+      `no el dominio de producción salvo que este proceso sea ese servidor.`
+    );
+  }
+  if (status === 404) {
+    return (
+      `${host} no tiene ese archivo (404). El PDF está en otra máquina. ` +
+      `CV_PUBLIC_URL debe apuntar al msg que guardó el CV.`
+    );
+  }
+  const extra = probe.reason || (status ? `HTTP ${status}` : 'sin respuesta');
+  return (
+    `El panel no pudo descargar el CV desde ${host} (${extra}). ` +
+    `CV_PUBLIC_URL tiene que ser alcanzable desde internet y servir este mismo msg.`
+  );
+}
+
 /**
  * @param {Buffer} buffer
  */
@@ -543,6 +580,7 @@ module.exports = {
   isPublicUrlConfigured,
   isCvUrlReachableByPanel,
   panelUnreachableCvUrlError,
+  describeCvProbeFailure,
   isValidPdfBuffer,
   isPanelIntegrationConfigured,
   publicBaseUrl,

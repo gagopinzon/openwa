@@ -55,9 +55,9 @@ Con la integración al panel puedes, desde la tabla de CVs, pulsar **Agendar**:
 1. Guarda tu **correo de gerente** en la sección *Tu correo en Panel* (debe existir en panel.protalentconnections.com).
 2. Se consulta disponibilidad del equipo de ese gerente.
 3. Eliges vendedor + slot y confirmas.
-4. Msg envía `cvUrl` pública; el panel descarga el PDF, lo analiza con DeepSeek, crea la reunión y genera la liga de Meet automáticamente.
+4. Msg envía el CV al panel (`cvBase64` desde disco local, o `cvUrl` pública en producción); el panel analiza con DeepSeek, crea la reunión y genera la liga de Meet.
 
-Requisitos: `MSG_INTEGRATION_API_KEY`, correo de gerente (perfil o `MSG_GERENTE_EMAIL`) y `CV_PUBLIC_URL` (o `WEBHOOK_PUBLIC_URL`) alcanzable **desde internet**. Si `WEBHOOK_PUBLIC_URL` es `http://172.17.0.1:3445` (OpenWA en Docker), el panel no puede bajar el PDF y responde 504: define `CV_PUBLIC_URL=https://msg.tudominio.com`.
+Requisitos: `MSG_INTEGRATION_API_KEY`, correo de gerente (perfil o `MSG_GERENTE_EMAIL`). En máquina local el PDF va en **base64** (no hace falta túnel). En servidor prod puede usarse `cvUrl` con `CV_PUBLIC_URL` alcanzable desde internet.
 
 ### Configurar sesiones (sin editar .env cada vez)
 

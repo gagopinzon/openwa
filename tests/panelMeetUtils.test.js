@@ -28,4 +28,18 @@ describe('panelMeetUtils', () => {
     assert.equal(isRetryablePanelError(new Error('timeout al procesar el cv')), true);
     assert.equal(isRetryablePanelError({ status: 409, message: 'ocupado' }), false);
   });
+
+  it('no reintenta 400 por 401 al descargar el CV', () => {
+    assert.equal(
+      isRetryablePanelError({
+        status: 400,
+        message: 'No se pudo procesar el CV (descarga, extracción o análisis)',
+        panelBody: {
+          message: 'No se pudo procesar el CV (descarga, extracción o análisis)',
+          details: 'Request failed with status code 401'
+        }
+      }),
+      false
+    );
+  });
 });

@@ -53,9 +53,31 @@ function normalizeMeetUrl(value) {
  * Errores del panel que suelen resolverse reintentando (CV en análisis, timeout, etc.).
  * @param {Error|{ message?: string, status?: number }} error
  */
+function panelErrorBlob(error) {
+  const body = error && error.panelBody;
+  const details =
+    body && typeof body === 'object'
+      ? `${body.message || ''} ${body.details || ''}`
+      : '';
+  return `${(error && error.message) || ''} ${details}`.toLowerCase();
+}
+
+function isPermanentCvDownloadError(error) {
+  const blob = panelErrorBlob(error);
+  return (
+    blob.includes('status code 401') ||
+    blob.includes('status code 403') ||
+    blob.includes('status code 404') ||
+    blob.includes('token inválido') ||
+    blob.includes('token invalido') ||
+    blob.includes('no autenticado')
+  );
+}
+
 function isRetryablePanelError(error) {
+  if (isPermanentCvDownloadError(error)) return false;
   const status = Number(error && error.status);
-  const msg = String((error && error.message) || '').toLowerCase();
+  const msg = panelErrorBlob(error);
   if (status === 408 || status === 429 || status === 502 || status === 503 || status === 504) {
     return true;
   }

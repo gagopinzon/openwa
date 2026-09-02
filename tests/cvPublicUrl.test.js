@@ -4,7 +4,8 @@ const {
   publicBaseUrl,
   buildCvPublicUrl,
   isCvUrlReachableByPanel,
-  panelUnreachableCvUrlError
+  panelUnreachableCvUrlError,
+  describeCvProbeFailure
 } = require('../cvFileStore');
 
 const KEYS = ['CV_PUBLIC_URL', 'WEBHOOK_PUBLIC_URL', 'OPENWA_API_KEY', 'AUTH_SESSION_SECRET'];
@@ -69,5 +70,15 @@ describe('cvUrl para el panel (no para OpenWA)', () => {
     assert.match(msg, /172\.17\.0\.1/);
     assert.match(msg, /CV_PUBLIC_URL/);
     assert.match(msg, /panel/i);
+  });
+
+  it('explica 401: token firmado aquí, validado en otro msg', () => {
+    const msg = describeCvProbeFailure(
+      'https://msg.protalentconnections.com/api/public/cv/abc?token=x',
+      { ok: false, status: 401 }
+    );
+    assert.match(msg, /401/);
+    assert.match(msg, /msg\.protalentconnections\.com/);
+    assert.match(msg, /túnel|tunel|otra máquina|otro msg/i);
   });
 });

@@ -2,12 +2,13 @@ const agendaPendingStore = require('./agendaPendingStore');
 const panelMsgClient = require('./panelMsgClient');
 const cvFileStore = require('./cvFileStore');
 const cvAnalysisService = require('./cvAnalysisService');
+const { resolvePanelCvDelivery } = require('./panelCvDelivery');
 const {
   extractMeetUrlFromPanel,
   isRetryablePanelError,
   sleep
 } = require('./panelMeetUtils');
-const { logAgenda, warnAgenda, probeCvPublicUrl, redactCvUrl } = require('./agendaDebug');
+const { logAgenda, warnAgenda } = require('./agendaDebug');
 
 function syncRetryAttempts() {
   const raw = Number(process.env.AGENDA_PANEL_SYNC_RETRIES || 2);
@@ -142,13 +143,6 @@ async function confirmPendingInPanel(pending, opts = {}) {
     err.status = 503;
     throw err;
   }
-  if (!cvFileStore.isPublicUrlConfigured()) {
-    const err = new Error(
-      'CV_PUBLIC_URL o WEBHOOK_PUBLIC_URL no está configurada para cvUrl pública'
-    );
-    err.status = 503;
-    throw err;
-  }
 
   const cvId = String(pending.cvId || '').trim();
   const cvMeta = cvFileStore.getCvFileMeta(cvId);
@@ -181,36 +175,24 @@ async function confirmPendingInPanel(pending, opts = {}) {
   });
   const enrichedCv = panelExtras.enriched || cv;
   const { leadExtraido, analisisCV, cvAnalizadoEnMsg } = panelExtras;
-  const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
-  if (!cvFileStore.isCvUrlReachableByPanel(cvUrl)) {
-    warnAgenda('agenda-confirm.cvUrlPrivada', {
-      pendingId: pending.id,
-      cvId,
-      cvUrl: redactCvUrl(cvUrl),
-      publicBase: cvFileStore.publicBaseUrl() || null,
-      hint: 'El panel está en internet y no puede GET a 172.17.0.1 / localhost.'
-    });
-    const err = new Error(cvFileStore.panelUnreachableCvUrlError(cvUrl));
-    err.status = 503;
-    throw err;
-  }
-  const cvProbe = await probeCvPublicUrl(cvUrl);
-  logAgenda('agenda-confirm.cvUrlProbe', {
+  const cvDelivery = await resolvePanelCvDelivery(cvId);
+  logAgenda('agenda-confirm.cvDelivery', {
     pendingId: pending.id,
     cvId,
-    cvUrl: redactCvUrl(cvUrl),
-    probe: cvProbe
+    delivery: cvDelivery.delivery,
+    cvFileName: cvDelivery.cvFileName || null,
+    cvBase64Bytes: cvDelivery.cvBase64 ? cvDelivery.cvBase64.length : null,
+    cvUrlHost:
+      cvDelivery.cvUrl && cvDelivery.delivery === 'url'
+        ? (() => {
+            try {
+              return new URL(cvDelivery.cvUrl).hostname;
+            } catch {
+              return null;
+            }
+          })()
+        : null
   });
-  if (!cvProbe.ok) {
-    warnAgenda('agenda-confirm.cvUrlNoAlcanzable', {
-      pendingId: pending.id,
-      cvId,
-      cvUrl: redactCvUrl(cvUrl),
-      probe: cvProbe,
-      hint:
-        'El panel descarga el CV desde CV_PUBLIC_URL (o WEBHOOK_PUBLIC_URL). Si probe falla aquí, el panel también fallará.'
-    });
-  }
 
   const leadNombre =
     pending.contactName || enrichedCv?.nombre || leadExtraido.leadNombre || undefined;
@@ -270,7 +252,9 @@ async function confirmPendingInPanel(pending, opts = {}) {
         fecha: pending.fecha,
         horaInicio: pending.horaInicio,
         horaFin: pending.horaFin,
-        cvUrl,
+        ...(cvDelivery.delivery === 'base64'
+          ? { cvBase64: cvDelivery.cvBase64, cvFileName: cvDelivery.cvFileName }
+          : { cvUrl: cvDelivery.cvUrl }),
         titulo: `Sesión — ${leadNombre || 'candidato'}`,
         leadNombre,
         leadTelefono:
