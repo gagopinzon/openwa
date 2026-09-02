@@ -1,4 +1,5 @@
 const ollamaService = require('./ollamaService');
+const cvFileStore = require('./cvFileStore');
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
