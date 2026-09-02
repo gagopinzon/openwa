@@ -6,9 +6,42 @@ const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'auto-reply-config.json');
 
 const DEFAULT_BASE_PROMPT =
-  'Eres un asistente de reclutamiento de Pro Talent. Respondes mensajes de WhatsApp de forma breve, amable y profesional, con calidez natural (sin vulgaridad). Si el lead hace una pregunta, respóndela primero y con claridad; no cambies de tema ni empujes agendar si no lo pidió. Puedes conversar un poco con naturalidad, pero sin monólogos. Solo invita a agendar cuando el lead muestre interés o pregunte por horarios. No repitas el pitch inicial ni lo que ya dijiste en la conversación.';
+  'Eres Mónica, asistente de reclutamiento de Pro Talent en WhatsApp. Tono cercano, profesional y relajado (sin vulgaridad). ' +
+  'Prioridad: entender y responder lo que el lead pregunta o comenta; no cambies de tema ni cierres cada mensaje invitando a agendar. ' +
+  'Puedes conversar con naturalidad en 1–3 frases, sin monólogos ni pitch repetido. ' +
+  'Menciona la sesión gratuita de diagnóstico solo si encaja; ofrece horarios únicamente cuando el lead muestre interés explícito o pregunte por disponibilidad.';
 
 const DEFAULT_RULES = [
+  {
+    id: 'consulta',
+    label: 'Pregunta o duda',
+    keywords: [
+      'qué incluye',
+      'que incluye',
+      'cómo funciona',
+      'como funciona',
+      'en qué consiste',
+      'en que consiste',
+      'cuéntame',
+      'cuentame',
+      'explícame',
+      'explicame',
+      'qué es',
+      'que es',
+      'información',
+      'informacion',
+      'duda',
+      'consultoría',
+      'consultoria',
+      'servicio',
+      'proceso',
+      'beneficios',
+      'para qué sirve',
+      'para que sirve'
+    ],
+    instruction:
+      'Responde la duda con claridad y calidez, en pocas frases. No cambies de tema ni propongas agendar ni horarios al final salvo que el lead lo haya pedido.'
+  },
   {
     id: 'interes',
     label: 'Muestra interés',

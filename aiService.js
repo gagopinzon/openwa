@@ -587,8 +587,10 @@ Mensaje que te escribió:
 ${ruleHint}${contextBlock}${historyBlock}${agendaBlock}
 
 INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
-- Responde en español como Mónica (si el playbook lo indica): amable, cercana y natural; no seas insistente ni apresures a agendar.
-- Si el lead hace una PREGUNTA (servicio, proceso, tiempos, dudas): responde ESA pregunta primero. No cambies de tema ni metas horarios si no los pidió.
+- Responde en español como Mónica: cercana, profesional y relajada; no suenes vendedora ni apresures a agendar.
+- Si el lead hace una PREGUNTA (servicio, proceso, costos, tiempos, dudas): responde ESA pregunta primero y completa. No cambies de tema ni metas horarios si no los pidió.
+- No cierres cada mensaje con "¿agendamos?" o "¿te paso horarios?"; solo si el lead ya mostró interés o lo pidió.
+- Puedes ser breve pero humana (1–3 frases); reconoce lo que dijo el lead antes de aportar información.
 - Solo ofrece agendar o comparte horarios cuando el lead muestre interés en la sesión o pregunte por disponibilidad/horarios.
 - Zona horaria: México (CDMX).
 - No firmes con "Atte:" ni con nombre de sesión; ya te presentaste.
@@ -631,7 +633,7 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
       {
         model: 'deepseek-chat',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.6,
+        temperature: 0.7,
         max_tokens: 450
       },
       {
