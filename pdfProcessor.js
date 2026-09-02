@@ -24,8 +24,10 @@ async function verifyPdfReadable(buffer) {
  */
 async function extractTextFromPDF(buffer, opts = {}) {
   const silent = Boolean(opts.silent);
+  const maxPages = Number(opts.maxPages) > 0 ? Number(opts.maxPages) : 0;
   try {
-    const data = await pdfParse(buffer);
+    const parseOpts = maxPages > 0 ? { max: maxPages } : undefined;
+    const data = await pdfParse(buffer, parseOpts);
     return data.text.trim();
   } catch (error) {
     if (!silent) {

@@ -1,6 +1,7 @@
 const cvFileStore = require('./cvFileStore');
 const contactHistory = require('./contactHistoryStore');
-const { extractTextFromPDF, extractCVData, verifyPdfReadable } = require('./pdfProcessor');
+const cvAnalysisService = require('./cvAnalysisService');
+const { verifyPdfReadable } = require('./pdfProcessor');
 
 /**
  * Guarda un CV de lead (p. ej. PDF recibido por WhatsApp) en disco + manifiesto.
@@ -35,19 +36,26 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
     procesado: true
   };
 
-  // En conversación WhatsApp no hace falta parsear aquí: el panel analiza el cvUrl.
-  if (!fromConversation) {
-    try {
-      const text = await extractTextFromPDF(buffer, { silent: true });
-      cvData = { ...extractCVData(text), procesado: true };
-      if (opts.telefono) cvData.telefono = String(opts.telefono).trim();
-      if (opts.nombre && String(opts.nombre).trim()) {
-        cvData.nombre = String(opts.nombre).trim();
-      }
-    } catch (parseErr) {
-      console.warn('[cvIngest] parse parcial (masivo):', parseErr.message);
-      if (opts.nombre) cvData.nombre = String(opts.nombre).trim();
+  try {
+    const analyzed = await cvAnalysisService.analyzeCvBuffer(buffer, {
+      nombre: cvData.nombre,
+      telefono: cvData.telefono
+    });
+    cvData = {
+      ...cvData,
+      ...analyzed,
+      procesado: true
+    };
+    if (opts.telefono) cvData.telefono = String(opts.telefono).trim();
+    if (opts.nombre && String(opts.nombre).trim()) {
+      cvData.nombre = String(opts.nombre).trim();
     }
+    console.log(
+      `[cvIngest] análisis ${analyzed.analysisProvider || cvAnalysisService.getProvider()} cvId=${saved.cvId}`
+    );
+  } catch (parseErr) {
+    console.warn('[cvIngest] análisis parcial:', parseErr.message);
+    if (opts.nombre) cvData.nombre = String(opts.nombre).trim();
   }
 
   const entry = {

@@ -278,6 +278,14 @@ function sanitizeCvForPersist(cv) {
     procesado: Boolean(cv.procesado),
     error: cv.error || undefined,
     fromConversation: Boolean(cv.fromConversation) || undefined,
+    leadCorreo: cv.leadCorreo || cv.correo || cv.email || undefined,
+    correo: cv.correo || cv.leadCorreo || cv.email || undefined,
+    email: cv.email || cv.correo || cv.leadCorreo || undefined,
+    leadCiudad: cv.leadCiudad || cv.ciudad || undefined,
+    ciudad: cv.ciudad || cv.leadCiudad || undefined,
+    leadEstado: cv.leadEstado || cv.estado || undefined,
+    estado: cv.estado || cv.leadEstado || undefined,
+    analysisProvider: cv.analysisProvider || undefined,
     inWorkspace: cv.inWorkspace !== false,
     savedAt: cv.savedAt || new Date().toISOString()
   };
@@ -301,6 +309,21 @@ function saveCvsManifest(cvs) {
   fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
   fs.renameSync(tmp, MANIFEST_FILE);
   return list.length;
+}
+
+/**
+ * @param {string} cvId
+ * @param {object} patch
+ */
+function updateCvEntry(cvId, patch) {
+  const id = String(cvId || '').trim();
+  if (!id) return null;
+  const cvs = loadCvsManifest();
+  const idx = cvs.findIndex((c) => c && c.cvId === id);
+  if (idx < 0) return null;
+  cvs[idx] = sanitizeCvForPersist({ ...cvs[idx], ...patch, cvId: id });
+  saveCvsManifest(cvs);
+  return cvs[idx];
 }
 
 /**
@@ -437,6 +460,7 @@ module.exports = {
   clearAllCvs,
   clearCvsManifest,
   saveCvsManifest,
+  updateCvEntry,
   loadCvsManifest,
   purgeExpiredCvs,
   sanitizeCvForPersist,

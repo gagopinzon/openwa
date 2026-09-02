@@ -1,6 +1,7 @@
 const agendaPendingStore = require('./agendaPendingStore');
 const panelMsgClient = require('./panelMsgClient');
 const cvFileStore = require('./cvFileStore');
+const cvAnalysisService = require('./cvAnalysisService');
 const {
   extractMeetUrlFromPanel,
   isRetryablePanelError,
@@ -137,15 +138,30 @@ async function confirmPendingInPanel(pending, opts = {}) {
   }
 
   const cv = resolveCvEntry(cvId);
+  const enrichedCv =
+    (await cvAnalysisService.ensureCvAnalyzed(cvId, {
+      nombre: pending.contactName || cv?.nombre,
+      telefono: pending.telefono || cv?.telefono
+    })) ||
+    cv;
   const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
   const leadNombre =
-    pending.contactName || cv?.nombre || undefined;
-  const leadTelefono = resolveLeadTelefono(pending.telefono) || cv?.telefono || undefined;
+    pending.contactName || enrichedCv?.nombre || undefined;
+  const leadTelefono = resolveLeadTelefono(pending.telefono) || enrichedCv?.telefono || undefined;
   const leadCorreo =
-    (cv && cv.leadCorreo) ||
-    (cv && cv.correo) ||
-    (cv && cv.email) ||
+    (enrichedCv && enrichedCv.leadCorreo) ||
+    (enrichedCv && enrichedCv.correo) ||
+    (enrichedCv && enrichedCv.email) ||
     undefined;
+  const leadExtraido = {
+    leadNombre: leadNombre || undefined,
+    leadCorreo: leadCorreo && String(leadCorreo).includes('@') ? leadCorreo : undefined,
+    leadTelefono:
+      leadTelefono && leadTelefono !== 'No encontrado' ? leadTelefono : undefined,
+    leadCiudad: enrichedCv?.leadCiudad || enrichedCv?.ciudad || undefined,
+    leadEstado: enrichedCv?.leadEstado || enrichedCv?.estado || undefined,
+    experiencia: enrichedCv?.experiencia || undefined
+  };
 
   let lastError = null;
   let panelData = null;
@@ -172,8 +188,9 @@ async function confirmPendingInPanel(pending, opts = {}) {
           leadTelefono && leadTelefono !== 'No encontrado' ? leadTelefono : undefined,
         leadCorreo:
           leadCorreo && String(leadCorreo).includes('@') ? leadCorreo : undefined,
-        leadCiudad: cv?.leadCiudad || cv?.ciudad || undefined,
-        leadEstado: cv?.leadEstado || cv?.estado || undefined,
+        leadCiudad: enrichedCv?.leadCiudad || enrichedCv?.ciudad || undefined,
+        leadEstado: enrichedCv?.leadEstado || enrichedCv?.estado || undefined,
+        leadExtraido,
         origen: 'msg_auto_agenda'
       });
       usedVendor = { ...vendor, gerenteEmail };

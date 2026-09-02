@@ -5,6 +5,8 @@ const fs = require('fs');
 const crypto = require('crypto');
 require('dotenv').config();
 
+const cvFileStore = require('./cvFileStore');
+const cvAnalysisService = require('./cvAnalysisService');
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages, buildOutboundMessageParts } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
@@ -2185,8 +2187,11 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
     };
 
     try {
-      const text = await extractTextFromPDF(req.file.buffer);
-      cvData = { ...extractCVData(text), procesado: true };
+      const analyzed = await cvAnalysisService.analyzeCvBuffer(req.file.buffer, {
+        nombre: req.body.nombre,
+        telefono: req.body.telefono
+      });
+      cvData = { ...analyzed, procesado: true };
       if (req.body.telefono) {
         cvData.telefono = String(req.body.telefono).trim();
       }
@@ -2194,7 +2199,7 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
         cvData.nombre = String(req.body.nombre).trim();
       }
     } catch (parseErr) {
-      console.warn('[panel/cv-upload] parse parcial:', parseErr.message);
+      console.warn('[panel/cv-upload] análisis parcial:', parseErr.message);
       if (req.body.nombre) cvData.nombre = String(req.body.nombre).trim();
     }
 

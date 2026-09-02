@@ -98,7 +98,9 @@ async function getDisponibilidad(opts = {}) {
  *   leadNombre?: string,
  *   leadTelefono?: string,
  *   leadCiudad?: string,
- *   leadEstado?: string
+ *   leadEstado?: string,
+ *   leadExtraido?: object,
+ *   origen?: string
  * }} body
  */
 async function crearReunion(body = {}) {
@@ -120,6 +122,9 @@ async function crearReunion(body = {}) {
   if (body.leadTelefono) payload.leadTelefono = body.leadTelefono;
   if (body.leadCiudad) payload.leadCiudad = body.leadCiudad;
   if (body.leadEstado) payload.leadEstado = body.leadEstado;
+  if (body.leadExtraido && typeof body.leadExtraido === 'object') {
+    payload.leadExtraido = body.leadExtraido;
+  }
   if (body.origen) payload.origen = body.origen;
 
   try {
