@@ -209,6 +209,40 @@ async function analyzeCvBuffer(buffer, opts = {}) {
 }
 
 /**
+ * No pisa ciudad/estado/correo que el lead ya dio si el análisis del PDF viene vacío.
+ * @param {object|null} existing
+ * @param {object} incoming
+ */
+function preserveFilledLeadFields(existing, incoming) {
+  const next = incoming && typeof incoming === 'object' ? { ...incoming } : {};
+  if (!existing || typeof existing !== 'object') return next;
+
+  const pairs = [
+    ['leadCiudad', 'ciudad'],
+    ['leadEstado', 'estado']
+  ];
+  for (const [a, b] of pairs) {
+    const hasNew = Boolean(String(next[a] || next[b] || '').trim());
+    const prev = String(existing[a] || existing[b] || '').trim();
+    if (!hasNew && prev) {
+      next[a] = existing[a] || prev;
+      next[b] = existing[b] || prev;
+    }
+  }
+
+  const prevEmail = String(
+    existing.leadCorreo || existing.correo || existing.email || ''
+  ).trim();
+  const newEmail = String(next.leadCorreo || next.correo || next.email || '').trim();
+  if (!newEmail.includes('@') && prevEmail.includes('@')) {
+    next.leadCorreo = prevEmail;
+    next.correo = prevEmail;
+    next.email = prevEmail;
+  }
+  return next;
+}
+
+/**
  * Re-analiza el CV en disco si faltan datos clave (p. ej. email para el panel).
  * @param {string} cvId
  * @param {{ nombre?: string, telefono?: string, force?: boolean }} [opts]
@@ -246,10 +280,10 @@ async function ensureCvAnalyzed(cvId, opts = {}) {
     nombre: opts.nombre || existing?.nombre,
     telefono: opts.telefono || existing?.telefono
   });
-  const patch = {
+  const patch = preserveFilledLeadFields(existing, {
     ...analyzed,
     analyzedAt: new Date().toISOString()
-  };
+  });
   return cvFileStore.updateCvEntry(id, patch) || { ...existing, ...patch, cvId: id };
 }
 
@@ -341,6 +375,7 @@ module.exports = {
   analyzeCvText,
   analyzeCvBuffer,
   ensureCvAnalyzed,
+  preserveFilledLeadFields,
   buildPanelAnalisisCv,
   buildPanelLeadExtraido,
   buildPanelAgendaExtras,

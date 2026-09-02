@@ -8,7 +8,9 @@ const {
   archiveSentByPhones,
   partitionExpired,
   mergeIncomingBatch,
-  stampMissingSavedAt
+  stampMissingSavedAt,
+  sanitizeCvForPersist,
+  hydrateStoredCv
 } = require('../cvFileStore');
 
 function phonesMatch(a, b) {
@@ -155,5 +157,25 @@ describe('cvFileStore mesa de trabajo vs archivo', () => {
     assert.equal(cvs.length, 1);
     assert.equal(cvs[0].cvId, 'new-ana');
     assert.equal(cvs[0].inWorkspace, true);
+  });
+});
+
+describe('cvFileStore lead fields', () => {
+  it('al recargar el manifest conserva ciudad, estado y correo', () => {
+    const persisted = sanitizeCvForPersist({
+      cvId: 'cv-gago',
+      nombre: 'Gago',
+      leadCiudad: 'Guadalajara',
+      ciudad: 'Guadalajara',
+      leadEstado: 'Jalisco',
+      estado: 'Jalisco',
+      leadCorreo: 'gago@test.com'
+    });
+    const loaded = hydrateStoredCv(persisted);
+    assert.equal(loaded.leadCiudad, 'Guadalajara');
+    assert.equal(loaded.ciudad, 'Guadalajara');
+    assert.equal(loaded.leadEstado, 'Jalisco');
+    assert.equal(loaded.estado, 'Jalisco');
+    assert.equal(loaded.leadCorreo, 'gago@test.com');
   });
 });

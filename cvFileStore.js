@@ -405,6 +405,38 @@ function sanitizeCvForPersist(cv) {
 }
 
 /**
+ * Reconstruye un CV del JSON del manifest (incluye ciudad/estado/correo).
+ * @param {object} cv
+ */
+function hydrateStoredCv(cv) {
+  if (!cv || typeof cv !== 'object' || !cv.cvId) return null;
+  return {
+    nombre: cv.nombre || 'Sin nombre',
+    telefono: cv.telefono || 'No encontrado',
+    experiencia: cv.experiencia || '',
+    textoCompleto: '',
+    archivoOriginal: cv.archivoOriginal || `${cv.cvId}.pdf`,
+    cvId: cv.cvId,
+    cvFileName: cv.cvFileName || null,
+    saludo: cv.saludo || '',
+    mensajeIA: cv.mensajeIA || '',
+    procesado: cv.procesado !== false,
+    error: cv.error,
+    fromConversation: Boolean(cv.fromConversation),
+    leadCorreo: cv.leadCorreo || cv.correo || cv.email || undefined,
+    correo: cv.correo || cv.leadCorreo || cv.email || undefined,
+    email: cv.email || cv.correo || cv.leadCorreo || undefined,
+    leadCiudad: cv.leadCiudad || cv.ciudad || undefined,
+    ciudad: cv.ciudad || cv.leadCiudad || undefined,
+    leadEstado: cv.leadEstado || cv.estado || undefined,
+    estado: cv.estado || cv.leadEstado || undefined,
+    analysisProvider: cv.analysisProvider || undefined,
+    inWorkspace: cv.inWorkspace !== false,
+    savedAt: cv.savedAt || null
+  };
+}
+
+/**
  * Guarda el listado de leads/CVs en disco.
  * @param {Array} cvs
  */
@@ -463,22 +495,7 @@ function loadCvsManifest() {
         dropped += 1;
         continue;
       }
-      restored.push({
-        nombre: cv.nombre || 'Sin nombre',
-        telefono: cv.telefono || 'No encontrado',
-        experiencia: cv.experiencia || '',
-        textoCompleto: '',
-        archivoOriginal: cv.archivoOriginal || `${cv.cvId}.pdf`,
-        cvId: cv.cvId,
-        cvFileName: cv.cvFileName || null,
-        saludo: cv.saludo || '',
-        mensajeIA: cv.mensajeIA || '',
-        procesado: cv.procesado !== false,
-        error: cv.error,
-        fromConversation: Boolean(cv.fromConversation),
-        inWorkspace: cv.inWorkspace !== false,
-        savedAt: cv.savedAt || null
-      });
+      restored.push(hydrateStoredCv(cv));
     }
 
     const hadMissingSavedAt = restored.some((cv) => !cv.savedAt);
@@ -577,6 +594,7 @@ module.exports = {
   loadCvsManifest,
   purgeExpiredCvs,
   sanitizeCvForPersist,
+  hydrateStoredCv,
   isPublicUrlConfigured,
   isCvUrlReachableByPanel,
   panelUnreachableCvUrlError,

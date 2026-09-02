@@ -82,11 +82,22 @@ function parseLeadFieldsReply(text, missingFields = []) {
   }
 
   if (needs.has('ciudad') || needs.has('estado')) {
+    const labeled = raw.match(
+      /^(.*?)\s*[.,;]\s*estado\s+(.+)$/i
+    );
     const commaParts = raw
       .split(',')
       .map((part) => part.trim())
       .filter(Boolean);
-    if (commaParts.length >= 2) {
+
+    if (labeled) {
+      if (needs.has('ciudad') && !out.ciudad) {
+        out.ciudad = labeled[1].replace(/\s+estado$/i, '').trim();
+      }
+      if (needs.has('estado') && !out.estado) {
+        out.estado = labeled[2].trim();
+      }
+    } else if (commaParts.length >= 2) {
       if (needs.has('ciudad') && !out.ciudad) out.ciudad = commaParts[0];
       if (needs.has('estado') && !out.estado) out.estado = commaParts.slice(1).join(', ');
     } else {
@@ -238,17 +249,19 @@ function patchFromParsedLeadFields(parsed = {}) {
  * @param {{ nombre?: string, telefono?: string, force?: boolean }} [opts]
  */
 async function getMissingLeadFieldsForCv(cvId, opts = {}) {
+  const id = String(cvId || '').trim();
+  const fromDisk =
+    (cvFileStore.loadCvsManifest() || []).find((c) => c && c.cvId === id) || null;
+  const missingOnDisk = listMissingLeadFields(leadFieldSnapshotFromCv(fromDisk));
+  if (fromDisk && !missingOnDisk.length) return [];
+
   const enriched =
-    (await cvAnalysisService.ensureCvAnalyzed(cvId, {
+    (await cvAnalysisService.ensureCvAnalyzed(id, {
       nombre: opts.nombre,
       telefono: opts.telefono,
       force: Boolean(opts.force)
-    })) || null;
-  const entry =
-    enriched ||
-    (cvFileStore.loadCvsManifest() || []).find((c) => c && c.cvId === cvId) ||
-    null;
-  return listMissingLeadFields(leadFieldSnapshotFromCv(entry));
+    })) || fromDisk;
+  return listMissingLeadFields(leadFieldSnapshotFromCv(enriched));
 }
 
 /**

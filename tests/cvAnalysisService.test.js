@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const {
   parseJsonObject,
   analyzeCvText,
-  extractLooseSignalsFromPdfBuffer
+  extractLooseSignalsFromPdfBuffer,
+  preserveFilledLeadFields
 } = require('../cvAnalysisService');
 
 describe('cvAnalysisService', () => {
@@ -17,6 +18,16 @@ describe('cvAnalysisService', () => {
     const buf = Buffer.from('foo bar candidato@protalent.com baz', 'utf8');
     const loose = extractLooseSignalsFromPdfBuffer(buf);
     assert.equal(loose.emails[0], 'candidato@protalent.com');
+  });
+
+  it('no pisa ciudad/estado que el lead ya escribió si el PDF viene vacío', () => {
+    const kept = preserveFilledLeadFields(
+      { leadCiudad: 'Guadalajara', leadEstado: 'Jalisco', ciudad: 'Guadalajara' },
+      { leadCiudad: '', ciudad: '', leadEstado: '', estado: '', nombre: 'Gago' }
+    );
+    assert.equal(kept.leadCiudad, 'Guadalajara');
+    assert.equal(kept.leadEstado, 'Jalisco');
+    assert.equal(kept.nombre, 'Gago');
   });
 
   it('analiza texto con regex sin Ollama forzado', async () => {

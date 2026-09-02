@@ -76,6 +76,15 @@ describe('agendaLeadFields', () => {
     assert.equal(parsed.estado, 'Jalisco');
   });
 
+  it('parsea "Guadalajara. Estado Jalisco"', () => {
+    const parsed = parseLeadFieldsReply('Guadalajara. Estado Jalisco', [
+      'ciudad',
+      'estado'
+    ]);
+    assert.equal(parsed.ciudad, 'Guadalajara');
+    assert.equal(parsed.estado, 'Jalisco');
+  });
+
   it('parsea correo si falta', () => {
     const parsed = parseLeadFieldsReply('mi mail es gago@gmail.com', ['email']);
     assert.equal(parsed.email, 'gago@gmail.com');

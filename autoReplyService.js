@@ -1243,12 +1243,15 @@ async function handleIncomingWebhook({
       if (awaitingCv.cvId && Object.keys(parsed).length) {
         agendaLeadFields.applyLeadFieldsToCv(awaitingCv.cvId, parsed);
       }
-      const stillMissing = await agendaLeadFields.getMissingLeadFieldsForCv(
-        awaitingCv.cvId,
-        {
-          nombre: awaitingCv.contactName || contactName,
-          telefono: normalizedPhone
-        }
+      const missingFromCv = awaitingCv.cvId
+        ? await agendaLeadFields.getMissingLeadFieldsForCv(awaitingCv.cvId, {
+            nombre: awaitingCv.contactName || contactName,
+            telefono: normalizedPhone
+          })
+        : awaitingCv.missingFields || [];
+      const stillMissing = agendaLeadFields.fieldsStillMissingAfterParse(
+        missingFromCv,
+        parsed
       );
       if (stillMissing.length) {
         agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
