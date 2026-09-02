@@ -128,14 +128,55 @@ function resolveDateRangeFromMessage(text, now = new Date()) {
   return null;
 }
 
+function foldAgendaText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function formatHhMm(hour, minute) {
+  const h = Number(hour);
+  const min = minute == null || minute === '' ? '00' : String(minute).padStart(2, '0');
+  if (!Number.isFinite(h) || h < 0 || h > 23) return null;
+  return `${String(h).padStart(2, '0')}:${min}`;
+}
+
 /**
- * Normaliza "10", "10:00", "10 am" → "10:00" / "22:00"
+ * @param {number} hour
+ * @param {string} minute
+ * @param {'manana'|'tarde'|'noche'} period
+ */
+function applyDayPeriod(hour, minute, period) {
+  let h = Number(hour);
+  if (!Number.isFinite(h)) return null;
+  if (period === 'manana') {
+    if (h === 12) h = 0;
+  } else if (period === 'tarde' || period === 'noche') {
+    if (h === 12 && period === 'noche') h = 0;
+    else if (h > 0 && h < 12) h += 12;
+  }
+  return formatHhMm(h, minute);
+}
+
+/**
+ * Normaliza "10", "10:00", "10 am", "5 de la tarde" → "10:00" / "17:00"
  * @param {string} text
  * @returns {string[]}
  */
 function extractTimesFromMessage(text) {
-  const raw = String(text || '').toLowerCase();
+  const raw = foldAgendaText(text);
   const out = new Set();
+  const consumed = [];
+
+  function overlaps(index, length) {
+    const end = index + length;
+    return consumed.some((c) => index < c.end && end > c.start);
+  }
+
+  function consume(index, length) {
+    consumed.push({ start: index, end: index + length });
+  }
 
   const withMeridiem =
     /\b(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b/gi;
@@ -146,20 +187,36 @@ function extractTimesFromMessage(text) {
     const mer = m[3].replace(/\./g, '').replace(/\s/g, '').toLowerCase();
     if (mer.startsWith('p') && h < 12) h += 12;
     if (mer.startsWith('a') && h === 12) h = 0;
-    out.add(`${String(h).padStart(2, '0')}:${min}`);
+    const hhmm = formatHhMm(h, min);
+    if (hhmm) {
+      out.add(hhmm);
+      consume(m.index, m[0].length);
+    }
   }
 
-  const hhmm = /\b([01]?\d|2[0-3]):([0-5]\d)\b/g;
-  while ((m = hhmm.exec(raw))) {
-    out.add(`${String(m[1]).padStart(2, '0')}:${m[2]}`);
+  const withPeriod =
+    /\b(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(?:hrs?|horas?)?\s*(?:de\s+la|en\s+la|por\s+la)\s+(tarde|manana|noche)\b/gi;
+  while ((m = withPeriod.exec(raw))) {
+    if (overlaps(m.index, m[0].length)) continue;
+    const hhmm = applyDayPeriod(Number(m[1]), m[2], m[3]);
+    if (hhmm) {
+      out.add(hhmm);
+      consume(m.index, m[0].length);
+    }
+  }
+
+  const hhmmRe = /\b([01]?\d|2[0-3]):([0-5]\d)\b/g;
+  while ((m = hhmmRe.exec(raw))) {
+    if (overlaps(m.index, m[0].length)) continue;
+    const hhmm = formatHhMm(m[1], m[2]);
+    if (hhmm) out.add(hhmm);
   }
 
   const bare = /\ba\s+las\s+(\d{1,2})\b/gi;
   while ((m = bare.exec(raw))) {
-    const h = Number(m[1]);
-    if (h >= 0 && h <= 23) {
-      out.add(`${String(h).padStart(2, '0')}:00`);
-    }
+    if (overlaps(m.index, m[0].length)) continue;
+    const hhmm = formatHhMm(m[1], '00');
+    if (hhmm) out.add(hhmm);
   }
 
   return [...out];
@@ -174,57 +231,221 @@ function hasExplicitTimeChoice(text) {
 }
 
 /**
+ * Confirmación corta de un horario ya propuesto ("sí", "está perfecto").
+ * No cubre "sí me interesa" (interés inicial).
+ * @param {string} text
+ */
+function looksLikeTimeConfirmYes(text) {
+  const raw = foldAgendaText(text)
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return false;
+  if (resolveDateRangeFromMessage(raw)) return false;
+  if (hasExplicitTimeChoice(raw)) return false;
+
+  if (
+    /^(si|sip|ok|okay|vale|listo|perfecto|va|dale|claro|de acuerdo|confirmo|excelente)([.!\s]*)$/.test(
+      raw
+    )
+  ) {
+    return true;
+  }
+  if (
+    /^(si|ok|vale)\s+(esta\s+)?(perfecto|bien|ok|va|genial|excelente|me\s+(queda|sirve|parece)|confirmo)\b/.test(
+      raw
+    )
+  ) {
+    return true;
+  }
+  if (/^(esta|ta)\s+(perfecto|bien|ok)([.!\s]*)$/.test(raw)) return true;
+  return false;
+}
+
+/**
+ * Hora que el bot acaba de proponer ("¿te funciona a las 17:00?"),
+ * no los extremos de un rango de disponibilidad.
+ * @param {string} text
+ * @returns {string[]}
+ */
+function extractProposedTimesFromBotText(text) {
+  const raw = foldAgendaText(text);
+  if (!raw.trim()) return [];
+  const out = [];
+  const aLas = [...raw.matchAll(/a\s+las\s+(\d{1,2}(?::\d{2})?)/gi)];
+  for (const m of aLas) {
+    for (const t of extractTimesFromMessage(m[0])) out.push(t);
+  }
+  if (out.length) return [...new Set(out)];
+
+  const hrs = [...raw.matchAll(/\b([01]?\d|2[0-3]):([0-5]\d)\s*hrs?\b/gi)];
+  for (const m of hrs) {
+    const hhmm = formatHhMm(m[1], m[2]);
+    if (hhmm) out.push(hhmm);
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * @param {Array<{ body?: string, fromMe?: boolean, timestamp?: number }>} messages
+ */
+function lastFromMeBody(messages) {
+  const list = Array.isArray(messages) ? [...messages] : [];
+  list.sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const body = String((list[i] && list[i].body) || '').trim();
+    if (list[i] && list[i].fromMe && body) return body;
+  }
+  return '';
+}
+
+/**
+ * Último mensaje propio que sí propone una hora ("a las 17:00"),
+ * aunque después el bot se haya desviado a preguntar el día otra vez.
+ * @param {Array<{ body?: string, fromMe?: boolean, timestamp?: number }>} messages
+ */
+function lastBotProposalText(messages) {
+  const list = Array.isArray(messages) ? [...messages] : [];
+  list.sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (!list[i] || !list[i].fromMe) continue;
+    const body = String(list[i].body || '').trim();
+    if (!body) continue;
+    if (extractProposedTimesFromBotText(body).length) return body;
+  }
+  return lastFromMeBody(list);
+}
+
+/**
+ * Si pidió las 5 y no hay 05:00 pero sí 17:00, usa la tarde.
+ * @param {string[]} times
+ * @param {Set<string>} slotStarts
+ */
+function expandTimesAgainstSlots(times, slotStarts) {
+  const out = new Set(times);
+  for (const t of times) {
+    const [hs, ms] = String(t).split(':');
+    const h = Number(hs);
+    if (h >= 1 && h <= 11) {
+      const pm = formatHhMm(h + 12, ms);
+      if (pm && !slotStarts.has(t) && slotStarts.has(pm)) out.add(pm);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * @param {string[]} times
+ * @param {Array<{ fecha: string, horaInicio: string, horaFin: string }>} candidates
+ */
+function pickSlotForTimes(times, candidates) {
+  const exact = candidates.filter((s) =>
+    times.includes(String(s.horaInicio || '').trim())
+  );
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+
+  const loose = candidates.filter((s) => {
+    const hi = String(s.horaInicio || '').trim();
+    return times.some(
+      (t) => hi === t || hi.startsWith(t) || t.startsWith(hi.slice(0, 2))
+    );
+  });
+  if (loose.length === 1) return loose[0];
+  if (loose.length > 1) {
+    const exactLoose = loose.filter((s) =>
+      times.includes(String(s.horaInicio).trim())
+    );
+    if (exactLoose.length === 1) return exactLoose[0];
+    return null;
+  }
+  return null;
+}
+
+function uniqueWeekdayDateRange(text, now) {
+  const raw = foldAgendaText(text);
+  if (!raw.trim()) return null;
+  const found = new Set();
+  const fullNames = [
+    'domingo',
+    'lunes',
+    'martes',
+    'miercoles',
+    'jueves',
+    'viernes',
+    'sabado'
+  ];
+  for (const name of fullNames) {
+    if (new RegExp(`\\b${name}\\b`).test(raw)) found.add(WEEKDAY_NAMES[name]);
+  }
+  if (found.size !== 1) return null;
+  return resolveDateRangeFromMessage(text, now);
+}
+
+function matchIndexChoice(text, list) {
+  const idxMatch = /\b(?:opcion|opción|el|la|numero|número|#)\s*(\d{1,2})\b/i.exec(
+    String(text || '')
+  );
+  if (!idxMatch) return null;
+  const n = Number(idxMatch[1]);
+  if (n >= 1 && n <= list.length) return list[n - 1];
+  return null;
+}
+
+/**
  * @param {string} text
  */
 function userMentionsSendingCv(text) {
-  const raw = String(text || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
+  const raw = foldAgendaText(text);
   return /\b(cv|curriculum|curriculo|hoja\s+de\s+vida)\b/.test(raw);
 }
 
 /**
  * @param {string} text
  * @param {Array<{ fecha: string, horaInicio: string, horaFin: string }>} slots
+ * @param {{ now?: Date, lastBotText?: string, proposedTimes?: string[] }} [opts]
  */
-function matchSlotFromMessage(text, slots) {
+function matchSlotFromMessage(text, slots, opts = {}) {
   const list = Array.isArray(slots) ? slots : [];
   if (!list.length) return null;
+  const now = opts.now instanceof Date ? opts.now : new Date();
+  const confirming = looksLikeTimeConfirmYes(text);
 
-  const times = extractTimesFromMessage(text);
-  if (!times.length) return null;
+  let times = extractTimesFromMessage(text);
+  if (!times.length && confirming) {
+    const fromBot = extractProposedTimesFromBotText(opts.lastBotText || '');
+    const fromOffer = (Array.isArray(opts.proposedTimes) ? opts.proposedTimes : [])
+      .map((t) => String(t || '').trim())
+      .filter(Boolean);
+    times = fromBot.length ? fromBot : fromOffer;
+  }
 
-  const range = resolveDateRangeFromMessage(text);
+  if (!times.length) return matchIndexChoice(text, list);
+
+  const range =
+    resolveDateRangeFromMessage(text, now) ||
+    uniqueWeekdayDateRange(opts.lastBotText || '', now);
   let candidates = list;
   if (range && range.fechaInicio === range.fechaFin) {
     const daySlots = list.filter((s) => s.fecha === range.fechaInicio);
     if (daySlots.length) candidates = daySlots;
   }
 
-  const matches = candidates.filter((s) => {
-    const hi = String(s.horaInicio || '').trim();
-    return times.some((t) => hi === t || hi.startsWith(t) || t.startsWith(hi.slice(0, 2)));
-  });
-
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) {
-    // Prefer exact HH:MM
-    const exact = matches.filter((s) => times.includes(String(s.horaInicio).trim()));
-    if (exact.length === 1) return exact[0];
-    return null;
-  }
-
-  // Index like "el 2" / "opción 1"
-  const idxMatch = /\b(?:opcion|opción|el|la|numero|número|#)\s*(\d{1,2})\b/i.exec(
-    String(text || '')
+  const slotStarts = new Set(
+    candidates.map((s) => String(s.horaInicio || '').trim())
   );
-  if (idxMatch) {
-    const n = Number(idxMatch[1]);
-    if (n >= 1 && n <= list.length) return list[n - 1];
+  times = expandTimesAgainstSlots(times, slotStarts);
+
+  const hit = pickSlotForTimes(times, candidates);
+  if (hit) return hit;
+  if (confirming && times.length) {
+    const allStarts = new Set(list.map((s) => String(s.horaInicio || '').trim()));
+    const expanded = expandTimesAgainstSlots(times, allStarts);
+    const fallback = pickSlotForTimes(expanded, list);
+    if (fallback) return fallback;
   }
 
-  return null;
+  return matchIndexChoice(text, list);
 }
 
 /**
@@ -243,6 +464,10 @@ module.exports = {
   resolveDateRangeFromMessage,
   extractTimesFromMessage,
   hasExplicitTimeChoice,
+  looksLikeTimeConfirmYes,
+  extractProposedTimesFromBotText,
+  lastFromMeBody,
+  lastBotProposalText,
   userMentionsSendingCv,
   matchSlotFromMessage,
   slotIdentity

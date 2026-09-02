@@ -72,19 +72,30 @@ function getReplyHistoryLines() {
  * @param {number} [maxLines]
  * @returns {Promise<string|null>}
  */
-async function fetchRecentConversationHistory(openwaSessionId, chatId, maxLines = getReplyHistoryLines()) {
+async function fetchRecentConversationMessages(
+  openwaSessionId,
+  chatId,
+  maxLines = getReplyHistoryLines()
+) {
   const lines = Math.min(Math.max(parseInt(maxLines, 10) || 0, 0), 12);
-  if (!lines || !openwaSessionId || !chatId) return null;
+  if (!lines || !openwaSessionId || !chatId) return [];
   try {
     const messages = await getChatHistory(openwaSessionId, chatId, {
       limit: lines + 4,
       fresh: true
     });
-    return formatConversationHistoryForPrompt(messages, lines);
+    return Array.isArray(messages) ? messages : [];
   } catch (err) {
     console.warn('[auto-reply] historial conversación:', err.message);
-    return null;
+    return [];
   }
+}
+
+async function fetchRecentConversationHistory(openwaSessionId, chatId, maxLines = getReplyHistoryLines()) {
+  const lines = Math.min(Math.max(parseInt(maxLines, 10) || 0, 0), 12);
+  if (!lines || !openwaSessionId || !chatId) return null;
+  const messages = await fetchRecentConversationMessages(openwaSessionId, chatId, maxLines);
+  return formatConversationHistoryForPrompt(messages, lines);
 }
 
 /**
@@ -1327,8 +1338,36 @@ async function handleIncomingWebhook({
       );
       agendaMeta = { reason: 'awaiting_cv_reminder' };
     }
+    const dateRangeFromBody = agendaIntent.resolveDateRangeFromMessage(body);
+    const bodyPinsOneDay = Boolean(
+      dateRangeFromBody && dateRangeFromBody.fechaInicio === dateRangeFromBody.fechaFin
+    );
+    const needsBotTimeContext =
+      Boolean(body) &&
+      !incomingDocument &&
+      (agendaIntent.looksLikeTimeConfirmYes(body) ||
+        (agendaIntent.hasExplicitTimeChoice(body) && !bodyPinsOneDay));
+
+    let lastBotProposal = '';
+    if (needsBotTimeContext && priorOffer) {
+      const historyMsgs = await fetchRecentConversationMessages(
+        openwaSessionId,
+        identity.chatId || chatId
+      );
+      lastBotProposal = agendaIntent.lastBotProposalText(historyMsgs);
+    }
+
+    const slotMatchOpts = {
+      lastBotText: lastBotProposal,
+      proposedTimes: priorOffer && priorOffer.proposedTimes
+    };
+
     if (!replyText && priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
-      const chosen = agendaIntent.matchSlotFromMessage(body, priorOffer.slots);
+      const chosen = agendaIntent.matchSlotFromMessage(
+        body,
+        priorOffer.slots,
+        slotMatchOpts
+      );
       if (chosen) {
         const booked = await processChosenSlot({
           chosen,
@@ -1349,9 +1388,19 @@ async function handleIncomingWebhook({
       }
     }
 
+    const skipReslotOnYes =
+      Boolean(priorOffer) &&
+      agendaIntent.looksLikeTimeConfirmYes(body) &&
+      !agendaIntent.hasExplicitTimeChoice(body);
+    if (skipReslotOnYes && !replyText) {
+      console.log(
+        `[auto-reply] confirmación de hora sin slot matcheado; no se reofrece la semana phone=${normalizedPhone}`
+      );
+    }
+
     // Fase 1: en el playbook casi siempre se cierran con horarios (XXXX → slots reales)
     let agendaContext = null;
-    if (!replyText && agendaIntent.shouldOfferSlots(body)) {
+    if (!replyText && agendaIntent.shouldOfferSlots(body) && !skipReslotOnYes) {
       try {
         const today = agendaIntent.todayYmd();
         const range =
@@ -1393,7 +1442,11 @@ async function handleIncomingWebhook({
 
           // Lead ya dijo día+hora en el mismo mensaje → agendar sin pasar por IA
           if (agendaIntent.hasExplicitTimeChoice(body)) {
-            const chosenInline = agendaIntent.matchSlotFromMessage(body, slots);
+            const chosenInline = agendaIntent.matchSlotFromMessage(
+              body,
+              slots,
+              slotMatchOpts
+            );
             if (chosenInline) {
               const booked = await processChosenSlot({
                 chosen: chosenInline,
@@ -1469,6 +1522,12 @@ async function handleIncomingWebhook({
       });
       if (allowGreeting) {
         await contactHistory.touchLastAiGreeting(normalizedPhone);
+      }
+      if (replyText && agendaContext) {
+        const proposed = agendaIntent.extractProposedTimesFromBotText(replyText);
+        if (proposed.length) {
+          agendaOfferStore.rememberProposedTimes(normalizedPhone, proposed);
+        }
       }
     }
 

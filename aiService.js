@@ -564,7 +564,9 @@ async function generateReplyMessage({
   const agendaInstructions = agendaContext
     ? `
 - PRIORIDAD MÁXIMA: los HORARIOS REALES de arriba sustituyen cualquier XXXX / ejemplo del playbook.
-- Si el lead YA dijo día y hora concretos en su mensaje (ej. "miércoles a las 18:00"), NO vuelvas a preguntar si le queda bien esa hora; confirma el paso siguiente (CV o liga).
+- Si el lead YA dijo día y hora concretos en su mensaje (ej. "miércoles a las 18:00" o "el jueves a las 5 de la tarde"), NO vuelvas a preguntar si le queda bien esa hora; confirma el paso siguiente (CV o liga).
+- "5 de la tarde" es 17:00; "8 de la noche" es 20:00; "9 de la mañana" es 09:00.
+- Si el lead responde "sí", "perfecto" o "está bien" a una hora que TÚ acabas de proponer, NO vuelvas a preguntar el día ni la hora.
 - Si el sistema ya envió un PDF de CV para confirmar, no vuelvas a pedir el horario; espera que diga sí o envíe otro PDF.
 - Ofrece disponibilidad como RANGOS por día solo cuando el lead NO haya dicho una hora específica.
 - La sesión es de 15 minutos. No listes todos los bloques de 30 minutos.

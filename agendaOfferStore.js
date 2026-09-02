@@ -46,11 +46,30 @@ function rememberOffer(phone, slots, ttlMs = DEFAULT_TTL_MS) {
   const expiresAt = Date.now() + (Number(ttlMs) || DEFAULT_TTL_MS);
   store.byPhone[key] = {
     slots: Array.isArray(slots) ? slots : [],
+    proposedTimes: [],
     createdAt: new Date().toISOString(),
     expiresAt
   };
   writeStore(store);
   return store.byPhone[key];
+}
+
+/**
+ * Recuerda la hora que el bot acaba de proponer ("¿te funciona a las 17:00?").
+ * @param {string} phone
+ * @param {string[]} times
+ */
+function rememberProposedTimes(phone, times) {
+  const key = phoneKey(phone);
+  if (!key) return null;
+  const store = readStore();
+  const entry = store.byPhone[key];
+  if (!entry) return null;
+  entry.proposedTimes = (Array.isArray(times) ? times : [])
+    .map((t) => String(t || '').trim())
+    .filter((t) => /^\d{2}:\d{2}$/.test(t));
+  writeStore(store);
+  return entry;
 }
 
 /**
@@ -83,6 +102,7 @@ function clearOffer(phone) {
 
 module.exports = {
   rememberOffer,
+  rememberProposedTimes,
   getOffer,
   clearOffer,
   phoneKey
