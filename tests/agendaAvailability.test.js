@@ -7,6 +7,7 @@ const {
   mergePanelDisponibilidad,
   publicSlots,
   collapseConsecutiveRanges,
+  selectOfferStarts,
   formatSlotsForPrompt,
   filterFutureSlots,
   getMexicoNowParts
@@ -100,7 +101,32 @@ describe('agendaAvailability', () => {
     ]);
   });
 
-  it('formatSlotsForPrompt habla en rangos de 15 min', () => {
+  it('selectOfferStarts: ≤4 en tramo → todas; >4 → cada hora', () => {
+    assert.deepEqual(
+      selectOfferStarts([
+        { horaInicio: '08:00', horaFin: '08:30' },
+        { horaInicio: '08:30', horaFin: '09:00' },
+        { horaInicio: '09:00', horaFin: '09:30' },
+        { horaInicio: '09:30', horaFin: '10:00' }
+      ]),
+      ['08:00', '08:30', '09:00', '09:30']
+    );
+    assert.deepEqual(
+      selectOfferStarts([
+        { horaInicio: '08:30', horaFin: '09:00' },
+        { horaInicio: '09:00', horaFin: '09:30' },
+        { horaInicio: '09:30', horaFin: '10:00' },
+        { horaInicio: '10:00', horaFin: '10:30' },
+        { horaInicio: '10:30', horaFin: '11:00' },
+        { horaInicio: '11:00', horaFin: '11:30' },
+        { horaInicio: '11:30', horaFin: '12:00' },
+        { horaInicio: '12:00', horaFin: '12:30' }
+      ]),
+      ['08:30', '09:30', '10:30', '11:30']
+    );
+  });
+
+  it('formatSlotsForPrompt lista horas (no rangos) y limita a 2 días', () => {
     const text = formatSlotsForPrompt(
       [
         { fecha: '2026-08-08', horaInicio: '08:30', horaFin: '09:00' },
@@ -110,13 +136,20 @@ describe('agendaAvailability', () => {
         { fecha: '2026-08-08', horaInicio: '10:30', horaFin: '11:00' },
         { fecha: '2026-08-08', horaInicio: '11:00', horaFin: '11:30' },
         { fecha: '2026-08-08', horaInicio: '11:30', horaFin: '12:00' },
-        { fecha: '2026-08-08', horaInicio: '12:00', horaFin: '12:30' }
+        { fecha: '2026-08-08', horaInicio: '12:00', horaFin: '12:30' },
+        { fecha: '2026-08-09', horaInicio: '09:00', horaFin: '09:30' },
+        { fecha: '2026-08-09', horaInicio: '09:30', horaFin: '10:00' },
+        { fecha: '2026-08-10', horaInicio: '11:00', horaFin: '11:30' }
       ],
-      3
+      2
     );
-    assert.match(text, /disponible de 08:30 a 12:30/);
+    assert.match(text, /libres 08:30, 09:30, 10:30, 11:30/);
+    assert.match(text, /libres 09:00, 09:30/);
+    assert.doesNotMatch(text, /disponible de /);
+    assert.doesNotMatch(text, /11:00/);
     assert.match(text, /15 minutos/);
-    assert.doesNotMatch(text, /08:30–09:00/);
+    assert.match(text, /Tramos reales/);
+    assert.match(text, /10:30/);
   });
 
   it('filterFutureSlots quita horas ya pasadas el mismo día', () => {

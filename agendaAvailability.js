@@ -354,11 +354,73 @@ function collapseConsecutiveRanges(daySlots) {
 }
 
 /**
- * Texto breve para el prompt: rangos por día (no lista de bloques de 30 min).
- * @param {Array<object>} slots
- * @param {number} [maxDays] máx. días a mostrar
+ * Agrupa slots del día en tramos consecutivos.
+ * @param {Array<{ horaInicio: string, horaFin: string }>} daySlots
+ * @returns {Array<object[]>}
  */
-function formatSlotsForPrompt(slots, maxDays = 3) {
+function groupConsecutiveSlotRuns(daySlots) {
+  const sorted = [...(daySlots || [])].sort((a, b) =>
+    String(a.horaInicio).localeCompare(String(b.horaInicio))
+  );
+  /** @type {Array<object[]>} */
+  const runs = [];
+  /** @type {object[]} */
+  let current = [];
+  for (const s of sorted) {
+    const start = timeToMinutes(s.horaInicio);
+    if (!Number.isFinite(start)) continue;
+    if (!current.length) {
+      current = [s];
+      continue;
+    }
+    const prevEnd = timeToMinutes(current[current.length - 1].horaFin);
+    if (Number.isFinite(prevEnd) && prevEnd >= start) {
+      current.push(s);
+    } else {
+      runs.push(current);
+      current = [s];
+    }
+  }
+  if (current.length) runs.push(current);
+  return runs;
+}
+
+/**
+ * Horas de inicio a ofrecer: en tramos cortos (≤ maxDense) todas;
+ * si hay más, una cada 60 min desde la primera del tramo.
+ * @param {Array<{ horaInicio: string, horaFin: string }>} daySlots
+ * @param {number} [maxDense]
+ * @returns {string[]}
+ */
+function selectOfferStarts(daySlots, maxDense = 4) {
+  const limit = Math.max(1, Number(maxDense) || 4);
+  const starts = [];
+  for (const run of groupConsecutiveSlotRuns(daySlots)) {
+    if (run.length <= limit) {
+      for (const s of run) {
+        const t = timeToMinutes(s.horaInicio);
+        if (Number.isFinite(t)) starts.push(minutesToTime(t));
+      }
+      continue;
+    }
+    const first = timeToMinutes(run[0].horaInicio);
+    if (!Number.isFinite(first)) continue;
+    for (const s of run) {
+      const t = timeToMinutes(s.horaInicio);
+      if (!Number.isFinite(t)) continue;
+      if ((t - first) % 60 === 0) starts.push(minutesToTime(t));
+    }
+  }
+  return starts;
+}
+
+/**
+ * Texto breve para el prompt: horas sueltas (hoy/mañana), no rangos de corrido.
+ * Tramos ≤4 slots → todas las medias horas; >4 → cada hora.
+ * @param {Array<object>} slots
+ * @param {number} [maxDays] máx. días a mostrar (default 2 = hoy y mañana)
+ */
+function formatSlotsForPrompt(slots, maxDays = 2) {
   const list = Array.isArray(slots) ? slots : [];
   if (!list.length) return '';
 
@@ -380,20 +442,44 @@ function formatSlotsForPrompt(slots, maxDays = 3) {
     byFecha.get(fecha).slots.push(s);
   }
 
-  const fechas = [...byFecha.keys()].sort().slice(0, Math.max(1, Number(maxDays) || 3));
+  const fechas = [...byFecha.keys()].sort().slice(0, Math.max(1, Number(maxDays) || 2));
   const lines = [];
+  /** @type {string[]} */
+  const tramoHints = [];
+  let hasSparseSampling = false;
   for (const fecha of fechas) {
     const group = byFecha.get(fecha);
+    const offerStarts = selectOfferStarts(group.slots, 4);
+    if (!offerStarts.length) continue;
+    lines.push(`${group.dayLabel}: libres ${offerStarts.join(', ')}`);
+
     const ranges = collapseConsecutiveRanges(group.slots);
-    if (!ranges.length) continue;
-    const rangeText = ranges
-      .map((r) => `de ${r.horaInicio} a ${r.horaFin}`)
-      .join(', y ');
-    lines.push(`${group.dayLabel}: disponible ${rangeText}`);
+    const runs = groupConsecutiveSlotRuns(group.slots);
+    if (runs.some((r) => r.length > 4)) hasSparseSampling = true;
+    if (ranges.length) {
+      const rangeText = ranges
+        .map((r) => `de ${r.horaInicio} a ${r.horaFin}`)
+        .join(', y ');
+      tramoHints.push(`${group.dayLabel}: ${rangeText}`);
+    }
   }
 
   if (!lines.length) return '';
-  return `${lines.join('\n')}\n(La sesión dura 15 minutos. Pide al lead una hora de inicio dentro de esos rangos, p.ej. "a las 10". No digas que los bloques son de 30 minutos.)`;
+
+  const notes = [
+    'La sesión dura 15 minutos.',
+    'Ofrece solo las horas listadas arriba; no inventes otras.'
+  ];
+  if (hasSparseSampling && tramoHints.length) {
+    notes.push(
+      `Tramos reales (para si el lead pide algo entre dos horas): ${tramoHints.join('; ')}. ` +
+        'Si pregunta p.ej. "¿tienes entre las 10 y las 11?", sugiere la media hora libre dentro del tramo (ej. "¿te queda a las 10:30?").'
+    );
+  } else {
+    notes.push('Si el lead elige una de esas horas, confírmala.');
+  }
+
+  return `${lines.join('\n')}\n(${notes.join(' ')})`;
 }
 
 /** Cache corta para no martillar el panel en cada mensaje. */
@@ -437,6 +523,8 @@ module.exports = {
   clearSlotsCache,
   publicSlots,
   collapseConsecutiveRanges,
+  groupConsecutiveSlotRuns,
+  selectOfferStarts,
   formatSlotsForPrompt,
   filterFutureSlots,
   getMexicoNowParts

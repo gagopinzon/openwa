@@ -1475,7 +1475,7 @@ async function handleIncomingWebhook({
           }
 
           if (!replyText) {
-            agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 3);
+            agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 2);
             console.log(
               `[auto-reply] agenda ${slots.length} slot(s) → prompt (${range.fechaInicio}…${range.fechaFin})`
             );

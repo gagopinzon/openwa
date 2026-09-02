@@ -1435,7 +1435,9 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
     // Procesar cada archivo PDF
     for (let i = 0; i < req.files.length; i++) {
       const file = req.files[i];
-      console.log(`Procesando archivo ${i + 1}/${req.files.length}: ${file.originalname}`);
+      console.log(
+        `Procesando archivo ${i + 1}/${req.files.length}: ${file.originalname} (${file.buffer.length} bytes)`
+      );
 
       try {
         const saved = cvFileStore.saveCvFile(file.buffer, file.originalname);

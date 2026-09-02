@@ -568,8 +568,9 @@ async function generateReplyMessage({
 - "5 de la tarde" es 17:00; "8 de la noche" es 20:00; "9 de la mañana" es 09:00.
 - Si el lead responde "sí", "perfecto" o "está bien" a una hora que TÚ acabas de proponer, NO vuelvas a preguntar el día ni la hora.
 - Si el sistema ya envió un PDF de CV para confirmar, no vuelvas a pedir el horario; espera que diga sí o envíe otro PDF.
-- Ofrece disponibilidad como RANGOS por día solo cuando el lead NO haya dicho una hora específica.
-- La sesión es de 15 minutos. No listes todos los bloques de 30 minutos.
+- Ofrece las horas listadas en HORARIOS REALES tal cual (lista de horas libres, no rangos "de X a Y").
+- Si el lead pide algo ENTRE dos horas ofrecidas (ej. "¿tienes entre las 10 y las 11?") y en las notas hay un tramo real que lo cubre, sugiere la media hora (ej. "¿te queda a las 10:30?").
+- La sesión es de 15 minutos.
 - NUNCA inventes horas ni digas nombres de vendedores.
 - Sé breve: una sola pregunta o confirmación por mensaje; evita confirmaciones redundantes.`
     : `
