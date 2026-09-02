@@ -143,7 +143,9 @@ async function confirmPendingInPanel(pending, opts = {}) {
     throw err;
   }
   if (!cvFileStore.isPublicUrlConfigured()) {
-    const err = new Error('WEBHOOK_PUBLIC_URL no está configurada para cvUrl pública');
+    const err = new Error(
+      'CV_PUBLIC_URL o WEBHOOK_PUBLIC_URL no está configurada para cvUrl pública'
+    );
     err.status = 503;
     throw err;
   }
@@ -180,6 +182,18 @@ async function confirmPendingInPanel(pending, opts = {}) {
   const enrichedCv = panelExtras.enriched || cv;
   const { leadExtraido, analisisCV, cvAnalizadoEnMsg } = panelExtras;
   const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
+  if (!cvFileStore.isCvUrlReachableByPanel(cvUrl)) {
+    warnAgenda('agenda-confirm.cvUrlPrivada', {
+      pendingId: pending.id,
+      cvId,
+      cvUrl: redactCvUrl(cvUrl),
+      publicBase: cvFileStore.publicBaseUrl() || null,
+      hint: 'El panel está en internet y no puede GET a 172.17.0.1 / localhost.'
+    });
+    const err = new Error(cvFileStore.panelUnreachableCvUrlError(cvUrl));
+    err.status = 503;
+    throw err;
+  }
   const cvProbe = await probeCvPublicUrl(cvUrl);
   logAgenda('agenda-confirm.cvUrlProbe', {
     pendingId: pending.id,
@@ -194,7 +208,7 @@ async function confirmPendingInPanel(pending, opts = {}) {
       cvUrl: redactCvUrl(cvUrl),
       probe: cvProbe,
       hint:
-        'El panel descarga el CV desde WEBHOOK_PUBLIC_URL. Si probe falla aquí, el panel también fallará.'
+        'El panel descarga el CV desde CV_PUBLIC_URL (o WEBHOOK_PUBLIC_URL). Si probe falla aquí, el panel también fallará.'
     });
   }
 

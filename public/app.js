@@ -5340,7 +5340,7 @@ class CVAnalyzer {
         }
         if (!this.panelConfig.publicCvUrlConfigured) {
             this.setAgendarStatus(
-                'Falta WEBHOOK_PUBLIC_URL: el panel no podrá descargar el CV hasta configurarla.',
+                'Falta CV_PUBLIC_URL o WEBHOOK_PUBLIC_URL pública: el panel no podrá descargar el CV.',
                 'warning'
             );
         }

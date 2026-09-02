@@ -107,12 +107,88 @@ function signingSecret() {
   );
 }
 
+function stripTrailingSlash(url) {
+  return String(url || '').trim().replace(/\/$/, '');
+}
+
+/**
+ * Base para cvUrl que el panel descarga.
+ * CV_PUBLIC_URL (pública) gana sobre WEBHOOK_PUBLIC_URL (a menudo IP Docker).
+ */
 function publicBaseUrl() {
-  return String(process.env.WEBHOOK_PUBLIC_URL || '').trim().replace(/\/$/, '');
+  const dedicated = stripTrailingSlash(process.env.CV_PUBLIC_URL);
+  if (dedicated) return dedicated;
+  return stripTrailingSlash(process.env.WEBHOOK_PUBLIC_URL);
 }
 
 function isPublicUrlConfigured() {
   return Boolean(publicBaseUrl());
+}
+
+function parseIpv4(hostname) {
+  const m = String(hostname || '').match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  if (parts.some((n) => n > 255)) return null;
+  return parts;
+}
+
+function isPrivateIpv4(parts) {
+  const [a, b] = parts;
+  if (a === 10 || a === 127 || a === 0) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
+
+/**
+ * El panel corre en internet: no puede GET a Docker/loopback/LAN.
+ * @param {string} url
+ */
+function isCvUrlReachableByPanel(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return false;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return false;
+  if (
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host === 'host.docker.internal' ||
+    host.endsWith('.local') ||
+    host.endsWith('.localhost')
+  ) {
+    return false;
+  }
+  const ipv4 = parseIpv4(host);
+  if (ipv4 && isPrivateIpv4(ipv4)) return false;
+  return true;
+}
+
+/**
+ * @param {string} url
+ * @returns {string}
+ */
+function panelUnreachableCvUrlError(url) {
+  let host = '';
+  try {
+    host = new URL(String(url || '')).hostname;
+  } catch {
+    host = String(url || '').trim() || '(vacía)';
+  }
+  return (
+    `El panel no puede descargar el CV desde ${host} (IP/host privado). ` +
+    `Por eso responde 504. Define CV_PUBLIC_URL con una URL pública HTTPS ` +
+    `(p. ej. https://msg.protalentconnections.com). ` +
+    `WEBHOOK_PUBLIC_URL puede seguir en 172.17.0.1 para OpenWA en Docker.`
+  );
 }
 
 /**
@@ -465,6 +541,8 @@ module.exports = {
   purgeExpiredCvs,
   sanitizeCvForPersist,
   isPublicUrlConfigured,
+  isCvUrlReachableByPanel,
+  panelUnreachableCvUrlError,
   isValidPdfBuffer,
   isPanelIntegrationConfigured,
   publicBaseUrl,

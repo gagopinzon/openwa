@@ -2042,7 +2042,7 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
     if (!cvFileStore.isPublicUrlConfigured()) {
       return res.status(503).json({
         success: false,
-        error: 'WEBHOOK_PUBLIC_URL no está configurada para cvUrl pública'
+        error: 'CV_PUBLIC_URL o WEBHOOK_PUBLIC_URL no está configurada para cvUrl pública'
       });
     }
 
@@ -2080,6 +2080,12 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
       });
     }
     const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
+    if (!cvFileStore.isCvUrlReachableByPanel(cvUrl)) {
+      return res.status(503).json({
+        success: false,
+        error: cvFileStore.panelUnreachableCvUrlError(cvUrl)
+      });
+    }
     const cv = cvsData.find((c) => c.cvId === cvId) || null;
     const panelExtras = await cvAnalysisService.buildPanelAgendaExtras(cvId, {
       nombre: pending.contactName || cv?.nombre,
@@ -2297,7 +2303,7 @@ app.post('/api/panel/reuniones', async (req, res) => {
       return res.status(503).json({
         success: false,
         error:
-          'WEBHOOK_PUBLIC_URL no está configurada. El panel necesita una URL pública para descargar el CV.'
+          'CV_PUBLIC_URL o WEBHOOK_PUBLIC_URL no está configurada. El panel necesita una URL pública para descargar el CV.'
       });
     }
 
@@ -2338,6 +2344,12 @@ app.post('/api/panel/reuniones', async (req, res) => {
       return res.status(503).json({
         success: false,
         error: 'No se pudo construir cvUrl pública'
+      });
+    }
+    if (!cvFileStore.isCvUrlReachableByPanel(cvUrl)) {
+      return res.status(503).json({
+        success: false,
+        error: cvFileStore.panelUnreachableCvUrlError(cvUrl)
       });
     }
 
