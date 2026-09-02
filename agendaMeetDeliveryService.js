@@ -3,6 +3,7 @@ const agendaConfirmService = require('./agendaConfirmService');
 const sessionsStore = require('./sessionsStore');
 const { sendTextMessage } = require('./openwaClient');
 const { extractMeetUrlFromPanel, isRetryablePanelError, sleep } = require('./panelMeetUtils');
+const { buildConfirmedMeetingReply } = require('./agendaMeetMessages');
 const { logAgenda, warnAgenda } = require('./agendaDebug');
 
 const scheduled = new Map();
@@ -22,17 +23,12 @@ function maxRetryAttempts() {
  * @param {{ contactName?: string, fecha?: string, horaInicio?: string, urlReunion?: string|null, senderName?: string }} params
  */
 function buildMeetLinkMessage(pending, params = {}) {
-  const name = String(params.contactName || pending.contactName || 'contacto').split(/\s+/)[0] || 'contacto';
-  const fecha = params.fecha || pending.fecha;
-  const horaInicio = params.horaInicio || pending.horaInicio;
-  const url = params.urlReunion || pending.urlReunion;
-  if (!url) {
-    return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}. Te enviaremos la liga en un momento.`;
-  }
-  return (
-    `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}.\n` +
-    `Liga para unirte: ${url}\n\n¡Nos vemos! ☺️`
-  );
+  return buildConfirmedMeetingReply({
+    contactName: params.contactName || pending.contactName,
+    fecha: params.fecha || pending.fecha,
+    horaInicio: params.horaInicio || pending.horaInicio,
+    urlReunion: params.urlReunion || pending.urlReunion
+  });
 }
 
 /**

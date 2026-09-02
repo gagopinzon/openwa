@@ -31,7 +31,7 @@ const {
   getChatHistory,
   downloadMessageMedia
 } = require('./openwaClient');
-const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
+const { buildConfirmedMeetingReply } = require('./agendaMeetMessages');
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const processedKeys = new Map();
@@ -1706,17 +1706,6 @@ function buildConfirmFailedReply(contactName, slot, errorMessage) {
 function buildNoCvAgendaReply(contactName, senderName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   return `Gracias, ${name}. Para agendar necesito que un asesor valide tu CV primero; te contactamos enseguida. 💙`;
-}
-
-/**
- * Mensaje WhatsApp tras confirmar cita en panel.
- */
-function buildConfirmedMeetingReply({ contactName, fecha, horaInicio, urlReunion, senderName }) {
-  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
-  const ligaLine = urlReunion
-    ? `\nLiga para unirte: ${urlReunion}`
-    : '\nTe enviaremos la liga en un momento.';
-  return `Listo, ${name}. Tu sesión quedó el ${fecha} a las ${horaInicio}.${ligaLine}\n\n¡Nos vemos! ☺️`;
 }
 
 function extractWebhookId(created) {

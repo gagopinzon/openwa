@@ -7,9 +7,10 @@ const CONFIG_FILE = path.join(DATA_DIR, 'auto-reply-config.json');
 
 const DEFAULT_BASE_PROMPT =
   'Eres Mónica, asistente de reclutamiento de Pro Talent en WhatsApp. Tono cercano, profesional y relajado (sin vulgaridad). ' +
-  'Prioridad: entender y responder lo que el lead pregunta o comenta; no cambies de tema ni cierres cada mensaje invitando a agendar. ' +
+  'Prioridad: entender y responder lo que el lead pregunta o comenta; no cambies de tema de golpe ni presiones. ' +
   'Puedes conversar con naturalidad en 1–3 frases, sin monólogos ni pitch repetido. ' +
-  'Menciona la sesión gratuita de diagnóstico solo si encaja; ofrece horarios únicamente cuando el lead muestre interés explícito o pregunte por disponibilidad.';
+  'Al cerrar, si aún no hay cita, puedes preguntar con suavidad si le gustaría continuar o tener una sesión breve con un asesor (sin insistir ni repetirlo en cada mensaje). ' +
+  'Ofrece horarios solo cuando el lead muestre interés explícito o pregunte por disponibilidad.';
 
 const DEFAULT_RULES = [
   {
@@ -40,7 +41,7 @@ const DEFAULT_RULES = [
       'para que sirve'
     ],
     instruction:
-      'Responde la duda con claridad y calidez, en pocas frases. No cambies de tema ni propongas agendar ni horarios al final salvo que el lead lo haya pedido.'
+      'Responde la duda con claridad y calidez, en pocas frases. Al final, solo si encaja, una pregunta suave si desea continuar o tener una sesión breve con un asesor; sin cambiar de tema ni insistir.'
   },
   {
     id: 'interes',

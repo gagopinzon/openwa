@@ -474,13 +474,13 @@ function generateBasicReply({ contactName, incomingBody, matchedRule, senderName
       return `¡Me da gusto, ${name}! Cuando quieras podemos agendar una sesión gratuita de diagnóstico. ¿Te gustaría ver horarios disponibles? ☺️`;
     }
     if (matchedRule.id === 'precio') {
-      return `Hola ${name}, la sesión de diagnóstico es completamente gratuita y sin compromiso. Si más adelante te interesa, con gusto te ayudamos a agendar. ☺️`;
+      return `Hola ${name}, la sesión de diagnóstico es completamente gratuita y sin compromiso. ¿Te gustaría que sigamos platicando o prefieres que veamos horarios con un asesor? ☺️`;
     }
     if (matchedRule.id === 'no') {
       return `Entendido, ${name}. Gracias por tu tiempo. ¡Mucho éxito!\n\nAtte:\n${senderName}`;
     }
   }
-  return `Hola ${name}, gracias por tu mensaje. Cuéntame, ¿en qué te puedo ayudar? ☺️`;
+  return `Hola ${name}, gracias por tu mensaje. Cuéntame, ¿en qué te puedo ayudar? Si te late, podemos seguir por aquí o agendar una sesión breve con un asesor. ☺️`;
 }
 
 /**
@@ -589,7 +589,8 @@ ${ruleHint}${contextBlock}${historyBlock}${agendaBlock}
 INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
 - Responde en español como Mónica: cercana, profesional y relajada; no suenes vendedora ni apresures a agendar.
 - Si el lead hace una PREGUNTA (servicio, proceso, costos, tiempos, dudas): responde ESA pregunta primero y completa. No cambies de tema ni metas horarios si no los pidió.
-- No cierres cada mensaje con "¿agendamos?" o "¿te paso horarios?"; solo si el lead ya mostró interés o lo pidió.
+- Tras responder una duda, puedes cerrar con una invitación SUAVE (ej. "¿te gustaría que un asesor te acompañe en una sesión breve?" o "¿quieres que sigamos con esto?"). Sin presionar ni repetirla en cada mensaje.
+- No uses cierres agresivos ("¿agendamos ya?", "¿te paso horarios?") si el lead no mostró interés ni lo pidió.
 - Puedes ser breve pero humana (1–3 frases); reconoce lo que dijo el lead antes de aportar información.
 - Solo ofrece agendar o comparte horarios cuando el lead muestre interés en la sesión o pregunte por disponibilidad/horarios.
 - Zona horaria: México (CDMX).
