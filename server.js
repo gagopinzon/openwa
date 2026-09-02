@@ -2067,6 +2067,10 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
     }
     const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
     const cv = cvsData.find((c) => c.cvId === cvId) || null;
+    const panelExtras = await cvAnalysisService.buildPanelAgendaExtras(cvId, {
+      nombre: pending.contactName || cv?.nombre,
+      telefono: pending.telefono
+    });
 
     const panelData = await panelMsgClient.crearReunion({
       gerenteEmail,
@@ -2076,8 +2080,14 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
       horaFin: pending.horaFin,
       cvUrl,
       titulo: `Sesión — ${pending.contactName || cv?.nombre || 'candidato'}`,
-      leadNombre: pending.contactName || cv?.nombre,
-      leadTelefono: pending.telefono,
+      leadNombre: pending.contactName || cv?.nombre || panelExtras.leadExtraido.leadNombre,
+      leadTelefono: pending.telefono || panelExtras.leadExtraido.leadTelefono,
+      leadCorreo: panelExtras.leadExtraido.leadCorreo,
+      leadCiudad: panelExtras.leadExtraido.leadCiudad,
+      leadEstado: panelExtras.leadExtraido.leadEstado,
+      leadExtraido: panelExtras.leadExtraido,
+      analisisCV: panelExtras.analisisCV,
+      cvAnalizadoEnMsg: panelExtras.cvAnalizadoEnMsg,
       origen: 'msg_agenda_pending'
     });
 
@@ -2322,6 +2332,11 @@ app.post('/api/panel/reuniones', async (req, res) => {
       (req.user && req.user.gerenteEmail) ||
       panelMsgClient.defaultGerenteEmail();
 
+    const panelExtras = await cvAnalysisService.buildPanelAgendaExtras(cvId, {
+      nombre: leadNombre || cv?.nombre,
+      telefono: leadTelefono || cv?.telefono
+    });
+
     const data = await panelMsgClient.crearReunion({
       gerenteEmail: resolvedGerente,
       vendedorId,
@@ -2332,11 +2347,14 @@ app.post('/api/panel/reuniones', async (req, res) => {
       titulo:
         titulo ||
         `Sesión — ${leadNombre || cv?.nombre || cv?.archivoOriginal || 'candidato'}`,
-      leadCorreo,
-      leadNombre,
-      leadTelefono,
-      leadCiudad,
-      leadEstado,
+      leadCorreo: leadCorreo || panelExtras.leadExtraido.leadCorreo,
+      leadNombre: leadNombre || panelExtras.leadExtraido.leadNombre,
+      leadTelefono: leadTelefono || panelExtras.leadExtraido.leadTelefono,
+      leadCiudad: leadCiudad || panelExtras.leadExtraido.leadCiudad,
+      leadEstado: leadEstado || panelExtras.leadExtraido.leadEstado,
+      leadExtraido: panelExtras.leadExtraido,
+      analisisCV: panelExtras.analisisCV,
+      cvAnalizadoEnMsg: panelExtras.cvAnalizadoEnMsg,
       origen: 'msg'
     });
 
@@ -2351,7 +2369,7 @@ app.post('/api/panel/reuniones', async (req, res) => {
     };
     if (status === 400 && /email|correo/i.test(error.message || '')) {
       payload.hint =
-        'DeepSeek no encontró email en el CV. Reintenta enviando leadCorreo, o sube un CV con correo visible.';
+        'No se encontró email en el CV. Reintenta enviando leadCorreo, o sube un CV con correo visible.';
     }
     if (status === 409) {
       payload.hint = 'El horario ya no está disponible. Elige otro slot.';

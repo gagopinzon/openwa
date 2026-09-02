@@ -484,6 +484,31 @@ function generateBasicReply({ contactName, incomingBody, matchedRule, senderName
 }
 
 /**
+ * Formatea los últimos mensajes del chat para el prompt de auto-respuesta.
+ * @param {Array<{ body?: string, fromMe?: boolean }>} messages
+ * @param {number} [maxLines=6]
+ * @returns {string|null}
+ */
+function formatConversationHistoryForPrompt(messages, maxLines = 6) {
+  const limit = Math.min(Math.max(parseInt(maxLines, 10) || 6, 1), 12);
+  const list = (Array.isArray(messages) ? [...messages] : [])
+    .filter((m) => String((m && m.body) || '').trim())
+    .sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+  if (!list.length) return null;
+
+  const recent = list.slice(-limit);
+  const lines = recent.map((m) => {
+    const who = m.fromMe ? 'Tú' : 'Lead';
+    const body = String(m.body || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 320);
+    return `${who}: ${body}`;
+  });
+  return lines.join('\n');
+}
+
+/**
  * Genera respuesta conversacional a mensaje entrante.
  * @param {object} params
  */
@@ -494,6 +519,7 @@ async function generateReplyMessage({
   matchedRule,
   senderName,
   conversationContext,
+  conversationHistory,
   agendaContext,
   allowGreeting = true
 }) {
@@ -508,6 +534,10 @@ async function generateReplyMessage({
 
   const agendaBlock = agendaContext
     ? `\nHORARIOS REALES DISPONIBLES (sustituyen cualquier XXXX / XXXXXXX del playbook; NO inventes otros):\n${agendaContext}`
+    : '';
+
+  const historyBlock = conversationHistory
+    ? `\nHistorial reciente de la conversación (cronológico; "Tú" = mensajes que ya enviaste):\n${conversationHistory}`
     : '';
 
   const provider = getReplyProvider();
@@ -552,14 +582,15 @@ async function generateReplyMessage({
 Nombre del contacto: ${firstName}
 Mensaje que te escribió:
 "${incomingBody}"
-${ruleHint}${contextBlock}${agendaBlock}
+${ruleHint}${contextBlock}${historyBlock}${agendaBlock}
 
 INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
-- Responde en español como Mónica (si el playbook lo indica): amable, breve, persuasiva para agendar.
+- Responde en español como Mónica (si el playbook lo indica): amable, breve, un poquito coqueta, fiera y persuasiva para agendar (sin vulgaridad ni exceso de emojis).
 - Zona horaria: México (CDMX).
 - No firmes con "Atte:" ni con nombre de sesión; ya te presentaste.
 - Emojis: solo 💙 y ☺️ si el playbook los usa; no uses otros.
 - Responde al mensaje del lead; no reenvíes el pitch frío completo.
+- Si hay historial reciente: NO repitas saludos, propuestas, horarios, preguntas ni datos que ya aparecen en mensajes marcados como "Tú". Avanza la conversación con algo nuevo.
 - Usa solo el primer nombre "${firstName}" si aplica.
 - Sé breve: los leads no quieren paredes de texto; resume el playbook.
 - Ideal: un solo párrafo corto. Si necesitas 2–3 ideas, sepáralas con una línea en blanco entre párrafos (así se envían como mensajes distintos).
@@ -628,6 +659,7 @@ module.exports = {
   generatePersonalizedMessage,
   generateBulkMessages,
   generateReplyMessage,
+  formatConversationHistoryForPrompt,
   getReplyProvider,
   buildGreeting,
   buildOutboundMessageParts,

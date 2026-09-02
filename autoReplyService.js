@@ -3,7 +3,7 @@ const contactHistory = require('./contactHistoryStore');
 const autoReplyStore = require('./autoReplyStore');
 const sessionsStore = require('./sessionsStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
-const { generateReplyMessage, splitSpeechParts, getReplyProvider } = require('./aiService');
+const { generateReplyMessage, splitSpeechParts, getReplyProvider, formatConversationHistoryForPrompt } = require('./aiService');
 const ollamaService = require('./ollamaService');
 const agendaAvailability = require('./agendaAvailability');
 const agendaIntent = require('./agendaIntent');
@@ -20,12 +20,14 @@ const {
   sendTextMessage,
   sendDocumentMessage,
   sendChatState,
+  markChatRead,
   createWebhook,
   deleteWebhook,
   listWebhooks,
   getSessionStatus,
   isConnectedStatus,
   getContact,
+  getChatHistory,
   downloadMessageMedia
 } = require('./openwaClient');
 const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
@@ -51,6 +53,37 @@ function getGreetingCooldownMs() {
   );
   const h = Number.isFinite(hours) && hours >= 0 ? hours : 4;
   return h * 60 * 60 * 1000;
+}
+
+/**
+ * Cuántos mensajes recientes incluir en el prompt de auto-respuesta.
+ * Default 6. Env: AUTO_REPLY_HISTORY_LINES (0 = desactivado).
+ */
+function getReplyHistoryLines() {
+  const v = parseInt(process.env.AUTO_REPLY_HISTORY_LINES, 10);
+  if (Number.isFinite(v) && v >= 0) return Math.min(v, 12);
+  return 6;
+}
+
+/**
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {number} [maxLines]
+ * @returns {Promise<string|null>}
+ */
+async function fetchRecentConversationHistory(openwaSessionId, chatId, maxLines = getReplyHistoryLines()) {
+  const lines = Math.min(Math.max(parseInt(maxLines, 10) || 0, 0), 12);
+  if (!lines || !openwaSessionId || !chatId) return null;
+  try {
+    const messages = await getChatHistory(openwaSessionId, chatId, {
+      limit: lines + 4,
+      fresh: true
+    });
+    return formatConversationHistoryForPrompt(messages, lines);
+  } catch (err) {
+    console.warn('[auto-reply] historial conversación:', err.message);
+    return null;
+  }
 }
 
 /**
@@ -93,6 +126,25 @@ function getTypingBaseMs() {
   return Number.isFinite(v) && v >= 0 ? v : 2500;
 }
 
+/** Ms antes de marcar el chat como leído (visto). Default 4s. */
+function getSeenDelayMs() {
+  const v = parseInt(process.env.AUTO_REPLY_SEEN_DELAY_MS, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 4000;
+}
+
+/** Ms adicionales tras el "visto" antes de mostrar "escribiendo…". Default 3.5s. */
+function getTypingAfterSeenDelayMs() {
+  const v = parseInt(process.env.AUTO_REPLY_TYPING_AFTER_SEEN_MS, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 3500;
+}
+
+function jitterMs(base, spread = 0.25) {
+  const b = Math.max(0, Number(base) || 0);
+  if (b === 0) return 0;
+  const factor = 1 - spread + Math.random() * spread * 2;
+  return Math.round(b * factor);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
@@ -132,6 +184,78 @@ function splitReplyIntoMessages(text, maxParts = 5) {
 
 function interMessageGapMs() {
   return 700 + Math.floor(Math.random() * 1100); // 0.7–1.8s entre burbujas
+}
+
+/**
+ * Mantiene "escribiendo…" activo hasta stop().
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ */
+function createTypingRefresher(openwaSessionId, chatId) {
+  let stopped = false;
+  let timer = null;
+
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      await sendChatState(openwaSessionId, chatId, 'typing');
+    } catch (err) {
+      console.warn('[auto-reply] typing refresh:', err.message);
+    }
+    if (!stopped) {
+      timer = setTimeout(tick, TYPING_REFRESH_MS);
+    }
+  };
+
+  tick();
+
+  return {
+    stop() {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }
+  };
+}
+
+/**
+ * Simula lectura humana: espera → visto → espera → escribiendo…
+ * Corre en paralelo al procesamiento de la IA.
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {{ receivedAt?: number, isCancelled?: () => boolean }} [opts]
+ */
+async function runPresenceLeadIn(openwaSessionId, chatId, opts = {}) {
+  const receivedAt = opts.receivedAt || Date.now();
+  const isCancelled = () => Boolean(opts.isCancelled && opts.isCancelled());
+
+  const seenDelay = jitterMs(getSeenDelayMs());
+  if (seenDelay > 0) await sleep(seenDelay);
+  if (isCancelled()) return { typingStartedAt: Date.now(), refresher: null, cancelled: true };
+
+  try {
+    await markChatRead(openwaSessionId, chatId);
+    console.log(
+      `[auto-reply] visto ~${Math.round((Date.now() - receivedAt) / 1000)}s → ${chatId}`
+    );
+  } catch (err) {
+    console.warn('[auto-reply] mark read:', err.message);
+  }
+  if (isCancelled()) return { typingStartedAt: Date.now(), refresher: null, cancelled: true };
+
+  const afterSeen = jitterMs(getTypingAfterSeenDelayMs());
+  if (afterSeen > 0) await sleep(afterSeen);
+  if (isCancelled()) return { typingStartedAt: Date.now(), refresher: null, cancelled: true };
+
+  const typingStartedAt = Date.now();
+  const refresher = createTypingRefresher(openwaSessionId, chatId);
+  console.log(
+    `[auto-reply] escribiendo ~${Math.round((typingStartedAt - receivedAt) / 1000)}s tras mensaje → ${chatId}`
+  );
+
+  return { typingStartedAt, refresher, receivedAt };
 }
 
 /**
@@ -504,9 +628,9 @@ async function sendCvPreviewDocument({
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot?.label || (slot ? `${slot.fecha} a las ${slot.horaInicio}` : '');
   const caption =
-    `Hola ${name}, este es el CV que tenemos registrado` +
+    `${name}, te comparto el CV que tenemos en el sistema` +
     (when ? ` para tu sesión del ${when}` : '') +
-    `. ¿Es el correcto?`;
+    `. ☺️`;
 
   if (testMode) {
     console.log(`[auto-reply] test skip CV preview cvId=${cvId}`);
@@ -973,6 +1097,9 @@ async function handleIncomingWebhook({
   }
   chatLocks.set(lockKey, true);
 
+  let presenceRefresher = null;
+  let presenceCancelled = false;
+
   try {
     const matchedRule = autoReplyStore.matchRule(cfg.rules, body);
     const senderName = logicalSessionId
@@ -988,15 +1115,19 @@ async function handleIncomingWebhook({
       typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone) : null;
     const cvId = resolveUsableCvId({ leadCv, contactSession });
 
-    // Empieza "escribiendo…" mientras se arma la respuesta (más natural).
-    const typingStartedAt = Date.now();
-    if (!testMode) {
-      try {
-        await sendChatState(openwaSessionId, chatId, 'typing');
-      } catch (err) {
-        console.warn('[auto-reply] typing start:', err.message);
-      }
-    }
+    const receivedAt = Date.now();
+    let typingStartedAt = receivedAt;
+    presenceRefresher = null;
+    presenceCancelled = false;
+    const presencePromise = !testMode
+      ? runPresenceLeadIn(openwaSessionId, chatId, {
+          receivedAt,
+          isCancelled: () => presenceCancelled
+        }).then((presence) => {
+          if (presence.refresher) presenceRefresher = presence.refresher;
+          return presence;
+        })
+      : null;
 
     let replyText = null;
     let agendaPendingId = null;
@@ -1192,6 +1323,10 @@ async function handleIncomingWebhook({
 
     if (!replyText) {
       const allowGreeting = shouldAllowGreeting(contactSession?.lastAiGreetingAt);
+      const conversationHistory = await fetchRecentConversationHistory(
+        openwaSessionId,
+        chatId
+      );
       replyText = await generateReplyMessage({
         contactName: contactSession?.name || 'contacto',
         incomingBody: body,
@@ -1199,6 +1334,7 @@ async function handleIncomingWebhook({
         matchedRule,
         senderName,
         conversationContext: cvContext,
+        conversationHistory,
         agendaContext,
         allowGreeting
       });
@@ -1209,6 +1345,17 @@ async function handleIncomingWebhook({
 
     if (!replyText) {
       return { handled: false, reason: 'empty_reply' };
+    }
+
+    if (presencePromise) {
+      const presence = await presencePromise;
+      if (presence && presence.typingStartedAt) {
+        typingStartedAt = presence.typingStartedAt;
+      }
+      if (presenceRefresher) {
+        presenceRefresher.stop();
+        presenceRefresher = null;
+      }
     }
 
     const messageParts = splitReplyIntoMessages(replyText);
@@ -1276,6 +1423,8 @@ async function handleIncomingWebhook({
 
     return { handled: true, ...eventData };
   } finally {
+    presenceCancelled = true;
+    if (presenceRefresher) presenceRefresher.stop();
     chatLocks.delete(lockKey);
   }
 }
@@ -1304,8 +1453,7 @@ function buildAskCvConfirmReply(contactName, slot) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
   return (
-    `Perfecto, ${name}. Te acabo de enviar el CV que tenemos para ${when}. ` +
-    `¿Es el correcto? Responde *sí* para confirmar o envíame otro PDF si no lo es. ☺️`
+    `Perfecto, ${name}. Cuando lo revises, dime si es el tuyo para enviarte la liga de ${when}. ☺️`
   );
 }
 
@@ -1313,8 +1461,7 @@ function buildAskCvConfirmFallbackReply(contactName, slot) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
   return (
-    `Perfecto, ${name}. Para ${when}, ¿el CV que ya tenemos es el correcto? ` +
-    `Responde *sí* para confirmar o envíame tu CV en PDF si quieres usar otro. ☺️`
+    `Listo, ${name}. Para ${when}, revísalo y cuéntame si es el CV correcto. ☺️`
   );
 }
 
@@ -1322,15 +1469,14 @@ function buildAskReplaceCvReply(contactName, slot) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
   return (
-    `Entendido, ${name}. Envíame tu CV correcto en PDF por aquí para confirmar ${when}. ☺️`
+    `Sin problema, ${name}. Cuando tengas el PDF correcto, mándamelo por aquí para ${when}. ☺️`
   );
 }
 
 function buildCvConfirmReminderReply(contactName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   return (
-    `Gracias, ${name}. ¿El CV que te envié es el correcto? ` +
-    `Responde *sí* para confirmar o manda otro PDF si no lo es. ☺️`
+    `${name}, cuando tengas chance revísalo y me confirmas si es el tuyo. ☺️`
   );
 }
 

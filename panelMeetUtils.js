@@ -67,8 +67,8 @@ function isRetryablePanelError(error) {
     msg.includes('socket hang up') ||
     msg.includes('procesar el cv') ||
     msg.includes('procesando el cv') ||
-    msg.includes('análisis deepseek') ||
-    msg.includes('analisis deepseek') ||
+    msg.includes('análisis') ||
+    msg.includes('analisis') ||
     msg.includes('descarga del cv') ||
     msg.includes('descargar el cv')
   );

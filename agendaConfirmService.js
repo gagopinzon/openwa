@@ -138,30 +138,34 @@ async function confirmPendingInPanel(pending, opts = {}) {
   }
 
   const cv = resolveCvEntry(cvId);
-  const enrichedCv =
-    (await cvAnalysisService.ensureCvAnalyzed(cvId, {
-      nombre: pending.contactName || cv?.nombre,
-      telefono: pending.telefono || cv?.telefono
-    })) ||
-    cv;
+  const panelExtras = await cvAnalysisService.buildPanelAgendaExtras(cvId, {
+    nombre: pending.contactName || cv?.nombre,
+    telefono: pending.telefono || cv?.telefono
+  });
+  const enrichedCv = panelExtras.enriched || cv;
+  const { leadExtraido, analisisCV, cvAnalizadoEnMsg } = panelExtras;
   const cvUrl = cvFileStore.buildCvPublicUrl(cvId);
   const leadNombre =
-    pending.contactName || enrichedCv?.nombre || undefined;
-  const leadTelefono = resolveLeadTelefono(pending.telefono) || enrichedCv?.telefono || undefined;
-  const leadCorreo =
-    (enrichedCv && enrichedCv.leadCorreo) ||
-    (enrichedCv && enrichedCv.correo) ||
-    (enrichedCv && enrichedCv.email) ||
+    pending.contactName || enrichedCv?.nombre || leadExtraido.leadNombre || undefined;
+  const leadTelefono =
+    resolveLeadTelefono(pending.telefono) ||
+    enrichedCv?.telefono ||
+    leadExtraido.leadTelefono ||
     undefined;
-  const leadExtraido = {
-    leadNombre: leadNombre || undefined,
-    leadCorreo: leadCorreo && String(leadCorreo).includes('@') ? leadCorreo : undefined,
-    leadTelefono:
-      leadTelefono && leadTelefono !== 'No encontrado' ? leadTelefono : undefined,
-    leadCiudad: enrichedCv?.leadCiudad || enrichedCv?.ciudad || undefined,
-    leadEstado: enrichedCv?.leadEstado || enrichedCv?.estado || undefined,
-    experiencia: enrichedCv?.experiencia || undefined
-  };
+  const leadCorreo =
+    leadExtraido.leadCorreo ||
+    enrichedCv?.leadCorreo ||
+    enrichedCv?.correo ||
+    enrichedCv?.email ||
+    undefined;
+
+  if (!leadExtraido.leadCorreo) {
+    const err = new Error(
+      'No se encontró email en el CV. Pide al lead un CV con correo visible o que lo indique.'
+    );
+    err.status = 400;
+    throw err;
+  }
 
   let lastError = null;
   let panelData = null;
@@ -191,6 +195,8 @@ async function confirmPendingInPanel(pending, opts = {}) {
         leadCiudad: enrichedCv?.leadCiudad || enrichedCv?.ciudad || undefined,
         leadEstado: enrichedCv?.leadEstado || enrichedCv?.estado || undefined,
         leadExtraido,
+        analisisCV,
+        cvAnalizadoEnMsg,
         origen: 'msg_auto_agenda'
       });
       usedVendor = { ...vendor, gerenteEmail };

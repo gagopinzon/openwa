@@ -6262,7 +6262,7 @@ class CVAnalyzer {
 
         try {
             const cvId = await this.ensureAgendarCvId();
-            this.setAgendarStatus('Creando reunión (el panel analiza el CV con DeepSeek)…', 'info');
+            this.setAgendarStatus('Creando reunión (CV analizado con Ollama en Msg)…', 'info');
             this.disponibilidadCacheAt = 0;
 
             const response = await fetch('/api/panel/reuniones', {

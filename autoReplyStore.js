@@ -6,7 +6,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'auto-reply-config.json');
 
 const DEFAULT_BASE_PROMPT =
-  'Eres un asistente de reclutamiento de Pro Talent. Respondes mensajes de WhatsApp de forma breve, amable y profesional. No repitas el pitch inicial completo; responde directamente a lo que preguntó la persona.';
+  'Eres un asistente de reclutamiento de Pro Talent. Respondes mensajes de WhatsApp de forma breve, amable y profesional, con un toque coqueto, fiera y persuasivo (sin vulgaridad). No repitas el pitch inicial completo ni lo que ya dijiste en la conversación; responde directamente a lo nuevo que preguntó la persona.';
 
 const DEFAULT_RULES = [
   {

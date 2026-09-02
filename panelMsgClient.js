@@ -100,6 +100,8 @@ async function getDisponibilidad(opts = {}) {
  *   leadCiudad?: string,
  *   leadEstado?: string,
  *   leadExtraido?: object,
+ *   analisisCV?: object,
+ *   cvAnalizadoEnMsg?: boolean,
  *   origen?: string
  * }} body
  */
@@ -124,6 +126,12 @@ async function crearReunion(body = {}) {
   if (body.leadEstado) payload.leadEstado = body.leadEstado;
   if (body.leadExtraido && typeof body.leadExtraido === 'object') {
     payload.leadExtraido = body.leadExtraido;
+  }
+  if (body.analisisCV && typeof body.analisisCV === 'object') {
+    payload.analisisCV = body.analisisCV;
+  }
+  if (body.cvAnalizadoEnMsg === true) {
+    payload.cvAnalizadoEnMsg = true;
   }
   if (body.origen) payload.origen = body.origen;
 

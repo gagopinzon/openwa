@@ -219,11 +219,89 @@ async function ensureCvAnalyzed(cvId, opts = {}) {
   return cvFileStore.updateCvEntry(id, patch) || { ...existing, ...patch, cvId: id };
 }
 
+/**
+ * Estructura de analisisCV que el panel acepta cuando Msg ya analizó con Ollama.
+ * @param {object} lead
+ */
+function buildPanelAnalisisCv(lead = {}) {
+  const nombre = String(lead.nombre || lead.leadNombre || '').trim();
+  const email = String(
+    lead.leadCorreo || lead.correo || lead.email || ''
+  ).trim();
+  const telefono = String(lead.telefono || lead.leadTelefono || '').trim();
+  const ciudad = String(lead.leadCiudad || lead.ciudad || '').trim();
+  const estado = String(lead.leadEstado || lead.estado || '').trim();
+  const experiencia = String(lead.experiencia || '').trim();
+  const puestoPrincipal = experiencia
+    ? experiencia.split(/\s+/).slice(0, 5).join(' ')
+    : 'Candidato';
+
+  return {
+    contacto: {
+      nombre,
+      email,
+      telefono
+    },
+    localidad: {
+      ciudad,
+      estado
+    },
+    puesto: [puestoPrincipal, 'Profesional', 'Especialista', 'Consultor'],
+    ultimaExperiencia: experiencia ? experiencia.slice(0, 280) : '',
+    evaluaciones: {
+      estructura: { puntuacion: 7, explicacion: 'Análisis preliminar Msg/Ollama' },
+      perfil: { puntuacion: 7, explicacion: 'Análisis preliminar Msg/Ollama' },
+      experiencia: { puntuacion: 7, explicacion: 'Análisis preliminar Msg/Ollama' },
+      visibilidad: { puntuacion: 7, explicacion: 'Análisis preliminar Msg/Ollama' },
+      empleabilidad: { puntuacion: 7, explicacion: 'Análisis preliminar Msg/Ollama' }
+    },
+    recomendaciones: [],
+    origenAnalisis: lead.analysisProvider || getProvider(),
+    textoExtraido: String(lead.textoCompleto || '').slice(0, 12000)
+  };
+}
+
+/**
+ * @param {object} lead
+ */
+function buildPanelLeadExtraido(lead = {}) {
+  const leadCorreo = String(
+    lead.leadCorreo || lead.correo || lead.email || ''
+  ).trim();
+  const leadTelefono = String(lead.telefono || lead.leadTelefono || '').trim();
+  return {
+    leadNombre: String(lead.nombre || lead.leadNombre || '').trim() || undefined,
+    leadCorreo: leadCorreo.includes('@') ? leadCorreo : undefined,
+    leadTelefono:
+      leadTelefono && leadTelefono !== 'No encontrado' ? leadTelefono : undefined,
+    leadCiudad: String(lead.leadCiudad || lead.ciudad || '').trim() || undefined,
+    leadEstado: String(lead.leadEstado || lead.estado || '').trim() || undefined,
+    experiencia: String(lead.experiencia || '').trim() || undefined
+  };
+}
+
+/**
+ * @param {string} cvId
+ * @param {{ nombre?: string, telefono?: string }} [opts]
+ */
+async function buildPanelAgendaExtras(cvId, opts = {}) {
+  const enriched =
+    (await ensureCvAnalyzed(cvId, { ...opts, force: true })) || null;
+  const leadExtraido = buildPanelLeadExtraido(enriched || {});
+  const analisisCV = buildPanelAnalisisCv(enriched || {});
+  const cvAnalizadoEnMsg =
+    Boolean(leadExtraido.leadCorreo) && getProvider() === 'ollama';
+  return { enriched, leadExtraido, analisisCV, cvAnalizadoEnMsg };
+}
+
 module.exports = {
   getProvider,
   analyzeCvText,
   analyzeCvBuffer,
   ensureCvAnalyzed,
+  buildPanelAnalisisCv,
+  buildPanelLeadExtraido,
+  buildPanelAgendaExtras,
   extractLooseSignalsFromPdfBuffer,
   parseJsonObject
 };
