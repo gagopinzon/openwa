@@ -47,6 +47,7 @@ function rememberOffer(phone, slots, ttlMs = DEFAULT_TTL_MS) {
   store.byPhone[key] = {
     slots: Array.isArray(slots) ? slots : [],
     proposedTimes: [],
+    proposedSlot: null,
     createdAt: new Date().toISOString(),
     expiresAt
   };
@@ -68,6 +69,31 @@ function rememberProposedTimes(phone, times) {
   entry.proposedTimes = (Array.isArray(times) ? times : [])
     .map((t) => String(t || '').trim())
     .filter((t) => /^\d{2}:\d{2}$/.test(t));
+  writeStore(store);
+  return entry;
+}
+
+/**
+ * Slot que el bot acaba de confirmar ("Perfecto, te agendo a las 17:00 hoy, ¿te queda?").
+ * El "sí" posterior debe usar este slot, no otro del mismo horario en otro día.
+ * @param {string} phone
+ * @param {object} slot
+ */
+function rememberProposedSlot(phone, slot) {
+  const key = phoneKey(phone);
+  if (!key || !slot) return null;
+  const store = readStore();
+  const entry = store.byPhone[key];
+  if (!entry) return null;
+  const hora = String(slot.horaInicio || '').trim();
+  entry.proposedSlot = {
+    fecha: slot.fecha,
+    horaInicio: slot.horaInicio,
+    horaFin: slot.horaFin,
+    label: slot.label || null,
+    candidates: slot.candidates
+  };
+  entry.proposedTimes = /^\d{2}:\d{2}$/.test(hora) ? [hora] : [];
   writeStore(store);
   return entry;
 }
@@ -103,6 +129,7 @@ function clearOffer(phone) {
 module.exports = {
   rememberOffer,
   rememberProposedTimes,
+  rememberProposedSlot,
   getOffer,
   clearOffer,
   phoneKey

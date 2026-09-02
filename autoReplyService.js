@@ -7,6 +7,7 @@ const { generateReplyMessage, splitSpeechParts, getReplyProvider, formatConversa
 const ollamaService = require('./ollamaService');
 const agendaAvailability = require('./agendaAvailability');
 const agendaIntent = require('./agendaIntent');
+const agendaPreferredTime = require('./agendaPreferredTime');
 const agendaOfferStore = require('./agendaOfferStore');
 const agendaPendingStore = require('./agendaPendingStore');
 const agendaAwaitingCvStore = require('./agendaAwaitingCvStore');
@@ -684,6 +685,39 @@ async function sendCvPreviewDocument({
     console.warn('[auto-reply] CV preview send:', error.message);
     return { sent: false, reason: error.message };
   }
+}
+
+function applyPreferredTimeDecision(decision, { today, normalizedPhone }) {
+  if (decision.action === 'confirm' && decision.slot) {
+    agendaOfferStore.rememberProposedSlot(normalizedPhone, decision.slot);
+    return {
+      replyText: agendaPreferredTime.formatConfirmReply(decision.slot, today),
+      agendaMeta: {
+        reason: 'slot_confirm_pending',
+        slot: decision.slot.label || decision.slot.horaInicio
+      },
+      agendaContext: null
+    };
+  }
+  if (decision.action === 'nearest') {
+    return {
+      replyText: agendaPreferredTime.formatNearestReply(
+        decision.nearby,
+        decision.preferredTime,
+        today
+      ),
+      agendaMeta: {
+        reason: 'slots_nearest',
+        preferredTime: decision.preferredTime
+      },
+      agendaContext: null
+    };
+  }
+  return {
+    replyText: null,
+    agendaMeta: { reason: 'ask_preferred_time' },
+    agendaContext: agendaPreferredTime.ASK_PREFERRED_CONTEXT
+  };
 }
 
 async function processChosenSlot({
@@ -1366,14 +1400,10 @@ async function handleIncomingWebhook({
     };
 
     if (!replyText && priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
-      const chosen = agendaIntent.matchSlotFromMessage(
-        body,
-        priorOffer.slots,
-        slotMatchOpts
-      );
-      if (chosen) {
+      const confirmingYes = agendaIntent.looksLikeTimeConfirmYes(body);
+      if (confirmingYes && priorOffer.proposedSlot && priorOffer.proposedSlot.horaInicio) {
         const booked = await processChosenSlot({
-          chosen,
+          chosen: priorOffer.proposedSlot,
           cvId,
           normalizedPhone,
           contactName: contactSession?.name || contactName,
@@ -1388,6 +1418,40 @@ async function handleIncomingWebhook({
         replyText = booked.replyText;
         agendaMeta = booked.agendaMeta;
         agendaPendingId = booked.agendaPendingId;
+      } else {
+        const chosen = agendaIntent.matchSlotFromMessage(
+          body,
+          priorOffer.slots,
+          slotMatchOpts
+        );
+        if (chosen) {
+          if (confirmingYes) {
+            const booked = await processChosenSlot({
+              chosen,
+              cvId,
+              normalizedPhone,
+              contactName: contactSession?.name || contactName,
+              identity,
+              chatId,
+              logicalSessionId,
+              openwaSessionId,
+              broadcastEvent,
+              testMode,
+              userWillSendCv: agendaIntent.userMentionsSendingCv(body)
+            });
+            replyText = booked.replyText;
+            agendaMeta = booked.agendaMeta;
+            agendaPendingId = booked.agendaPendingId;
+          } else {
+            const today = agendaIntent.todayYmd();
+            const applied = applyPreferredTimeDecision(
+              { action: 'confirm', slot: chosen },
+              { today, normalizedPhone }
+            );
+            replyText = applied.replyText;
+            agendaMeta = applied.agendaMeta;
+          }
+        }
       }
     }
 
@@ -1406,10 +1470,11 @@ async function handleIncomingWebhook({
     if (!replyText && agendaIntent.shouldOfferSlots(body) && !skipReslotOnYes) {
       try {
         const today = agendaIntent.todayYmd();
+        const tomorrow = agendaIntent.addDaysYmd(today, 1);
         const range =
           agendaIntent.resolveDateRangeFromMessage(body) || {
             fechaInicio: today,
-            fechaFin: agendaIntent.addDaysYmd(today, 6)
+            fechaFin: tomorrow
           };
         let aggregated = await agendaAvailability.getAggregatedSlotsCached({
           fechaInicio: range.fechaInicio,
@@ -1443,46 +1508,26 @@ async function handleIncomingWebhook({
         if (slots.length) {
           agendaOfferStore.rememberOffer(normalizedPhone, slots);
 
-          // Lead ya dijo día+hora en el mismo mensaje → agendar sin pasar por IA
-          if (agendaIntent.hasExplicitTimeChoice(body)) {
-            const chosenInline = agendaIntent.matchSlotFromMessage(
-              body,
-              slots,
-              slotMatchOpts
-            );
-            if (chosenInline) {
-              const booked = await processChosenSlot({
-                chosen: chosenInline,
-                cvId,
-                normalizedPhone,
-                contactName: contactSession?.name || contactName,
-                identity,
-                chatId,
-                logicalSessionId,
-                openwaSessionId,
-                broadcastEvent,
-                testMode,
-                userWillSendCv: agendaIntent.userMentionsSendingCv(body)
-              });
-              if (booked.replyText) {
-                replyText = booked.replyText;
-                agendaMeta = booked.agendaMeta;
-                agendaPendingId = booked.agendaPendingId;
-              } else if (booked.agendaMeta?.reason === 'slot_taken_reoffer') {
-                agendaMeta = booked.agendaMeta;
-              }
-            }
-          }
-
-          if (!replyText) {
-            agendaContext = agendaAvailability.formatSlotsForPrompt(slots, 2);
+          const decision = agendaPreferredTime.resolvePreferredTimeOffer(body, slots, {
+            today,
+            tomorrow
+          });
+          const applied = applyPreferredTimeDecision(decision, {
+            today,
+            normalizedPhone
+          });
+          if (applied.replyText) {
+            replyText = applied.replyText;
+            agendaMeta = { ...agendaMeta, ...applied.agendaMeta };
             console.log(
-              `[auto-reply] agenda ${slots.length} slot(s) → prompt (${range.fechaInicio}…${range.fechaFin})`
+              `[auto-reply] agenda ${decision.action} (${range.fechaInicio}…${range.fechaFin})`
             );
-            const firstFecha = slots[0] && slots[0].fecha;
-            if (firstFecha && firstFecha > today) {
-              agendaContext = `Hoy (${today}) ya no hay horarios disponibles. Ofrece a partir de estos días:\n${agendaContext}`;
-            }
+          } else {
+            agendaContext = applied.agendaContext;
+            agendaMeta = { ...agendaMeta, ...applied.agendaMeta };
+            console.log(
+              `[auto-reply] agenda pregunta hora preferida (${range.fechaInicio}…${range.fechaFin})`
+            );
           }
         } else {
           const errMsg =

@@ -468,6 +468,9 @@ function generateBasicReply({ contactName, incomingBody, matchedRule, senderName
   const name = extractFirstName(contactName);
   if (matchedRule) {
     if (matchedRule.id === 'interes') {
+      if (agendaContext && String(agendaContext).startsWith('PREGUNTA_HORA:')) {
+        return `¡Qué bien, ${name}! ¿Qué horario te acomoda mejor?`;
+      }
       if (agendaContext) {
         return `¡Qué bien, ${name}! Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál te acomoda mejor? ☺️`;
       }
@@ -548,6 +551,9 @@ async function generateReplyMessage({
     if (agendaContext) {
       const name = extractFirstName(contactName);
       const hi = allowGreeting ? `Hola ${name}, ` : '';
+      if (String(agendaContext).startsWith('PREGUNTA_HORA:')) {
+        return `${hi}¿Qué horario te acomoda mejor?`;
+      }
       return `${hi}te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál de estos horarios te acomoda mejor? ☺️`;
     }
     return generateBasicReply({
@@ -562,11 +568,16 @@ async function generateReplyMessage({
   const firstName = extractFirstName(contactName);
 
   const agendaInstructions = agendaContext
-    ? `
+    ? String(agendaContext).startsWith('PREGUNTA_HORA:')
+      ? `
+- PRIORIDAD MÁXIMA: el lead quiere agendar pero AÚN NO dijo una hora.
+- NO listes horarios, tramos, ni ejemplos de horas libres.
+- Pregunta UNA sola cosa: qué horario le acomoda mejor (hoy o mañana).
+- No inventes horas. Sé breve.`
+      : `
 - PRIORIDAD MÁXIMA: los HORARIOS REALES de arriba sustituyen cualquier XXXX / ejemplo del playbook.
-- Si el lead YA dijo día y hora concretos en su mensaje (ej. "miércoles a las 18:00" o "el jueves a las 5 de la tarde"), NO vuelvas a preguntar si le queda bien esa hora; confirma el paso siguiente (CV o liga).
-- "5 de la tarde" es 17:00; "8 de la noche" es 20:00; "9 de la mañana" es 09:00.
 - Si el lead responde "sí", "perfecto" o "está bien" a una hora que TÚ acabas de proponer, NO vuelvas a preguntar el día ni la hora.
+- "5 de la tarde" es 17:00; "8 de la noche" es 20:00; "9 de la mañana" es 09:00. "A las 5" (sin am/pm) es 17:00.
 - Si el sistema ya envió un PDF de CV para confirmar, no vuelvas a pedir el horario; espera que diga sí o envíe otro PDF.
 - Ofrece las horas listadas en HORARIOS REALES tal cual (lista de horas libres, no rangos "de X a Y").
 - Si el lead pide algo ENTRE dos horas ofrecidas (ej. "¿tienes entre las 10 y las 11?") y en las notas hay un tramo real que lo cubre, sugiere la media hora (ej. "¿te queda a las 10:30?").
