@@ -69,7 +69,15 @@ describe('agendaIntent', () => {
 
   it('detecta si el lead dice que enviará CV', () => {
     assert.equal(userMentionsSendingCv('ahorita te comparto mi cv ok'), true);
+    assert.equal(userMentionsSendingCv('te mando mi cv'), true);
+    assert.equal(userMentionsSendingCv('voy a enviar el curriculum'), true);
     assert.equal(userMentionsSendingCv('quiero agendar'), false);
+  });
+
+  it('no trata como envío nuevo el CV que ya cargamos', () => {
+    assert.equal(userMentionsSendingCv('ya tienen mi cv'), false);
+    assert.equal(userMentionsSendingCv('agendemos con el cv que les mandé'), false);
+    assert.equal(userMentionsSendingCv('el cv ya lo tienen ustedes'), false);
   });
 
   it('interpreta 5 de la tarde como 17:00, no 05:00', () => {

@@ -408,11 +408,27 @@ function matchIndexChoice(text, list) {
 }
 
 /**
+ * El lead dice que VA a mandar un PDF ahora, no que ya lo tenemos.
  * @param {string} text
  */
 function userMentionsSendingCv(text) {
   const raw = foldAgendaText(text);
-  return /\b(cv|curriculum|curriculo|hoja\s+de\s+vida)\b/.test(raw);
+  if (!/\b(cv|curriculum|curriculo|hoja\s+de\s+vida)\b/.test(raw)) return false;
+  if (
+    /\bya\s+(lo\s+)?(tienen|esta|quedo|queda)\b/.test(raw) ||
+    /\bel\s+cv\s+que\s+(les\s+)?(mande|envie|cargue)\b/.test(raw)
+  ) {
+    return false;
+  }
+  return (
+    /\b(te\s+(mando|envio|enviare|paso|comparto)|voy\s+a\s+(mandar|enviar|pasar|compartir)|ahi\s+te\s+(va|mando|envio)|te\s+lo\s+(mando|envio|paso)|te\s+(adjunto|anexo))\b/.test(
+      raw
+    ) ||
+    /\b(ahorita|al\s+rato|en\s+un\s+momento)\b/.test(raw) ||
+    /\b(mando|envio|enviare|paso|comparto|adjunto)\s+(mi|el|otro)\s+(cv|curriculum|curriculo|hoja\s+de\s+vida)\b/.test(
+      raw
+    )
+  );
 }
 
 /**

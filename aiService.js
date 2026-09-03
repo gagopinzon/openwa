@@ -487,6 +487,35 @@ function generateBasicReply({ contactName, incomingBody, matchedRule, senderName
 }
 
 /**
+ * Contexto de CV para el prompt: deja explícito que el PDF ya está en el sistema.
+ * @param {{ nombre?: string, experiencia?: string }|null} cv
+ */
+function formatStoredCvContext(cv) {
+  if (!cv || typeof cv !== 'object') return null;
+  const name = String(cv.nombre || '').trim();
+  const exp = String(cv.experiencia || '').trim().slice(0, 500);
+  const hasFile = Boolean(String(cv.cvId || '').trim());
+  if (!name && !exp && !hasFile) return null;
+  const lines = [];
+  if (name) lines.push(`Nombre: ${name}`);
+  if (exp) lines.push(`Experiencia: ${exp}`);
+  lines.push(
+    'El PDF de este candidato YA está cargado en el sistema (Cargar CVs). NO pidas el CV ni un currículum.'
+  );
+  return lines.join('\n');
+}
+
+/**
+ * @param {boolean} hasStoredCv
+ */
+function replyCvPolicyInstructions(hasStoredCv) {
+  if (hasStoredCv) {
+    return '- El PDF del CV YA está en el sistema. NUNCA pidas CV, currículum, PDF ni hoja de vida.';
+  }
+  return '- NUNCA pidas el CV, currículum, PDF ni hoja de vida. Si hace falta, otro flujo del sistema lo solicita después de confirmar horario.';
+}
+
+/**
  * Formatea los últimos mensajes del chat para el prompt de auto-respuesta.
  * @param {Array<{ body?: string, fromMe?: boolean }>} messages
  * @param {number} [maxLines=6]
@@ -534,6 +563,8 @@ async function generateReplyMessage({
   const contextBlock = conversationContext
     ? `\nContexto del candidato (CV):\n${conversationContext}`
     : '';
+  const hasStoredCv = Boolean(String(conversationContext || '').trim());
+  const cvPolicy = replyCvPolicyInstructions(hasStoredCv);
 
   const agendaBlock = agendaContext
     ? `\nHORARIOS REALES DISPONIBLES (sustituyen cualquier XXXX / XXXXXXX del playbook; NO inventes otros):\n${agendaContext}`
@@ -613,6 +644,7 @@ INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
 - Usa solo el primer nombre "${firstName}" si aplica.
 - Sé breve: los leads no quieren paredes de texto; resume el playbook.
 - Ideal: un solo párrafo corto. Si necesitas 2–3 ideas, sepáralas con una línea en blanco entre párrafos (así se envían como mensajes distintos).
+${cvPolicy}
 ${greetingInstructions}
 ${agendaInstructions}
 
@@ -622,7 +654,7 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
     try {
       const message = await ollamaService.chatReply(prompt, {
         basePrompt: basePrompt || undefined,
-        systemExtra: agendaInstructions
+        systemExtra: `${cvPolicy}\n${agendaInstructions}`
       });
       return cleanReplyText(message);
     } catch (error) {
@@ -684,5 +716,7 @@ module.exports = {
   buildOutboundMessageParts,
   splitSpeechParts,
   extractFirstName,
-  parseSaludoAndMessage
+  parseSaludoAndMessage,
+  formatStoredCvContext,
+  replyCvPolicyInstructions
 };

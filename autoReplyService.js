@@ -1218,12 +1218,13 @@ async function handleIncomingWebhook({
       : 'Pro Talent';
 
     let cvContext = null;
+    const cvHints = { cvId: contactSession && contactSession.cvId };
     if (getCvContext) {
-      cvContext = getCvContext(normalizedPhone);
+      cvContext = getCvContext(normalizedPhone, cvHints);
     }
 
     const leadCv =
-      typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone) : null;
+      typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone, cvHints) : null;
     const cvId = resolveUsableCvId({ leadCv, contactSession });
 
     const receivedAt = Date.now();

@@ -8,7 +8,7 @@ require('dotenv').config();
 const cvFileStore = require('./cvFileStore');
 const cvAnalysisService = require('./cvAnalysisService');
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
-const { generateBulkMessages, buildOutboundMessageParts } = require('./aiService');
+const { generateBulkMessages, buildOutboundMessageParts, formatStoredCvContext } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
 const { sendRoundRobinBulk, ROUND_ROBIN_CONTROL_ID } = WhatsAppService;
 const { previewDistribution, buildQueuesFromCounts } = require('./sessionDistribution');
@@ -3692,15 +3692,13 @@ app.get('/sending-status-all', (req, res) => {
 
 // --- Auto-respuesta IA (webhooks OpenWA) ---
 
-function getCvContextForPhone(phone) {
-  const cv = findCvForPhone(phone);
-  if (!cv) return null;
-  const exp = String(cv.experiencia || '').slice(0, 500);
-  return `Nombre: ${cv.nombre}\nExperiencia: ${exp}`;
+function getCvContextForPhone(phone, hints = {}) {
+  const cv = findCvForPhone(phone, hints);
+  return formatStoredCvContext(cv);
 }
 
-function getLeadCvForPhone(phone) {
-  return findCvForPhone(phone) || null;
+function getLeadCvForPhone(phone, hints = {}) {
+  return findCvForPhone(phone, hints) || null;
 }
 
 function userHasAnyControl(req) {

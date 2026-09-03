@@ -134,7 +134,9 @@ async function runAndroidSendJob({
       sessionId: job.meta?.logicalSessionId || device?.logicalSessionId || job.deviceId,
       error: job.error || null,
       channel: 'android',
-      jobId: job.id
+      jobId: job.id,
+      cvId: job.meta?.cvId || null,
+      archivoOriginal: job.meta?.archivoOriginal || null
     };
     if (job.status === 'sent') {
       contactHistory.rememberSuccessfulSend(job.telefono);
