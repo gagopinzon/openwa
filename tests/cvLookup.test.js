@@ -6,7 +6,8 @@ const cvFileStore = require('../cvFileStore');
 const {
   resolveUsableCvId,
   lookupCvIdFromArchive,
-  syncClientCvEditsIntoArchive
+  syncClientCvEditsIntoArchive,
+  bindProspectCvLink
 } = require('../cvLookup');
 
 const PDF_MIN = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n');
@@ -159,5 +160,62 @@ describe('cvLookup', () => {
     assert.equal(synced[0].nombre, 'María');
     assert.equal(synced[0].mensajeIA, 'hola nuevo');
     assert.equal(synced[0].saludo, '¡Hola!');
+  });
+
+  it('bindProspectCvLink fija teléfono↔cvId aunque la mesa se archive', () => {
+    const saved = cvFileStore.saveCvFile(PDF_MIN, 'bind-test.pdf');
+    createdIds.push(saved.cvId);
+    const archive = [
+      {
+        nombre: 'Bind Test',
+        telefono: 'No encontrado',
+        experiencia: 'QA',
+        archivoOriginal: 'bind-test.pdf',
+        cvId: saved.cvId,
+        cvFileName: saved.cvFileName,
+        procesado: true,
+        inWorkspace: true,
+        savedAt: new Date().toISOString()
+      }
+    ];
+
+    const bound = bindProspectCvLink(archive, {
+      phone: '5215553332211',
+      cvId: saved.cvId,
+      name: 'Bind Test'
+    });
+    assert.equal(bound.ok, true);
+    assert.equal(bound.reason, 'bound');
+    assert.equal(bound.cvs[0].telefono, '5215553332211');
+
+    const archived = bound.cvs.map((c) => ({ ...c, inWorkspace: false }));
+    cvFileStore.saveCvsManifest(archived);
+
+    assert.equal(lookupCvIdFromArchive('5553332211'), saved.cvId);
+    assert.equal(
+      resolveUsableCvId({
+        leadCv: null,
+        contactSession: null,
+        phone: '5215553332211'
+      }),
+      saved.cvId
+    );
+  });
+
+  it('bindProspectCvLink sin cvId no toca el archivo', () => {
+    const archive = [{ cvId: 'abc123abc123abc1', telefono: '5550001111', procesado: true }];
+    const bound = bindProspectCvLink(archive, { phone: '5550001111', cvId: null });
+    assert.equal(bound.ok, false);
+    assert.equal(bound.reason, 'no_cvId');
+    assert.equal(bound.cvs[0].telefono, '5550001111');
+  });
+
+  it('bindProspectCvLink con PDF ausente falla missing_pdf', () => {
+    const bound = bindProspectCvLink([], {
+      phone: '5550002222',
+      cvId: 'deadbeefdeadbeefdeadbeef'
+    });
+    assert.equal(bound.ok, false);
+    assert.equal(bound.reason, 'missing_pdf');
   });
 });

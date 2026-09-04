@@ -99,6 +99,58 @@ function resolveUsableCvId({ leadCv, contactSession, phone, name } = {}) {
   return null;
 }
 
+function isUsableProspectPhone(phone) {
+  const raw = String(phone || '').trim();
+  if (!raw || raw === 'No encontrado' || raw === 'N/A') return false;
+  if (raw.startsWith('lid_')) return false;
+  const digits = contactHistory.normalizePhone(raw);
+  return digits.length >= 10;
+}
+
+/**
+ * Tras un envío OK: fija teléfono → cvId en el archivo permanente (mesa puede vaciarse).
+ * No persiste a disco; el caller debe saveCvsManifest / persistCvsData.
+ * @param {Array} archive
+ * @param {{ phone?: string, cvId?: string|null, name?: string, archivoOriginal?: string|null }} link
+ * @returns {{ ok: boolean, reason: string, cvId?: string, cvs: Array }}
+ */
+function bindProspectCvLink(archive, { phone, cvId, name, archivoOriginal } = {}) {
+  const list = Array.isArray(archive)
+    ? archive.map((c) => (c && typeof c === 'object' ? { ...c } : c))
+    : [];
+  const id = String(cvId || '').trim();
+  if (!id) return { ok: false, reason: 'no_cvId', cvs: list };
+  if (!isUsableProspectPhone(phone)) {
+    return { ok: false, reason: 'skipped_bad_phone', cvs: list };
+  }
+  if (!cvFileStore.getCvFileMeta(id)) {
+    return { ok: false, reason: 'missing_pdf', cvs: list };
+  }
+
+  const phoneStr = String(phone).trim();
+  const trimmedName = name != null ? String(name).trim() : '';
+  const idx = list.findIndex((c) => c && c.cvId === id);
+
+  if (idx < 0) {
+    list.push({
+      cvId: id,
+      telefono: phoneStr,
+      nombre: trimmedName || 'Sin nombre',
+      archivoOriginal: archivoOriginal || null,
+      procesado: true,
+      inWorkspace: false,
+      savedAt: new Date().toISOString()
+    });
+  } else {
+    const next = { ...list[idx], telefono: phoneStr, procesado: list[idx].procesado !== false };
+    if (trimmedName) next.nombre = trimmedName;
+    if (archivoOriginal) next.archivoOriginal = String(archivoOriginal);
+    list[idx] = next;
+  }
+
+  return { ok: true, reason: 'bound', cvId: id, cvs: list };
+}
+
 /**
  * Al enviar, el cliente puede traer teléfono/nombre editados: hay que
  * reflejarlos en el archivo permanente (relación teléfono ↔ cvId).
@@ -134,5 +186,7 @@ function syncClientCvEditsIntoArchive(archive, editedCvs) {
 module.exports = {
   lookupCvIdFromArchive,
   resolveUsableCvId,
-  syncClientCvEditsIntoArchive
+  syncClientCvEditsIntoArchive,
+  bindProspectCvLink,
+  isUsableProspectPhone
 };

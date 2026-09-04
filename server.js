@@ -6,7 +6,11 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const cvFileStore = require('./cvFileStore');
-const { syncClientCvEditsIntoArchive, lookupCvIdFromArchive } = require('./cvLookup');
+const {
+  syncClientCvEditsIntoArchive,
+  lookupCvIdFromArchive,
+  bindProspectCvLink
+} = require('./cvLookup');
 const cvAnalysisService = require('./cvAnalysisService');
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages, buildOutboundMessageParts, formatStoredCvContext } = require('./aiService');
@@ -781,30 +785,50 @@ function getConfiguredSessionIds() {
 const TEST_MODE = process.env.TEST_MODE === 'true';
 
 function createMongoRecordHook() {
-  return !TEST_MODE && contactHistory.mongoUriConfigured()
-    ? (row) => {
-        if (!row.success) return;
-        const logicalSessionId = row.sessionId || null;
-        let openwaSessionId = null;
-        if (logicalSessionId) {
-          try {
-            openwaSessionId = sessionsStore.resolveOpenWASessionId(logicalSessionId);
-          } catch {
-            openwaSessionId = null;
-          }
-        }
-        contactHistory
-          .recordSuccessfulContact({
-            normalizedPhone: contactHistory.normalizePhone(row.telefono),
-            name: row.nombre,
-            logicalSessionId,
-            openwaSessionId,
-            cvId: row.cvId || null,
-            archivoOriginal: row.archivoOriginal || null
-          })
-          .catch((err) => console.error('contactHistory:', err.message));
+  return (row) => {
+    if (!row || !row.success) return;
+
+    // Disco siempre: teléfono → cvId sobrevive a mesa vacía / días después.
+    const bound = bindProspectCvLink(cvsData, {
+      phone: row.telefono,
+      cvId: row.cvId,
+      name: row.nombre,
+      archivoOriginal: row.archivoOriginal
+    });
+    if (bound.ok) {
+      cvsData = bound.cvs;
+      persistCvsData();
+      console.log(
+        `[prospect-cv-link] bound phone=${row.telefono} cvId=${row.cvId}`
+      );
+    } else {
+      console.warn(
+        `[prospect-cv-link] ${bound.reason} phone=${row.telefono || '?'} cvId=${row.cvId || 'null'}`
+      );
+    }
+
+    if (TEST_MODE || !contactHistory.mongoUriConfigured()) return;
+
+    const logicalSessionId = row.sessionId || null;
+    let openwaSessionId = null;
+    if (logicalSessionId) {
+      try {
+        openwaSessionId = sessionsStore.resolveOpenWASessionId(logicalSessionId);
+      } catch {
+        openwaSessionId = null;
       }
-    : null;
+    }
+    contactHistory
+      .recordSuccessfulContact({
+        normalizedPhone: contactHistory.normalizePhone(row.telefono),
+        name: row.nombre,
+        logicalSessionId,
+        openwaSessionId,
+        cvId: row.cvId || null,
+        archivoOriginal: row.archivoOriginal || null
+      })
+      .catch((err) => console.error('contactHistory:', err.message));
+  };
 }
 
 function markSendQueueJobFinished() {
