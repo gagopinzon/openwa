@@ -19,6 +19,7 @@
 require('dotenv').config();
 
 const { MongoClient } = require('mongodb');
+const { resolveAiContactName } = require('./preferredContactName');
 
 const COLLECTION = 'contact_history';
 
@@ -299,8 +300,9 @@ async function recordSuccessfulContact({
   }
   if (!coll) return;
 
-  const displayName =
-    name != null && String(name).trim() !== '' ? name : '(sin nombre)';
+  const trimmedName =
+    name != null && String(name).trim() !== '' ? String(name).trim() : '';
+  const displayName = trimmedName || '(sin nombre)';
   const now = new Date();
   const sessionFields = {};
   if (logicalSessionId) sessionFields.logicalSessionId = String(logicalSessionId);
@@ -310,6 +312,8 @@ async function recordSuccessfulContact({
   sessionFields.lastAiGreetingAt = now;
   if (cvId) sessionFields.cvId = String(cvId);
   if (archivoOriginal) sessionFields.archivoOriginal = String(archivoOriginal);
+  // Nombre del CV/pitch: fuente de verdad para la IA (no pisar con pushName).
+  if (trimmedName) sessionFields.preferredName = trimmedName;
 
   try {
     await coll.updateOne(
@@ -450,7 +454,6 @@ async function enrollInboundContact({
     name != null && String(name).trim() !== '' ? String(name).trim() : '(sin nombre)';
   const now = new Date();
   const $set = {
-    name: displayName,
     source: String(source),
     lastInboundAt: now
   };
@@ -458,6 +461,14 @@ async function enrollInboundContact({
   if (openwaSessionId) $set.openwaSessionId = String(openwaSessionId);
   if (chatId) $set.chatId = String(chatId);
   if (whatsappLid) $set.whatsappLid = String(whatsappLid).replace(/\D/g, '');
+
+  // No pisar preferredName ni name de outreach con pushName de WhatsApp.
+  const existing = await getContactByPhone(normalizedPhone);
+  if (!existing) {
+    $set.name = displayName;
+  } else if (!existing.preferredName && (!existing.name || existing.name === '(sin nombre)')) {
+    $set.name = displayName;
+  }
 
   await coll.updateOne(
     { normalizedPhone },
@@ -486,7 +497,11 @@ async function getContactSession(normalizedPhone) {
     logicalSessionId: doc.logicalSessionId || null,
     openwaSessionId: doc.openwaSessionId || null,
     name: doc.name || null,
+    preferredName: doc.preferredName || null,
     cvId: doc.cvId || null,
+    lastOutboundAt: doc.lastOutboundAt
+      ? new Date(doc.lastOutboundAt).toISOString()
+      : null,
     aiPaused: Boolean(doc.aiPaused),
     aiPausedAt: doc.aiPausedAt || null,
     lastAiGreetingAt: doc.lastAiGreetingAt
@@ -575,7 +590,13 @@ async function setContactAiPaused(normalizedPhone, paused, meta = {}) {
   const aiPaused = Boolean(paused);
   const now = new Date();
   const $set = { aiPaused };
-  if (meta.name) $set.name = String(meta.name).trim();
+  // No guardar pushName de WhatsApp sobre el nombre del pitch/CV.
+  if (meta.name) {
+    const existing = await getContactByPhone(normalizedPhone);
+    if (!existing?.preferredName) {
+      $set.name = String(meta.name).trim();
+    }
+  }
   if (meta.logicalSessionId) $set.logicalSessionId = String(meta.logicalSessionId);
   if (meta.openwaSessionId) $set.openwaSessionId = String(meta.openwaSessionId);
   if (meta.chatId) $set.chatId = String(meta.chatId);
@@ -632,7 +653,13 @@ async function linkCvToContact(normalizedPhone, { cvId, archivoOriginal, name } 
 
   const $set = { cvId: id };
   if (archivoOriginal) $set.archivoOriginal = String(archivoOriginal);
-  if (name) $set.name = String(name);
+  if (name) {
+    const trimmed = String(name).trim();
+    if (trimmed) {
+      $set.name = trimmed;
+      $set.preferredName = trimmed;
+    }
+  }
 
   let targetKey = key;
   if (!key.startsWith('lid_')) {
@@ -670,5 +697,6 @@ module.exports = {
   touchLastAiGreeting,
   setContactAiPaused,
   isContactAiPaused,
-  linkCvToContact
+  linkCvToContact,
+  resolveAiContactName
 };

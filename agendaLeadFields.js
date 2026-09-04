@@ -1,6 +1,7 @@
 const cvFileStore = require('./cvFileStore');
 const cvAnalysisService = require('./cvAnalysisService');
 const { parseJsonObject } = require('./cvAnalysisService');
+const { preferredFirstName } = require('./preferredContactName');
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
@@ -279,7 +280,7 @@ function applyLeadFieldsToCv(cvId, parsed = {}) {
  * @param {string[]} missingFields
  */
 function buildAskMissingLeadFieldsReply(contactName, missingFields = []) {
-  const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  const name = preferredFirstName(contactName);
   const missing = Array.isArray(missingFields) ? missingFields : [];
   const parts = [];
 
@@ -295,8 +296,14 @@ function buildAskMissingLeadFieldsReply(contactName, missingFields = []) {
   }
 
   const ask = parts.length ? parts.join(' También ') : '¿me compartes los datos que faltan de tu CV?';
+  if (name) {
+    return (
+      `${name}, para completar tu registro antes de la sesión, ${ask} ` +
+      `(por ejemplo: Guadalajara, Jalisco). ☺️`
+    );
+  }
   return (
-    `${name}, para completar tu registro antes de la sesión, ${ask} ` +
+    `Para completar tu registro antes de la sesión, ${ask} ` +
     `(por ejemplo: Guadalajara, Jalisco). ☺️`
   );
 }

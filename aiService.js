@@ -2,6 +2,7 @@ const axios = require('axios');
 require('dotenv').config();
 const { SENDER_PLACEHOLDER } = require('./messageSignature');
 const ollamaService = require('./ollamaService');
+const { preferredFirstName, phraseWithName } = require('./preferredContactName');
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const API_KEY = process.env.DEEPSEEK_API_KEY;
@@ -465,25 +466,27 @@ async function generateBulkMessages(cvs, onProgress = null) {
 }
 
 function generateBasicReply({ contactName, incomingBody, matchedRule, senderName, agendaContext }) {
-  const name = extractFirstName(contactName);
+  const name = preferredFirstName(contactName);
+  const hi = name ? `Hola ${name}` : 'Hola';
+  const withName = (lead) => (name ? `${lead}, ${name}` : lead);
   if (matchedRule) {
     if (matchedRule.id === 'interes') {
       if (agendaContext && String(agendaContext).startsWith('PREGUNTA_HORA:')) {
-        return `¡Qué bien, ${name}! ¿Qué horario te acomoda mejor?`;
+        return `¡${withName('Qué bien')}! ¿Qué horario te acomoda mejor?`;
       }
       if (agendaContext) {
-        return `¡Qué bien, ${name}! Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál te acomoda mejor? ☺️`;
+        return `¡${withName('Qué bien')}! Te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál te acomoda mejor? ☺️`;
       }
-      return `¡Me da gusto, ${name}! Cuando quieras podemos agendar una sesión gratuita de diagnóstico. ¿Te gustaría ver horarios disponibles? ☺️`;
+      return `¡Me da gusto${name ? `, ${name}` : ''}! Cuando quieras podemos agendar una sesión gratuita de diagnóstico. ¿Te gustaría ver horarios disponibles? ☺️`;
     }
     if (matchedRule.id === 'precio') {
-      return `Hola ${name}, la sesión de diagnóstico es completamente gratuita y sin compromiso. ¿Te gustaría que sigamos platicando o prefieres que veamos horarios con un asesor? ☺️`;
+      return `${hi}, la sesión de diagnóstico es completamente gratuita y sin compromiso. ¿Te gustaría que sigamos platicando o prefieres que veamos horarios con un asesor? ☺️`;
     }
     if (matchedRule.id === 'no') {
-      return `Entendido, ${name}. Gracias por tu tiempo. ¡Mucho éxito!\n\nAtte:\n${senderName}`;
+      return `Entendido${name ? `, ${name}` : ''}. Gracias por tu tiempo. ¡Mucho éxito!\n\nAtte:\n${senderName}`;
     }
   }
-  return `Hola ${name}, gracias por tu mensaje. Cuéntame, ¿en qué te puedo ayudar? Si te late, podemos seguir por aquí o agendar una sesión breve con un asesor. ☺️`;
+  return `${hi}, gracias por tu mensaje. Cuéntame, ¿en qué te puedo ayudar? Si te late, podemos seguir por aquí o agendar una sesión breve con un asesor. ☺️`;
 }
 
 /**
@@ -666,7 +669,10 @@ async function generateReplyMessage({
   const canUseDeepSeek = provider === 'deepseek' && hasDeepSeekKey();
   const canUseOllama = provider === 'ollama' && ollamaService.isConfigured();
 
-  const firstName = extractFirstName(contactName);
+  const firstName = preferredFirstName(contactName);
+  const nameInstruction = firstName
+    ? `- Usa solo el primer nombre "${firstName}" si aplica.`
+    : `- NO uses nombre de WhatsApp ni inventes un nombre; habla de forma genérica (sin "Hola [nombre]").`;
 
   function sanitizeAgainstCvAsk(raw) {
     const base = cleanReplyText(raw);
@@ -683,15 +689,14 @@ async function generateReplyMessage({
       String(raw).slice(0, 200)
     );
     if (hasStoredCv) {
-      return `Perfecto, ${firstName}. Ya tenemos tu CV en el sistema. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
+      return `${phraseWithName('Perfecto', firstName)}. Ya tenemos tu CV en el sistema. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
     }
-    return `Perfecto, ${firstName}. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
+    return `${phraseWithName('Perfecto', firstName)}. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
   }
 
   if (!canUseDeepSeek && !canUseOllama) {
     if (agendaContext) {
-      const name = extractFirstName(contactName);
-      const hi = allowGreeting ? `Hola ${name}, ` : '';
+      const hi = allowGreeting ? (firstName ? `Hola ${firstName}, ` : 'Hola, ') : '';
       if (String(agendaContext).startsWith('PREGUNTA_HORA:')) {
         return `${hi}¿Qué horario te acomoda mejor?`;
       }
@@ -736,7 +741,7 @@ async function generateReplyMessage({
 
 ${basePrompt || 'Eres un asistente de Pro Talent.'}
 
-Nombre del contacto: ${firstName}
+${firstName ? `Nombre del contacto: ${firstName}` : 'Nombre del contacto: (desconocido — no uses nick de WhatsApp ni inventes nombre)'}
 Mensaje que te escribió:
 "${incomingBody}"
 ${ruleHint}${contextBlock}${historyBlock}${agendaBlock}
@@ -754,7 +759,7 @@ ${cvPolicy}
 - Emojis: solo 💙 y ☺️ si el playbook los usa; no uses otros.
 - Responde al mensaje del lead; no reenvíes el pitch frío completo.
 - Si hay historial reciente: NO repitas saludos, propuestas, horarios, preguntas ni datos que ya aparecen en mensajes marcados como "Tú". Avanza la conversación con algo nuevo.
-- Usa solo el primer nombre "${firstName}" si aplica.
+${nameInstruction}
 - Sé breve: los leads no quieren paredes de texto; resume el playbook.
 - Ideal: un solo párrafo corto. Si necesitas 2–3 ideas, sepáralas con una línea en blanco entre párrafos (así se envían como mensajes distintos).
 ${cvPolicy}

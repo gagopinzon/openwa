@@ -1,9 +1,11 @@
+const { preferredFirstName, phraseWithName } = require('./preferredContactName');
+
 /**
  * Mensajes de confirmación y entrega de liga Meet (WhatsApp).
  * @param {string} contactName
  */
 function meetingFirstName(contactName) {
-  return String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
+  return preferredFirstName(contactName);
 }
 
 /**
@@ -25,10 +27,11 @@ function buildConfirmedMeetingReply(params = {}) {
   const name = meetingFirstName(params.contactName);
   const when = formatMeetingWhen(params);
   const url = String(params.urlReunion || '').trim();
+  const lead = phraseWithName('Listo', name);
 
   if (!url) {
     return (
-      `Listo, ${name}. Tu sesión con uno de nuestros asesores quedó para ${when}. ` +
+      `${lead}. Tu sesión con uno de nuestros asesores quedó para ${when}. ` +
       `En un momento te envío la liga por aquí.\n\n` +
       `Cuando la recibas, te sugiero conectarte unos 5 minutos antes para revisar audio y video sin prisa. ` +
       `Será un espacio cercano: siéntete en confianza para preguntar todo lo que necesites sobre tu carrera. ☺️`
@@ -36,7 +39,7 @@ function buildConfirmedMeetingReply(params = {}) {
   }
 
   return (
-    `Listo, ${name}. Tu sesión con uno de nuestros asesores quedó para ${when}.\n` +
+    `${lead}. Tu sesión con uno de nuestros asesores quedó para ${when}.\n` +
     `Liga para unirte: ${url}\n\n` +
     `Te recomiendo conectarte unos 5 minutos antes para revisar audio y video sin prisa. ` +
     `Es un espacio tranquilo: siéntete en total confianza para preguntar lo que necesites; estamos para ayudarte.\n\n` +
