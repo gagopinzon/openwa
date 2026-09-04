@@ -34,6 +34,7 @@ const {
 } = require('./openwaClient');
 const { buildConfirmedMeetingReply } = require('./agendaMeetMessages');
 const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
+const messageBatcher = require('./messageBatcher');
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const processedKeys = new Map();
@@ -1240,15 +1241,124 @@ async function handleIncomingWebhook({
   }
 
   const lockKey = `${openwaSessionId}:${chatId}`;
+  const batchItem = {
+    msg,
+    body,
+    incomingDocument,
+    openwaSessionId,
+    chatId,
+    normalizedPhone,
+    contactName,
+    identity,
+    logicalSessionId,
+    waMessageId,
+    getCvContext,
+    getLeadCv,
+    broadcastEvent,
+    testMode: Boolean(testMode)
+  };
+
+  const queued = await messageBatcher.enqueue({
+    key: lockKey,
+    item: batchItem,
+    onFlush: processBatchedAutoReply,
+    immediate: Boolean(incomingDocument),
+    skipDelay: Boolean(testMode) || skipAutoReplyDelays()
+  });
+
+  if (queued.flushed) {
+    return queued.result || { handled: false, reason: 'batch_empty' };
+  }
+
+  return {
+    handled: false,
+    reason: 'batch_pending',
+    batchCount: queued.count,
+    delayMs: queued.delayMs,
+    telefono: normalizedPhone,
+    openwaSessionId,
+    sessionId: logicalSessionId
+  };
+}
+
+/**
+ * Actualiza la bandeja local para todos los mensajes del lote tras responder.
+ * @param {object[]} items
+ * @param {object|null} result
+ */
+function markBatchInbox(items, result) {
+  if (!Array.isArray(items) || !items.length || !result) return;
+  const handled = Boolean(result.handled);
+  const reason = handled ? 'replied' : result.reason || null;
+  const replyMessage = result.replyMessage || null;
+  const listed = incomingMessagesStore.list({ limit: incomingMessagesStore.MAX_MESSAGES });
+
+  for (const item of items) {
+    const mid = incomingMessagesStore.normalizeMessageId(item.waMessageId);
+    const sid = item.openwaSessionId || null;
+    if (!mid || !sid) continue;
+    const found = listed.find(
+      (m) =>
+        incomingMessagesStore.normalizeMessageId(m.messageId) === mid &&
+        m.openwaSessionId === sid
+    );
+    if (!found) continue;
+    incomingMessagesStore.update(found.id, {
+      autoReplyHandled: handled,
+      autoReplyReason: reason,
+      replyMessage
+    });
+  }
+}
+
+/**
+ * Procesa un lote de mensajes del mismo chat (texto combinado → una respuesta).
+ * @param {object[]} items
+ */
+async function processBatchedAutoReply(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return { handled: false, reason: 'batch_empty' };
+  }
+
+  const last = items[items.length - 1];
+  const docItem = items.find((i) => i.incomingDocument) || null;
+  const primary = docItem || last;
+  const body =
+    messageBatcher.combineBatchBodies(items) || String(primary.body || '').trim();
+  const incomingDocument = Boolean(docItem);
+  const msg = primary.msg;
+  const openwaSessionId = primary.openwaSessionId;
+  const chatId = primary.chatId;
+  const identity = primary.identity;
+  const normalizedPhone = primary.normalizedPhone;
+  const contactName = primary.contactName;
+  const logicalSessionId = primary.logicalSessionId;
+  const broadcastEvent = primary.broadcastEvent;
+  const getCvContext = primary.getCvContext;
+  const getLeadCv = primary.getLeadCv;
+  const testMode = Boolean(primary.testMode);
+  const lockKey = `${openwaSessionId}:${chatId}`;
+  const cfg = autoReplyStore.getConfig();
+
   if (chatLocks.has(lockKey)) {
-    return { handled: false, reason: 'chat_busy' };
+    messageBatcher.requeue(lockKey, items, processBatchedAutoReply, undefined, {
+      front: true
+    });
+    return { handled: false, reason: 'chat_busy_requeued' };
   }
   chatLocks.set(lockKey, true);
 
   let presenceRefresher = null;
   let presenceCancelled = false;
+  let turnResult = { handled: false, reason: 'unknown' };
 
   try {
+    let contactSession = await contactHistory.getContactSession(normalizedPhone);
+    if (contactSession && contactSession.aiPaused) {
+      turnResult = { handled: false, reason: 'ai_paused_for_contact' };
+      return turnResult;
+    }
+
     const matchedRule = autoReplyStore.matchRule(cfg.rules, body);
     const senderName = logicalSessionId
       ? sessionsStore.getSessionSenderName(logicalSessionId)
@@ -1264,7 +1374,7 @@ async function handleIncomingWebhook({
       typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone, cvHints) : null;
     const cvId = resolveUsableCvId({ leadCv, contactSession, phone: normalizedPhone });
     console.log(
-      `[auto-reply] cv lookup phone=${normalizedPhone} sessionCvId=${
+      `[auto-reply] batch=${items.length} cv lookup phone=${normalizedPhone} sessionCvId=${
         (contactSession && contactSession.cvId) || 'null'
       } leadCvId=${(leadCv && leadCv.cvId) || 'null'} usable=${cvId || 'null'} ` +
         `hasCvContext=${cvContext ? 'yes' : 'no'}`
@@ -1651,7 +1761,8 @@ async function handleIncomingWebhook({
     }
 
     if (!replyText) {
-      return { handled: false, reason: 'empty_reply' };
+      turnResult = { handled: false, reason: 'empty_reply' };
+      return turnResult;
     }
 
     if (presencePromise) {
@@ -1664,7 +1775,8 @@ async function handleIncomingWebhook({
 
     const messageParts = splitReplyIntoMessages(replyText);
     if (!messageParts.length) {
-      return { handled: false, reason: 'empty_reply' };
+      turnResult = { handled: false, reason: 'empty_reply' };
+      return turnResult;
     }
 
     const messageIds = [];
@@ -1712,6 +1824,7 @@ async function handleIncomingWebhook({
       typingMs: totalTypingMs,
       agendaPendingId,
       agendaMeta,
+      batchSize: items.length,
       timestamp: new Date().toISOString()
     };
 
@@ -1720,14 +1833,16 @@ async function handleIncomingWebhook({
     }
 
     console.log(
-      `Auto-reply ${testMode ? '(test) ' : ''}→ ${normalizedPhone} vía ${openwaSessionId}`
+      `Auto-reply ${testMode ? '(test) ' : ''}batch=${items.length} → ${normalizedPhone} vía ${openwaSessionId}`
     );
 
-    return { handled: true, ...eventData };
+    turnResult = { handled: true, ...eventData };
+    return turnResult;
   } finally {
     presenceCancelled = true;
     if (presenceRefresher) presenceRefresher.stop();
     chatLocks.delete(lockKey);
+    markBatchInbox(items, turnResult);
   }
 }
 

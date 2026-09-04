@@ -1478,6 +1478,8 @@ class CVAnalyzer {
             is_group: 'grupo',
             duplicate: 'duplicado',
             chat_busy: 'chat ocupado',
+            batch_pending: 'esperando más mensajes',
+            chat_busy_requeued: 'reencolado (chat ocupado)',
             mongodb_not_configured: 'sin MongoDB'
         };
         const reasonText =
