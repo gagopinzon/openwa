@@ -2,6 +2,7 @@ const assert = require('assert');
 const {
   enqueue,
   requeue,
+  cancelKey,
   combineBatchBodies,
   getFirstDelayMs,
   getNextDelayMs,
@@ -150,6 +151,35 @@ async function run() {
       // Actually: requeue adds old, then enqueue adds new and skipDelay flushes both.
       assert.ok(order.length >= 1);
       assert.ok(order[0].includes('old') && order[0].includes('new'));
+    }
+  );
+
+  resetForTests();
+
+  await withEnv(
+    {
+      AUTO_REPLY_SKIP_DELAYS: 'false',
+      AUTO_REPLY_BATCH_FIRST_MS: '5000',
+      AUTO_REPLY_BATCH_NEXT_MS: '5000'
+    },
+    async () => {
+      const flushed = [];
+      const onFlush = async (items) => {
+        flushed.push(items.map((i) => i.body));
+        return { handled: true };
+      };
+
+      await enqueue({
+        key: 's1:chat-cancel',
+        item: { body: 'pendiente' },
+        onFlush
+      });
+      assert.equal(pendingCount('s1:chat-cancel'), 1);
+      const discarded = cancelKey('s1:chat-cancel');
+      assert.equal(discarded, 1);
+      assert.equal(pendingCount('s1:chat-cancel'), 0);
+      await sleep(60);
+      assert.deepEqual(flushed, []);
     }
   );
 

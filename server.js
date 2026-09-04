@@ -6,6 +6,7 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const cvFileStore = require('./cvFileStore');
+const { syncClientCvEditsIntoArchive } = require('./cvLookup');
 const cvAnalysisService = require('./cvAnalysisService');
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages, buildOutboundMessageParts, formatStoredCvContext } = require('./aiService');
@@ -253,12 +254,21 @@ function liveArchiveCvs() {
  * @param {{ cvId?: string|null }} [hints]
  */
 function findCvForPhone(phone, hints = {}) {
-  const reusable = cvFileStore.loadCvsManifest().filter(
+  // Preferir memoria (teléfonos editados recién sincronizados) y caer a disco.
+  const fromMemory = (Array.isArray(cvsData) ? cvsData : []).filter(
     (c) => c && c.procesado && c.cvId
   );
+  const fromDisk = (cvFileStore.loadCvsManifest() || []).filter(
+    (c) => c && c.procesado && c.cvId
+  );
+  const byId = new Map();
+  for (const c of fromDisk) byId.set(c.cvId, c);
+  for (const c of fromMemory) byId.set(c.cvId, c);
+  const reusable = [...byId.values()];
+
   if (hints.cvId) {
-    const byId = reusable.find((c) => c.cvId === hints.cvId);
-    if (byId) return byId;
+    const hit = reusable.find((c) => c.cvId === hints.cvId);
+    if (hit) return hit;
     const meta = cvFileStore.getCvFileMeta(hints.cvId);
     if (meta) {
       return {
@@ -816,15 +826,8 @@ async function prepareCvsForSend(cvsFromClient) {
   if (cvsFromClient && Array.isArray(cvsFromClient)) {
     console.log('📝 Recibiendo CVs editados del cliente...');
     cvsToProcess = cvsFromClient;
-    cvsToProcess.forEach((editedCv) => {
-      const index = cvsData.findIndex(
-        (cv) => cv.archivoOriginal === editedCv.archivoOriginal
-      );
-      if (index !== -1) {
-        if (editedCv.saludo != null) cvsData[index].saludo = editedCv.saludo;
-        cvsData[index].mensajeIA = editedCv.mensajeIA;
-      }
-    });
+    // Persistir teléfono/nombre editados: la IA busca CV por esta relación.
+    cvsData = syncClientCvEditsIntoArchive(cvsData, cvsFromClient);
     persistCvsData();
   }
 
@@ -4456,6 +4459,10 @@ app.post('/api/conversations/reply', async (req, res) => {
     const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
     const willPause = Boolean(phone && contactHistory.mongoUriConfigured());
 
+    if (willPause) {
+      autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId);
+    }
+
     res.json({
       success: true,
       sessionId: session.id,
@@ -4625,6 +4632,11 @@ app.post('/api/conversations/ai-control', async (req, res) => {
       return res.status(400).json({ success: false, error: result.error || 'No se pudo actualizar' });
     }
 
+    let cancelInfo = null;
+    if (result.aiPaused) {
+      cancelInfo = autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId);
+    }
+
     broadcastEvent('aiControlChanged', {
       sessionId: session.id,
       chatId,
@@ -4639,11 +4651,86 @@ app.post('/api/conversations/ai-control', async (req, res) => {
       sessionId: session.id,
       chatId,
       telefono: phone,
-      aiPaused: result.aiPaused
+      aiPaused: result.aiPaused,
+      cancelInfo
     });
   } catch (error) {
     console.error('[conversations] ai-control error:', error.message);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/ai-reply', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+
+    if (!forbidUnlessControlSessions([session.id], req, res)) {
+      return;
+    }
+
+    const chatId = String(req.body.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    if (chatId.endsWith('@g.us')) {
+      return res.status(400).json({
+        success: false,
+        error: 'La IA no se aplica a grupos'
+      });
+    }
+
+    console.log(
+      `[conversations] ai-reply sesión=${session.id} chat=${chatId}`
+    );
+
+    const result = await autoReplyService.triggerManualReply({
+      openwaSessionId: session.openwaSessionId,
+      chatId,
+      broadcastEvent,
+      getCvContext: getCvContextForPhone,
+      getLeadCv: getLeadCvForPhone,
+      testMode: Boolean(TEST_MODE),
+      forceIgnorePause: true
+    });
+
+    if (result?.handled) {
+      invalidateOpenWACache({
+        openwaSessionId: session.openwaSessionId,
+        chatId
+      });
+    }
+
+    const reasonLabels = {
+      auto_reply_disabled: 'La auto-respuesta IA está apagada globalmente',
+      session_ai_disabled: 'La IA está apagada en esta línea',
+      no_pending_inbound: 'No hay mensajes pendientes del contacto para contestar',
+      mongodb_not_configured: 'MongoDB no está configurado',
+      is_group: 'No aplica a grupos',
+      chat_busy: 'Ya hay una respuesta de la IA en curso; inténtalo de nuevo',
+      history_error: 'No se pudo leer el historial del chat',
+      unknown_contact: 'Contacto desconocido',
+      cancelled_by_pause: 'Se canceló porque la IA se pausó',
+      empty_reply: 'La IA no generó texto de respuesta'
+    };
+
+    res.json({
+      success: Boolean(result?.handled),
+      sessionId: session.id,
+      chatId,
+      result,
+      message: result?.handled
+        ? 'La IA respondió'
+        : reasonLabels[result?.reason] || result?.reason || 'No se pudo responder'
+    });
+  } catch (error) {
+    console.error('[conversations] ai-reply error:', error.message);
+    res.status(openwaHttpStatus(error)).json({ success: false, error: error.message });
   }
 });
 
@@ -4919,6 +5006,7 @@ app.post('/api/conversations/delete-chat', async (req, res) => {
       // Evita que la IA siga contestando tras limpiar el hilo
       if (contactHistory.mongoUriConfigured() && req.body.pauseAi !== false) {
         try {
+          autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId);
           const pauseResult = await contactHistory.setContactAiPaused(phone, true);
           if (pauseResult.ok) aiPaused = true;
         } catch (err) {

@@ -1130,7 +1130,9 @@ class CVAnalyzer {
         this.conversationsBlockBtn = document.getElementById('conversationsBlockBtn');
         this.conversationsDeleteChatBtn = document.getElementById('conversationsDeleteChatBtn');
         this.conversationsAiPauseBtn = document.getElementById('conversationsAiPauseBtn');
+        this.conversationsAiReplyBtn = document.getElementById('conversationsAiReplyBtn');
         this.conversationsAgendarBtn = document.getElementById('conversationsAgendarBtn');
+        this._conversationsAiReplyInFlight = false;
         this.conversationsChats = [];
         this.activeConversation = null;
         this.activeConversationBlocked = false;
@@ -1254,6 +1256,9 @@ class CVAnalyzer {
         }
         if (this.conversationsAiPauseBtn) {
             this.conversationsAiPauseBtn.addEventListener('click', () => this.toggleAiPauseActiveConversation());
+        }
+        if (this.conversationsAiReplyBtn) {
+            this.conversationsAiReplyBtn.addEventListener('click', () => this.triggerAiReplyActiveConversation());
         }
         if (this.conversationsAgendarBtn) {
             this.conversationsAgendarBtn.addEventListener('click', () => this.openAgendarFromConversation());
@@ -2457,7 +2462,14 @@ class CVAnalyzer {
             this.conversationsAiPauseBtn.style.display = isGroup ? 'none' : '';
             this.conversationsAiPauseBtn.title = paused
                 ? 'Volver a dejar que la IA responda a este remitente'
-                : 'Detener la IA en este chat para contestar tú';
+                : 'Detener la IA en este chat para contestar tú (cancela mensajes en cola)';
+        }
+        if (this.conversationsAiReplyBtn) {
+            this.conversationsAiReplyBtn.style.display = isGroup ? 'none' : '';
+            this.conversationsAiReplyBtn.disabled =
+                !canControl || isGroup || this._conversationsAiReplyInFlight;
+            this.conversationsAiReplyBtn.title =
+                'Hace que la IA conteste ahora los mensajes pendientes de este chat (aunque esté pausada)';
         }
         if (this.conversationsAgendarBtn) {
             this.conversationsAgendarBtn.disabled = !canControl || isGroup;
@@ -2550,12 +2562,62 @@ class CVAnalyzer {
             this.updateActiveConversationHeaderBadges();
             this.showStatus(
                 willPause
-                    ? `IA pausada para ${label}. Puedes contestar tú.`
+                    ? `IA pausada para ${label}. Se canceló cualquier respuesta en cola.`
                     : `IA reactivada para ${label}`,
                 'success'
             );
         } catch (error) {
             this.showStatus(`Error: ${error.message}`, 'error');
+        }
+    }
+
+    async triggerAiReplyActiveConversation() {
+        const active = this.activeConversation;
+        if (!active) return;
+        if (!this.canControlSession(active.sessionId)) {
+            this.showStatus('No tienes permiso de control en esta sesión', 'error');
+            return;
+        }
+        if (active.isGroup || String(active.chatId || '').endsWith('@g.us')) {
+            this.showStatus('La IA no se aplica a grupos', 'error');
+            return;
+        }
+        if (this._conversationsAiReplyInFlight) return;
+
+        const label = active.name || active.chatId;
+        this._conversationsAiReplyInFlight = true;
+        this.updateConversationThreadActions();
+        if (this.conversationsAiReplyBtn) {
+            this.conversationsAiReplyBtn.textContent = 'Respondiendo…';
+        }
+        this.showStatus(`La IA está contestando a ${label}…`, 'info');
+
+        try {
+            const response = await fetch('/api/conversations/ai-reply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId
+                })
+            });
+            const data = await response.json();
+            if (!data.success) {
+                throw new Error(data.message || data.error || 'No se pudo responder');
+            }
+            this.showStatus(
+                data.message || `IA respondió a ${label}`,
+                'success'
+            );
+            await this.loadActiveConversationMessages({ silent: true });
+        } catch (error) {
+            this.showStatus(`Error: ${error.message}`, 'error');
+        } finally {
+            this._conversationsAiReplyInFlight = false;
+            if (this.conversationsAiReplyBtn) {
+                this.conversationsAiReplyBtn.textContent = 'Responder con IA';
+            }
+            this.updateConversationThreadActions();
         }
     }
 

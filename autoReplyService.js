@@ -17,6 +17,7 @@ const agendaMeetDeliveryService = require('./agendaMeetDeliveryService');
 const agendaLeadFields = require('./agendaLeadFields');
 const cvIngestService = require('./cvIngestService');
 const cvFileStore = require('./cvFileStore');
+const { resolveUsableCvId, lookupCvIdFromArchive } = require('./cvLookup');
 const { resolveMessageMedia, resolveIncomingDocumentMedia } = require('./conversationMediaService');
 const {
   sendTextMessage,
@@ -39,8 +40,51 @@ const messageBatcher = require('./messageBatcher');
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const processedKeys = new Map();
 const chatLocks = new Map();
+/** Tokens de cancelación de envío en curso por chat (`openwaSessionId:chatId`). */
+const sendCancelTokens = new Map();
 /** WhatsApp apaga el indicador ~25s; refrescar antes. */
 const TYPING_REFRESH_MS = 20000;
+
+function chatLockKey(openwaSessionId, chatId) {
+  return `${String(openwaSessionId || '').trim()}:${String(chatId || '').trim()}`;
+}
+
+function isSendCancelled(lockKey) {
+  const token = sendCancelTokens.get(lockKey);
+  return Boolean(token && token.cancelled);
+}
+
+/**
+ * Cancela lote pendiente y marca cancelación de un envío en curso para el chat.
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @returns {{ cancelledBatchItems: number, sendCancelled: boolean }}
+ */
+function cancelPendingForChat(openwaSessionId, chatId) {
+  const lockKey = chatLockKey(openwaSessionId, chatId);
+  const cancelledBatchItems = messageBatcher.cancelKey(lockKey);
+  const token = sendCancelTokens.get(lockKey);
+  let sendCancelled = false;
+  if (token) {
+    token.cancelled = true;
+    sendCancelled = true;
+  }
+  if (cancelledBatchItems || sendCancelled) {
+    console.log(
+      `[auto-reply] cancel chat=${lockKey} batchItems=${cancelledBatchItems} sendInFlight=${sendCancelled}`
+    );
+  }
+  return { cancelledBatchItems, sendCancelled };
+}
+
+async function waitChatLockFree(lockKey, timeoutMs = 60000) {
+  const start = Date.now();
+  while (chatLocks.has(lockKey)) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(200);
+  }
+  return true;
+}
 
 function autoEnrollUnknownEnabled() {
   const v = String(process.env.AUTO_REPLY_ENROLL_UNKNOWN || 'true').trim().toLowerCase();
@@ -308,6 +352,7 @@ async function simulateHumanTyping(openwaSessionId, chatId, durationMs, opts = {
   const total = Math.max(0, Number(durationMs) || 0);
   if (total <= 0 || opts.testMode || skipAutoReplyDelays()) return;
 
+  const isCancelled = () => Boolean(opts.isCancelled && opts.isCancelled());
   const sendTyping = async (state) => {
     try {
       await sendChatState(openwaSessionId, chatId, state);
@@ -320,10 +365,12 @@ async function simulateHumanTyping(openwaSessionId, chatId, durationMs, opts = {
   await sendTyping('typing');
 
   while (Date.now() < deadline) {
+    if (isCancelled()) break;
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     const chunk = Math.min(TYPING_REFRESH_MS, remaining);
     await sleep(chunk);
+    if (isCancelled()) break;
     if (Date.now() < deadline) {
       await sendTyping('typing');
     }
@@ -633,50 +680,6 @@ function isPanelCvProcessingError(error) {
   );
 }
 
-/**
- * Solo devuelve cvId si el PDF existe en disco (evita ids viejos en Mongo sin archivo).
- * @param {{ leadCv?: object|null, contactSession?: object|null, phone?: string }} args
- */
-function resolveUsableCvId({ leadCv, contactSession, phone }) {
-  const fromLead = String((leadCv && leadCv.cvId) || '').trim();
-  const fromSession = String((contactSession && contactSession.cvId) || '').trim();
-  const fromArchive = !fromLead && !fromSession && phone
-    ? lookupCvIdFromArchive(phone)
-    : null;
-  const candidates = [fromLead, fromSession, fromArchive].filter(Boolean);
-  for (const id of candidates) {
-    if (cvFileStore.getCvFileMeta(id)) return id;
-  }
-  const reason = !candidates.length
-    ? 'no_cv_id_for_phone'
-    : 'cv_file_missing_on_disk';
-  console.warn(
-    `[auto-reply] resolveUsableCvId=null phone=${phone || '?'} reason=${reason} ` +
-      `leadCvId=${fromLead || 'null'} sessionCvId=${fromSession || 'null'}`
-  );
-  return null;
-}
-
-/**
- * Busca cvId usable en el archivo permanente por teléfono.
- * @param {string} phone
- * @returns {string|null}
- */
-function lookupCvIdFromArchive(phone) {
-  const key = String(phone || '').trim();
-  if (!key) return null;
-  const list = cvFileStore.loadCvsManifest() || [];
-  const hit = list.find(
-    (c) =>
-      c &&
-      c.procesado &&
-      c.cvId &&
-      contactHistory.phonesMatch(c.telefono, key) &&
-      cvFileStore.getCvFileMeta(c.cvId)
-  );
-  return hit ? hit.cvId : null;
-}
-
 async function sendCvPreviewDocument({
   cvId,
   openwaSessionId,
@@ -764,14 +767,14 @@ async function processChosenSlot({
   userWillSendCv = false
 }) {
   const displayName = contactName || 'contacto';
-  let resolvedCvId = userWillSendCv ? null : cvId;
-  if (!resolvedCvId && !userWillSendCv) {
-    resolvedCvId = lookupCvIdFromArchive(normalizedPhone);
-    if (resolvedCvId) {
-      console.log(
-        `[auto-reply] CV recuperado del archivo permanente phone=${normalizedPhone} cvId=${resolvedCvId}`
-      );
-    }
+  // Siempre priorizar CV ya ligado (Mongo / archivo permanente). Si el lead
+  // dice que mandará otro, igual mostramos el que tenemos para confirmar;
+  // solo pedimos upload cuando no hay relación usable.
+  let resolvedCvId = cvId || lookupCvIdFromArchive(normalizedPhone);
+  if (resolvedCvId && !cvId) {
+    console.log(
+      `[auto-reply] CV recuperado del archivo permanente phone=${normalizedPhone} cvId=${resolvedCvId}`
+    );
   }
   const effectiveCvId = resolvedCvId;
   if (!effectiveCvId) {
@@ -1337,6 +1340,7 @@ async function processBatchedAutoReply(items) {
   const getCvContext = primary.getCvContext;
   const getLeadCv = primary.getLeadCv;
   const testMode = Boolean(primary.testMode);
+  const forceIgnorePause = Boolean(primary.forceIgnorePause);
   const lockKey = `${openwaSessionId}:${chatId}`;
   const cfg = autoReplyStore.getConfig();
 
@@ -1347,14 +1351,16 @@ async function processBatchedAutoReply(items) {
     return { handled: false, reason: 'chat_busy_requeued' };
   }
   chatLocks.set(lockKey, true);
+  sendCancelTokens.set(lockKey, { cancelled: false });
 
   let presenceRefresher = null;
   let presenceCancelled = false;
+  const isTurnCancelled = () => presenceCancelled || isSendCancelled(lockKey);
   let turnResult = { handled: false, reason: 'unknown' };
 
   try {
     let contactSession = await contactHistory.getContactSession(normalizedPhone);
-    if (contactSession && contactSession.aiPaused) {
+    if (contactSession && contactSession.aiPaused && !forceIgnorePause) {
       turnResult = { handled: false, reason: 'ai_paused_for_contact' };
       return turnResult;
     }
@@ -1386,7 +1392,7 @@ async function processBatchedAutoReply(items) {
     const presencePromise = !testMode
       ? runPresenceLeadIn(openwaSessionId, chatId, {
           receivedAt,
-          isCancelled: () => presenceCancelled
+          isCancelled: () => isTurnCancelled()
         }).then((presence) => {
           if (presence.refresher) presenceRefresher = presence.refresher;
           return presence;
@@ -1773,6 +1779,19 @@ async function processBatchedAutoReply(items) {
       }
     }
 
+    if (isTurnCancelled()) {
+      turnResult = { handled: false, reason: 'cancelled_by_pause' };
+      return turnResult;
+    }
+
+    if (!forceIgnorePause) {
+      contactSession = await contactHistory.getContactSession(normalizedPhone);
+      if (contactSession && contactSession.aiPaused) {
+        turnResult = { handled: false, reason: 'ai_paused_for_contact' };
+        return turnResult;
+      }
+    }
+
     const messageParts = splitReplyIntoMessages(replyText);
     if (!messageParts.length) {
       turnResult = { handled: false, reason: 'empty_reply' };
@@ -1783,6 +1802,24 @@ async function processBatchedAutoReply(items) {
     let totalTypingMs = 0;
 
     for (let i = 0; i < messageParts.length; i++) {
+      if (isTurnCancelled()) {
+        turnResult = messageIds.length
+          ? {
+              handled: true,
+              reason: 'partial_cancelled_by_pause',
+              sessionId: logicalSessionId,
+              openwaSessionId,
+              telefono: normalizedPhone,
+              replyMessage: messageParts.slice(0, messageIds.length).join('\n\n'),
+              messageIds,
+              messageId: messageIds[messageIds.length - 1],
+              batchSize: items.length,
+              timestamp: new Date().toISOString()
+            }
+          : { handled: false, reason: 'cancelled_by_pause' };
+        return turnResult;
+      }
+
       const part = messageParts[i];
       const targetTypingMs = typingDurationMsForText(part);
       totalTypingMs += targetTypingMs;
@@ -1798,7 +1835,28 @@ async function processBatchedAutoReply(items) {
             `chars=${part.length} → ${normalizedPhone}`
         );
       }
-      await simulateHumanTyping(openwaSessionId, chatId, waitMs, { testMode });
+      await simulateHumanTyping(openwaSessionId, chatId, waitMs, {
+        testMode,
+        isCancelled: () => isTurnCancelled()
+      });
+
+      if (isTurnCancelled()) {
+        turnResult = messageIds.length
+          ? {
+              handled: true,
+              reason: 'partial_cancelled_by_pause',
+              sessionId: logicalSessionId,
+              openwaSessionId,
+              telefono: normalizedPhone,
+              replyMessage: messageParts.slice(0, messageIds.length).join('\n\n'),
+              messageIds,
+              messageId: messageIds[messageIds.length - 1],
+              batchSize: items.length,
+              timestamp: new Date().toISOString()
+            }
+          : { handled: false, reason: 'cancelled_by_pause' };
+        return turnResult;
+      }
 
       if (!testMode) {
         const result = await sendTextMessage(openwaSessionId, chatId, part);
@@ -1842,6 +1900,7 @@ async function processBatchedAutoReply(items) {
     presenceCancelled = true;
     if (presenceRefresher) presenceRefresher.stop();
     chatLocks.delete(lockKey);
+    sendCancelTokens.delete(lockKey);
     markBatchInbox(items, turnResult);
   }
 }
@@ -1937,6 +1996,179 @@ function buildConfirmFailedReply(contactName, slot, errorMessage) {
 function buildNoCvAgendaReply(contactName, senderName) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   return `Gracias, ${name}. Para agendar necesito que un asesor valide tu CV primero; te contactamos enseguida. 💙`;
+}
+
+/**
+ * Mensajes entrantes pendientes al final del hilo (desde el último fromMe).
+ * Historial esperado: más viejo → más nuevo.
+ * @param {object[]} history
+ * @returns {object[]}
+ */
+function collectPendingInboundTail(history) {
+  const list = Array.isArray(history) ? history : [];
+  const pending = [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const msg = list[i];
+    if (!msg || typeof msg !== 'object') continue;
+    if (msg.fromMe === true) break;
+    if (msg.isGroup === true) continue;
+    const body = String(msg.body || msg.text || msg.caption || '').trim();
+    const incomingDocument = isDocumentMessage(msg);
+    if (!body && !incomingDocument) continue;
+    if (body.toLowerCase() === '[unknown]') continue;
+    pending.unshift(msg);
+  }
+  return pending;
+}
+
+/**
+ * Dispara una respuesta IA para el chat abierto (p. ej. tras reiniciar la PC).
+ * Une los mensajes pendientes del contacto en una sola respuesta.
+ * @param {object} opts
+ * @param {string} opts.openwaSessionId
+ * @param {string} opts.chatId
+ * @param {Function|null} [opts.broadcastEvent]
+ * @param {Function|null} [opts.getCvContext]
+ * @param {Function|null} [opts.getLeadCv]
+ * @param {boolean} [opts.testMode]
+ * @param {boolean} [opts.forceIgnorePause] — contesta aunque el contacto esté pausado
+ */
+async function triggerManualReply({
+  openwaSessionId,
+  chatId,
+  broadcastEvent = null,
+  getCvContext = null,
+  getLeadCv = null,
+  testMode = false,
+  forceIgnorePause = true
+}) {
+  const cfg = autoReplyStore.getConfig();
+  if (!cfg.enabled) {
+    return { handled: false, reason: 'auto_reply_disabled' };
+  }
+  if (!contactHistory.mongoUriConfigured()) {
+    return { handled: false, reason: 'mongodb_not_configured' };
+  }
+
+  const sid = String(openwaSessionId || '').trim();
+  const cid = String(chatId || '').trim();
+  if (!sid || !cid) {
+    return { handled: false, reason: 'missing_session_or_chat' };
+  }
+  if (cid.endsWith('@g.us')) {
+    return { handled: false, reason: 'is_group' };
+  }
+
+  const logicalSession = findLogicalSessionByOpenwaId(sid);
+  const logicalSessionId = logicalSession ? logicalSession.id : null;
+  if (!autoReplyStore.isSessionEnabled(logicalSessionId, cfg)) {
+    return { handled: false, reason: 'session_ai_disabled' };
+  }
+
+  const lockKey = chatLockKey(sid, cid);
+  cancelPendingForChat(sid, cid);
+  const free = await waitChatLockFree(lockKey, 90000);
+  if (!free) {
+    return { handled: false, reason: 'chat_busy' };
+  }
+
+  let history = [];
+  try {
+    history = await getChatHistory(sid, cid, { limit: 40, fresh: true });
+  } catch (err) {
+    console.warn('[auto-reply] manual historial:', err.message);
+    return { handled: false, reason: 'history_error', error: err.message };
+  }
+
+  const pendingMsgs = collectPendingInboundTail(Array.isArray(history) ? history : []);
+  if (!pendingMsgs.length) {
+    return { handled: false, reason: 'no_pending_inbound' };
+  }
+
+  const lastMsg = pendingMsgs[pendingMsgs.length - 1];
+  const identity = await resolveContactIdentity(sid, cid, lastMsg);
+  if (!identity || !identity.normalizedPhone) {
+    return { handled: false, reason: 'invalid_phone' };
+  }
+
+  let normalizedPhone = identity.normalizedPhone;
+  const contactName =
+    identity.name ||
+    lastMsg.notifyName ||
+    lastMsg.senderName ||
+    lastMsg.pushName ||
+    lastMsg.contact?.pushName ||
+    null;
+
+  let known = await contactHistory.isKnownContact(normalizedPhone);
+  if (!known && identity.whatsappLid) {
+    const byLid = await contactHistory.findContactByLid(identity.whatsappLid);
+    if (byLid) {
+      normalizedPhone = byLid.normalizedPhone;
+      known = true;
+    }
+  }
+  if (!known) {
+    const matched = await contactHistory.findContactByPhoneFuzzy(normalizedPhone);
+    if (matched) {
+      normalizedPhone = matched.normalizedPhone;
+      known = true;
+    }
+  }
+  if (!known) {
+    if (!autoEnrollUnknownEnabled()) {
+      return { handled: false, reason: 'unknown_contact' };
+    }
+    await contactHistory.enrollInboundContact({
+      normalizedPhone,
+      name: contactName,
+      logicalSessionId,
+      openwaSessionId: sid,
+      chatId: identity.chatId || cid,
+      whatsappLid: identity.whatsappLid,
+      source: 'manual_ai_reply'
+    });
+    known = true;
+  }
+
+  if (logicalSessionId) {
+    await contactHistory.assignContactSession(normalizedPhone, {
+      logicalSessionId,
+      openwaSessionId: sid
+    });
+  } else {
+    return { handled: false, reason: 'session_not_mapped' };
+  }
+
+  const items = pendingMsgs.map((msg) => ({
+    msg,
+    body: String(msg.body || msg.text || msg.caption || '').trim(),
+    incomingDocument: isDocumentMessage(msg),
+    openwaSessionId: sid,
+    chatId: cid,
+    normalizedPhone,
+    contactName,
+    identity,
+    logicalSessionId,
+    waMessageId: normalizeWhatsAppMessageId(msg.id || msg.messageId || null),
+    getCvContext,
+    getLeadCv,
+    broadcastEvent,
+    testMode: Boolean(testMode),
+    forceIgnorePause: Boolean(forceIgnorePause),
+    manualTrigger: true
+  }));
+
+  console.log(
+    `[auto-reply] manual trigger phone=${normalizedPhone} pending=${items.length} forcePause=${Boolean(forceIgnorePause)}`
+  );
+
+  const result = await processBatchedAutoReply(items);
+  return {
+    ...result,
+    pendingCount: items.length,
+    manualTrigger: true
+  };
 }
 
 function extractWebhookId(created) {
@@ -2334,6 +2566,9 @@ function scheduleStartupWebhookActivation() {
 
 module.exports = {
   handleIncomingWebhook,
+  triggerManualReply,
+  cancelPendingForChat,
+  collectPendingInboundTail,
   captureIncomingMessage,
   extractIncomingMessage,
   normalizeWhatsAppMessageId,

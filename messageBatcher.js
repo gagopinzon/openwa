@@ -183,6 +183,26 @@ function pendingCount(key) {
   return entry ? entry.items.length : 0;
 }
 
+/**
+ * Cancela el lote pendiente de un chat (timer + items). No afecta un flush ya en curso.
+ * @param {string} key
+ * @returns {number} cantidad de items descartados
+ */
+function cancelKey(key) {
+  const batchKey = String(key || '').trim();
+  if (!batchKey) return 0;
+  const entry = batches.get(batchKey);
+  if (!entry) return 0;
+  clearTimer(batchKey);
+  const count = entry.items.length;
+  entry.items.length = 0;
+  batches.delete(batchKey);
+  if (count > 0) {
+    console.log(`[message-batcher] cancelled key=${batchKey} discarded=${count}`);
+  }
+  return count;
+}
+
 function resetForTests() {
   for (const key of [...batches.keys()]) {
     clearTimer(key);
@@ -194,6 +214,7 @@ module.exports = {
   enqueue,
   requeue,
   flushKey,
+  cancelKey,
   combineBatchBodies,
   getFirstDelayMs,
   getNextDelayMs,

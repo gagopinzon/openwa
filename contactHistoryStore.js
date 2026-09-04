@@ -613,7 +613,8 @@ async function isContactAiPaused(normalizedPhone) {
 }
 
 /**
- * Liga un CV al contacto (soporta claves lid_* sin normalizar dígitos).
+ * Liga un CV al contacto existente (soporta claves lid_* y variantes MX).
+ * No crea contactos nuevos (evitar marcar leads como "ya contactados" antes del envío).
  */
 async function linkCvToContact(normalizedPhone, { cvId, archivoOriginal, name } = {}) {
   const key = String(normalizedPhone || '').trim();
@@ -633,8 +634,17 @@ async function linkCvToContact(normalizedPhone, { cvId, archivoOriginal, name } 
   if (archivoOriginal) $set.archivoOriginal = String(archivoOriginal);
   if (name) $set.name = String(name);
 
-  await coll.updateOne({ normalizedPhone: key }, { $set });
-  return getContactByPhone(key);
+  let targetKey = key;
+  if (!key.startsWith('lid_')) {
+    const existing = await findContactByPhoneFuzzy(key);
+    if (existing && existing.normalizedPhone) {
+      targetKey = existing.normalizedPhone;
+    }
+  }
+
+  const result = await coll.updateOne({ normalizedPhone: targetKey }, { $set });
+  if (result.matchedCount === 0) return null;
+  return getContactByPhone(targetKey);
 }
 
 module.exports = {
