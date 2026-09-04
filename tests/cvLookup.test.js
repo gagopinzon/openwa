@@ -50,6 +50,66 @@ describe('cvLookup', () => {
     assert.equal(lookupCvIdFromArchive('+52 55 5111 2233'), saved.cvId);
   });
 
+  it('si el teléfono no coincide, usa el CV cargado con el mismo nombre', () => {
+    const saved = cvFileStore.saveCvFile(PDF_MIN, 'gonzalo-test.pdf');
+    createdIds.push(saved.cvId);
+    const entry = {
+      nombre: 'Gonzaloqaunique Hernández',
+      telefono: 'No encontrado',
+      experiencia: 'Ops',
+      archivoOriginal: 'gonzalo-test.pdf',
+      cvId: saved.cvId,
+      cvFileName: saved.cvFileName,
+      procesado: true,
+      inWorkspace: true,
+      savedAt: new Date().toISOString()
+    };
+    const manifest = cvFileStore.loadCvsManifest() || [];
+    cvFileStore.saveCvsManifest([...manifest, entry]);
+
+    assert.equal(
+      lookupCvIdFromArchive('5215550001111', { name: 'Gonzaloqaunique' }),
+      saved.cvId
+    );
+    assert.equal(
+      resolveUsableCvId({
+        leadCv: null,
+        contactSession: { name: 'Gonzaloqaunique' },
+        phone: '5215550001111',
+        name: 'Gonzaloqaunique'
+      }),
+      saved.cvId
+    );
+  });
+
+  it('no adivina el CV si hay dos cargados con el mismo nombre de pila', () => {
+    const a = cvFileStore.saveCvFile(PDF_MIN, 'gonzalo-a.pdf');
+    const b = cvFileStore.saveCvFile(PDF_MIN, 'gonzalo-b.pdf');
+    createdIds.push(a.cvId, b.cvId);
+    const manifest = cvFileStore.loadCvsManifest() || [];
+    cvFileStore.saveCvsManifest([
+      ...manifest,
+      {
+        nombre: 'Dostwinqa Pérez',
+        telefono: 'No encontrado',
+        cvId: a.cvId,
+        cvFileName: a.cvFileName,
+        procesado: true,
+        savedAt: new Date().toISOString()
+      },
+      {
+        nombre: 'Dostwinqa Ruiz',
+        telefono: 'No encontrado',
+        cvId: b.cvId,
+        cvFileName: b.cvFileName,
+        procesado: true,
+        savedAt: new Date().toISOString()
+      }
+    ]);
+
+    assert.equal(lookupCvIdFromArchive('5215550002222', { name: 'Dostwinqa' }), null);
+  });
+
   it('resolveUsableCvId cae al archivo si Mongo trae cvId stale sin PDF', () => {
     const saved = cvFileStore.saveCvFile(PDF_MIN, 'luis-test.pdf');
     createdIds.push(saved.cvId);

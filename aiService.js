@@ -515,13 +515,13 @@ function replyCvPolicyInstructions(hasStoredCv) {
       '- El PDF del CV de este lead YA está cargado en el sistema (mesa "Cargar CVs").\n' +
       '- NUNCA pidas CV, currículum, curriculum, curriculo, PDF, hoja de vida ni "documento".\n' +
       '- NO digas "envíame", "mándame", "compárteme", "necesito", "pásame", "¿podrías enviarme?" refiriéndote al CV.\n' +
-      '- Cuando confirme un horario, el sistema le mostrará su CV para que él lo valide; tú no lo pides.'
+      '- Cuando confirme un horario, el sistema usa el CV ya cargado; tú no lo pidas ni lo menciones.'
     );
   }
   return (
     'REGLA CRÍTICA — CV DEL LEAD:\n' +
     '- NUNCA pidas CV, currículum, curriculum, curriculo, PDF, hoja de vida ni "documento" en esta respuesta.\n' +
-    '- Si hace falta, otro flujo del sistema lo solicita después de confirmar horario.\n' +
+    '- El sistema toma el archivo de los CVs ya cargados si existe. Tú no lo solicitas.\n' +
     '- Enfócate en la duda o intención del lead y, si aplica, en horarios.'
   );
 }

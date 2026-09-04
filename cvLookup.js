@@ -1,32 +1,81 @@
 const cvFileStore = require('./cvFileStore');
 const contactHistory = require('./contactHistoryStore');
 
+const GENERIC_FIRST_NAMES = new Set([
+  'contacto',
+  'amigo',
+  'lead',
+  'candidato',
+  'usuario',
+  'cliente',
+  'nombre'
+]);
+
+function foldPersonName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function firstNameOf(value) {
+  return foldPersonName(value).split(/\s+/)[0] || '';
+}
+
+function listUsableArchiveCvs() {
+  return (cvFileStore.loadCvsManifest() || []).filter(
+    (c) => c && c.procesado && c.cvId && cvFileStore.getCvFileMeta(c.cvId)
+  );
+}
+
 /**
- * Busca cvId usable en el archivo permanente por teléfono.
- * @param {string} phone
+ * Un solo CV cargado cuyo nombre coincida (completo o nombre de pila único).
+ * @param {string} name
  * @returns {string|null}
  */
-function lookupCvIdFromArchive(phone) {
+function lookupCvIdByName(name) {
+  const wanted = foldPersonName(name);
+  const first = firstNameOf(name);
+  if (!wanted || first.length < 3 || GENERIC_FIRST_NAMES.has(first)) return null;
+
+  const list = listUsableArchiveCvs();
+  const exact = list.filter((c) => foldPersonName(c.nombre) === wanted);
+  if (exact.length === 1) return exact[0].cvId;
+  if (exact.length > 1) return null;
+
+  const byFirst = list.filter((c) => firstNameOf(c.nombre) === first);
+  if (byFirst.length === 1) return byFirst[0].cvId;
+  return null;
+}
+
+/**
+ * Busca cvId usable en el archivo permanente por teléfono y, si no, por nombre.
+ * @param {string} phone
+ * @param {{ name?: string }} [opts]
+ * @returns {string|null}
+ */
+function lookupCvIdFromArchive(phone, opts = {}) {
   const key = String(phone || '').trim();
-  if (!key) return null;
-  const list = cvFileStore.loadCvsManifest() || [];
-  const hit = list.find(
-    (c) =>
-      c &&
-      c.procesado &&
-      c.cvId &&
-      contactHistory.phonesMatch(c.telefono, key) &&
-      cvFileStore.getCvFileMeta(c.cvId)
-  );
-  return hit ? hit.cvId : null;
+  const list = listUsableArchiveCvs();
+  if (key && !key.startsWith('lid_')) {
+    const hit = list.find((c) => contactHistory.phonesMatch(c.telefono, key));
+    if (hit) return hit.cvId;
+  }
+
+  const name = String(opts.name || '').trim();
+  if (name) return lookupCvIdByName(name);
+  return null;
 }
 
 /**
  * Solo devuelve cvId si el PDF existe en disco (evita ids viejos en Mongo sin archivo).
- * Siempre intenta archivo permanente por teléfono si los candidatos fallan.
- * @param {{ leadCv?: object|null, contactSession?: object|null, phone?: string }} args
+ * Teléfono primero; si falla, un CV cargado con el mismo nombre.
+ * @param {{ leadCv?: object|null, contactSession?: object|null, phone?: string, name?: string }} args
  */
-function resolveUsableCvId({ leadCv, contactSession, phone }) {
+function resolveUsableCvId({ leadCv, contactSession, phone, name } = {}) {
   const fromLead = String((leadCv && leadCv.cvId) || '').trim();
   const fromSession = String((contactSession && contactSession.cvId) || '').trim();
   const candidates = [fromLead, fromSession].filter(Boolean);
@@ -35,15 +84,17 @@ function resolveUsableCvId({ leadCv, contactSession, phone }) {
     if (cvFileStore.getCvFileMeta(id)) return id;
   }
 
-  const fromArchive = phone ? lookupCvIdFromArchive(phone) : null;
+  const resolvedName =
+    String(name || (contactSession && contactSession.name) || (leadCv && leadCv.nombre) || '').trim();
+  const fromArchive = lookupCvIdFromArchive(phone, { name: resolvedName });
   if (fromArchive) return fromArchive;
 
-  const reason = !candidates.length && !fromArchive
-    ? 'no_cv_id_for_phone'
+  const reason = !candidates.length
+    ? 'no_cv_id_for_phone_or_name'
     : 'cv_file_missing_on_disk';
   console.warn(
-    `[auto-reply] resolveUsableCvId=null phone=${phone || '?'} reason=${reason} ` +
-      `leadCvId=${fromLead || 'null'} sessionCvId=${fromSession || 'null'}`
+    `[auto-reply] resolveUsableCvId=null phone=${phone || '?'} name=${resolvedName || 'null'} ` +
+      `reason=${reason} leadCvId=${fromLead || 'null'} sessionCvId=${fromSession || 'null'}`
   );
   return null;
 }

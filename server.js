@@ -6,7 +6,7 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 const cvFileStore = require('./cvFileStore');
-const { syncClientCvEditsIntoArchive } = require('./cvLookup');
+const { syncClientCvEditsIntoArchive, lookupCvIdFromArchive } = require('./cvLookup');
 const cvAnalysisService = require('./cvAnalysisService');
 const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
 const { generateBulkMessages, buildOutboundMessageParts, formatStoredCvContext } = require('./aiService');
@@ -280,10 +280,16 @@ function findCvForPhone(phone, hints = {}) {
       };
     }
   }
-  if (!phone) return null;
-  return (
-    reusable.find((c) => contactHistory.phonesMatch(c.telefono, phone)) || null
-  );
+  if (!phone && !hints.name) return null;
+  const byPhone = phone
+    ? reusable.find((c) => contactHistory.phonesMatch(c.telefono, phone))
+    : null;
+  if (byPhone) return byPhone;
+  const fromArchive = lookupCvIdFromArchive(phone, { name: hints.name });
+  if (fromArchive) {
+    return reusable.find((c) => c.cvId === fromArchive) || null;
+  }
+  return null;
 }
 
 function publicCvSummary(cv) {

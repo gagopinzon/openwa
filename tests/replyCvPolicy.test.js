@@ -29,10 +29,11 @@ describe('replyCvPolicy', () => {
     assert.match(text, /YA está/i);
   });
 
-  it('también prohíbe pedirlo si el lookup falló: otro flujo lo resuelve', () => {
+  it('también prohíbe pedirlo aunque el lookup por teléfono falle', () => {
     const text = replyCvPolicyInstructions(false);
     assert.match(text, /NUNCA pidas/i);
-    assert.match(text, /otro flujo/i);
+    assert.match(text, /CVs ya cargados/i);
+    assert.doesNotMatch(text, /solicita después/i);
   });
 
   describe('looksLikeAskingForCv', () => {

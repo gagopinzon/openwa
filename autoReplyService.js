@@ -774,13 +774,13 @@ async function processChosenSlot({
   userWillSendCv = false
 }) {
   const displayName = contactName || 'contacto';
-  // Siempre priorizar CV ya ligado (Mongo / archivo permanente). Si el lead
-  // dice que mandará otro, igual mostramos el que tenemos para confirmar;
-  // solo pedimos upload cuando no hay relación usable.
-  let resolvedCvId = cvId || lookupCvIdFromArchive(normalizedPhone);
+  // Siempre priorizar CV ya ligado (Mongo / archivo permanente por teléfono o nombre).
+  // Si hay PDF cargado, se agenda con ese archivo: no se pide otro por WhatsApp.
+  let resolvedCvId =
+    cvId || lookupCvIdFromArchive(normalizedPhone, { name: displayName });
   if (resolvedCvId && !cvId) {
     console.log(
-      `[auto-reply] CV recuperado del archivo permanente phone=${normalizedPhone} cvId=${resolvedCvId}`
+      `[auto-reply] CV recuperado del archivo permanente phone=${normalizedPhone} name=${displayName} cvId=${resolvedCvId}`
     );
   }
   const effectiveCvId = resolvedCvId;
@@ -813,37 +813,27 @@ async function processChosenSlot({
     };
   }
 
-  agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
+  try {
+    await contactHistory.linkCvToContact(normalizedPhone, {
+      cvId: effectiveCvId,
+      name: displayName
+    });
+  } catch (err) {
+    console.warn('[auto-reply] linkCvToContact:', err.message);
+  }
+
+  return finalizeAgendaBooking({
+    normalizedPhone,
     chosen,
     cvId: effectiveCvId,
-    stage: 'confirm_cv',
     contactName: displayName,
-    chatId: identity.chatId || chatId,
+    identity,
+    chatId,
     logicalSessionId,
-    openwaSessionId
-  });
-
-  const preview = await sendCvPreviewDocument({
-    cvId: effectiveCvId,
     openwaSessionId,
-    chatId: identity.chatId || chatId,
-    contactName: displayName,
-    slot: chosen,
+    broadcastEvent,
     testMode
   });
-
-  return {
-    replyText: preview.sent
-      ? buildAskCvConfirmReply(displayName, chosen)
-      : buildAskCvConfirmFallbackReply(displayName, chosen),
-    agendaMeta: {
-      reason: preview.sent ? 'awaiting_cv_confirm' : 'awaiting_cv_confirm_send_failed',
-      slot: chosen.label || chosen.horaInicio,
-      cvId,
-      cvPreviewSent: preview.sent
-    },
-    agendaPendingId: null
-  };
 }
 
 async function gateLeadFieldsBeforeBooking(params) {
@@ -1377,15 +1367,24 @@ async function processBatchedAutoReply(items) {
       ? sessionsStore.getSessionSenderName(logicalSessionId)
       : 'Pro Talent';
 
+    const contactDisplayName = (contactSession && contactSession.name) || contactName;
     let cvContext = null;
-    const cvHints = { cvId: contactSession && contactSession.cvId };
+    const cvHints = {
+      cvId: contactSession && contactSession.cvId,
+      name: contactDisplayName
+    };
     if (getCvContext) {
       cvContext = getCvContext(normalizedPhone, cvHints);
     }
 
     const leadCv =
       typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone, cvHints) : null;
-    const cvId = resolveUsableCvId({ leadCv, contactSession, phone: normalizedPhone });
+    const cvId = resolveUsableCvId({
+      leadCv,
+      contactSession,
+      phone: normalizedPhone,
+      name: contactDisplayName
+    });
     console.log(
       `[auto-reply] batch=${items.length} cv lookup phone=${normalizedPhone} sessionCvId=${
         (contactSession && contactSession.cvId) || 'null'
@@ -1540,7 +1539,7 @@ async function processBatchedAutoReply(items) {
       const recoveredCvId =
         awaitingCvAfterLeadData.cvId ||
         cvId ||
-        lookupCvIdFromArchive(normalizedPhone);
+        lookupCvIdFromArchive(normalizedPhone, { name: contactDisplayName });
       if (recoveredCvId && awaitingCvAfterLeadData.chosen) {
         const booked = await processChosenSlot({
           chosen: awaitingCvAfterLeadData.chosen,
@@ -1925,15 +1924,7 @@ function buildPendingCreatedReply(contactName, slot, senderName) {
 function buildAskCvReply(contactName, slot, opts = {}) {
   const name = String(contactName || 'contacto').split(/\s+/)[0] || 'contacto';
   const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
-  if (opts.userWillSendCv) {
-    return (
-      `Perfecto, ${name}. Queda anotado ${when}. Quedo atento a tu CV en PDF por aquí para enviarte la liga. ☺️`
-    );
-  }
-  return (
-    `Perfecto, ${name}. Anoto ${when} para tu sesión de 15 minutos. ` +
-    `Para confirmarla, envíame tu CV en PDF por aquí mismo. ☺️`
-  );
+  return `Perfecto, ${name}. Quedó anotado ${when}. En breve te confirmamos la liga. ☺️`;
 }
 
 function buildAskCvConfirmReply(contactName, slot) {
