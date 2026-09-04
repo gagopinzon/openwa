@@ -634,18 +634,46 @@ function isPanelCvProcessingError(error) {
 
 /**
  * Solo devuelve cvId si el PDF existe en disco (evita ids viejos en Mongo sin archivo).
+ * @param {{ leadCv?: object|null, contactSession?: object|null, phone?: string }} args
  */
-function resolveUsableCvId({ leadCv, contactSession }) {
-  const candidates = [
-    leadCv && leadCv.cvId,
-    contactSession && contactSession.cvId
-  ]
-    .map((id) => String(id || '').trim())
-    .filter(Boolean);
+function resolveUsableCvId({ leadCv, contactSession, phone }) {
+  const fromLead = String((leadCv && leadCv.cvId) || '').trim();
+  const fromSession = String((contactSession && contactSession.cvId) || '').trim();
+  const fromArchive = !fromLead && !fromSession && phone
+    ? lookupCvIdFromArchive(phone)
+    : null;
+  const candidates = [fromLead, fromSession, fromArchive].filter(Boolean);
   for (const id of candidates) {
     if (cvFileStore.getCvFileMeta(id)) return id;
   }
+  const reason = !candidates.length
+    ? 'no_cv_id_for_phone'
+    : 'cv_file_missing_on_disk';
+  console.warn(
+    `[auto-reply] resolveUsableCvId=null phone=${phone || '?'} reason=${reason} ` +
+      `leadCvId=${fromLead || 'null'} sessionCvId=${fromSession || 'null'}`
+  );
   return null;
+}
+
+/**
+ * Busca cvId usable en el archivo permanente por teléfono.
+ * @param {string} phone
+ * @returns {string|null}
+ */
+function lookupCvIdFromArchive(phone) {
+  const key = String(phone || '').trim();
+  if (!key) return null;
+  const list = cvFileStore.loadCvsManifest() || [];
+  const hit = list.find(
+    (c) =>
+      c &&
+      c.procesado &&
+      c.cvId &&
+      contactHistory.phonesMatch(c.telefono, key) &&
+      cvFileStore.getCvFileMeta(c.cvId)
+  );
+  return hit ? hit.cvId : null;
 }
 
 async function sendCvPreviewDocument({
@@ -735,7 +763,16 @@ async function processChosenSlot({
   userWillSendCv = false
 }) {
   const displayName = contactName || 'contacto';
-  const effectiveCvId = userWillSendCv ? null : cvId;
+  let resolvedCvId = userWillSendCv ? null : cvId;
+  if (!resolvedCvId && !userWillSendCv) {
+    resolvedCvId = lookupCvIdFromArchive(normalizedPhone);
+    if (resolvedCvId) {
+      console.log(
+        `[auto-reply] CV recuperado del archivo permanente phone=${normalizedPhone} cvId=${resolvedCvId}`
+      );
+    }
+  }
+  const effectiveCvId = resolvedCvId;
   if (!effectiveCvId) {
     agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
       chosen,
@@ -1225,7 +1262,13 @@ async function handleIncomingWebhook({
 
     const leadCv =
       typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone, cvHints) : null;
-    const cvId = resolveUsableCvId({ leadCv, contactSession });
+    const cvId = resolveUsableCvId({ leadCv, contactSession, phone: normalizedPhone });
+    console.log(
+      `[auto-reply] cv lookup phone=${normalizedPhone} sessionCvId=${
+        (contactSession && contactSession.cvId) || 'null'
+      } leadCvId=${(leadCv && leadCv.cvId) || 'null'} usable=${cvId || 'null'} ` +
+        `hasCvContext=${cvContext ? 'yes' : 'no'}`
+    );
 
     const receivedAt = Date.now();
     presenceRefresher = null;
@@ -1371,11 +1414,37 @@ async function handleIncomingWebhook({
       !agendaCvConfirm.isAwaitingCvConfirm(awaitingCvAfterLeadData.stage) &&
       !agendaLeadFields.isAwaitingLeadData(awaitingCvAfterLeadData.stage)
     ) {
-      replyText = buildAskCvReply(
-        contactSession?.name || contactName,
-        awaitingCvAfterLeadData.chosen
-      );
-      agendaMeta = { reason: 'awaiting_cv_reminder' };
+      const recoveredCvId =
+        awaitingCvAfterLeadData.cvId ||
+        cvId ||
+        lookupCvIdFromArchive(normalizedPhone);
+      if (recoveredCvId && awaitingCvAfterLeadData.chosen) {
+        const booked = await processChosenSlot({
+          chosen: awaitingCvAfterLeadData.chosen,
+          cvId: recoveredCvId,
+          normalizedPhone,
+          contactName: contactSession?.name || contactName,
+          identity,
+          chatId,
+          logicalSessionId,
+          openwaSessionId,
+          broadcastEvent,
+          testMode,
+          userWillSendCv: false
+        });
+        replyText = booked.replyText;
+        agendaMeta = {
+          ...(booked.agendaMeta || {}),
+          reason: booked.agendaMeta?.reason || 'awaiting_cv_recovered'
+        };
+        agendaPendingId = booked.agendaPendingId;
+      } else {
+        replyText = buildAskCvReply(
+          contactSession?.name || contactName,
+          awaitingCvAfterLeadData.chosen
+        );
+        agendaMeta = { reason: 'awaiting_cv_reminder' };
+      }
     }
     const dateRangeFromBody = agendaIntent.resolveDateRangeFromMessage(body);
     const bodyPinsOneDay = Boolean(

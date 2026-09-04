@@ -81,7 +81,7 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
         c.cvId !== entry.cvId &&
         contactHistory.phonesMatch(c.telefono, entry.telefono)
     );
-    if (prev && prev.cvId) cvFileStore.deleteCvFile(prev.cvId);
+    if (prev && prev.cvId) cvFileStore.retireCvFileToHistory(prev.cvId);
 
     const idx = cvs.findIndex(
       (c) => contactHistory.normalizePhone(c.telefono) === norm && c.cvId

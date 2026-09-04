@@ -6,35 +6,44 @@ const {
   getWorkspaceCvs,
   archiveAllWorkspace,
   archiveSentByPhones,
-  partitionExpired,
   mergeIncomingBatch,
   stampMissingSavedAt,
   sanitizeCvForPersist,
-  hydrateStoredCv
+  hydrateStoredCv,
+  purgeExpiredCvs,
+  retireCvFileToHistory,
+  saveCvFile,
+  getCvFileMeta
 } = require('../cvFileStore');
+const fs = require('fs');
 
 function phonesMatch(a, b) {
   return String(a || '').replace(/\D/g, '') === String(b || '').replace(/\D/g, '');
 }
 
-describe('cvFileStore archivo 7 días', () => {
+describe('cvFileStore archivo permanente', () => {
   const now = Date.parse('2026-08-17T18:00:00Z');
 
-  it('CV_TTL_MS es exactamente 7 días', () => {
+  it('CV_TTL_MS se conserva por compat (tokens); isCvExpired sigue calculando edad', () => {
     assert.equal(CV_TTL_MS, 7 * 24 * 60 * 60 * 1000);
-  });
-
-  it('no expira antes de 7 días; sí al cumplirse la semana', () => {
-    const sixDays = {
-      cvId: 'a',
-      savedAt: new Date(now - 6 * 24 * 60 * 60 * 1000).toISOString()
-    };
     const sevenDays = {
       cvId: 'b',
       savedAt: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()
     };
-    assert.equal(isCvExpired(sixDays, now), false);
     assert.equal(isCvExpired(sevenDays, now), true);
+  });
+
+  it('purgeExpiredCvs NO borra CVs viejos (archivo permanente)', () => {
+    const cvs = [
+      { cvId: 'keep', savedAt: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString() },
+      { cvId: 'old', savedAt: new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString() }
+    ];
+    const { kept, expired } = purgeExpiredCvs(cvs, now);
+    assert.equal(expired.length, 0);
+    assert.deepEqual(
+      kept.map((c) => c.cvId),
+      ['keep', 'old']
+    );
   });
 
   it('sin savedAt no se considera expirado (migración)', () => {
@@ -48,22 +57,6 @@ describe('cvFileStore archivo 7 días', () => {
     );
     assert.equal(stamped[0].savedAt, new Date(now).toISOString());
     assert.equal(stamped[1].savedAt, '2026-08-01T00:00:00.000Z');
-  });
-
-  it('partitionExpired separa vencidos y vigentes', () => {
-    const cvs = [
-      { cvId: 'keep', savedAt: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString() },
-      { cvId: 'drop', savedAt: new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString() }
-    ];
-    const { kept, expired } = partitionExpired(cvs, now);
-    assert.deepEqual(
-      kept.map((c) => c.cvId),
-      ['keep']
-    );
-    assert.deepEqual(
-      expired.map((c) => c.cvId),
-      ['drop']
-    );
   });
 });
 
@@ -177,5 +170,22 @@ describe('cvFileStore lead fields', () => {
     assert.equal(loaded.leadEstado, 'Jalisco');
     assert.equal(loaded.estado, 'Jalisco');
     assert.equal(loaded.leadCorreo, 'gago@test.com');
+  });
+});
+
+describe('cvFileStore history', () => {
+  it('retireCvFileToHistory mueve el PDF fuera del path activo', () => {
+    const saved = saveCvFile(Buffer.from('%PDF-1.4 history-test'), 'retire-me.pdf');
+    assert.ok(getCvFileMeta(saved.cvId));
+    const retired = retireCvFileToHistory(saved.cvId);
+    assert.equal(retired.retired, true);
+    assert.ok(retired.historyPath);
+    assert.equal(getCvFileMeta(saved.cvId), null);
+    assert.equal(fs.existsSync(retired.historyPath), true);
+    try {
+      fs.unlinkSync(retired.historyPath);
+    } catch {
+      /* ignore */
+    }
   });
 });

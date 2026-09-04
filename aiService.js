@@ -510,9 +510,97 @@ function formatStoredCvContext(cv) {
  */
 function replyCvPolicyInstructions(hasStoredCv) {
   if (hasStoredCv) {
-    return '- El PDF del CV YA está en el sistema. NUNCA pidas CV, currículum, PDF ni hoja de vida.';
+    return (
+      'REGLA CRÍTICA — CV DEL LEAD:\n' +
+      '- El PDF del CV de este lead YA está cargado en el sistema (mesa "Cargar CVs").\n' +
+      '- NUNCA pidas CV, currículum, curriculum, curriculo, PDF, hoja de vida ni "documento".\n' +
+      '- NO digas "envíame", "mándame", "compárteme", "necesito", "pásame", "¿podrías enviarme?" refiriéndote al CV.\n' +
+      '- Cuando confirme un horario, el sistema le mostrará su CV para que él lo valide; tú no lo pides.'
+    );
   }
-  return '- NUNCA pidas el CV, currículum, PDF ni hoja de vida. Si hace falta, otro flujo del sistema lo solicita después de confirmar horario.';
+  return (
+    'REGLA CRÍTICA — CV DEL LEAD:\n' +
+    '- NUNCA pidas CV, currículum, curriculum, curriculo, PDF, hoja de vida ni "documento" en esta respuesta.\n' +
+    '- Si hace falta, otro flujo del sistema lo solicita después de confirmar horario.\n' +
+    '- Enfócate en la duda o intención del lead y, si aplica, en horarios.'
+  );
+}
+
+const CV_WORD = '(cv|curriculum|curriculo|curriculumvitae|hoja\\s+de\\s+vida)';
+const CV_SEND_VERB = '(envi\\w*|mand\\w*|compart\\w*|pas\\w*|adjunt\\w*|reenvi\\w*|sub\\w*)';
+
+const CV_ASK_PATTERNS = [
+  // "envíame tu cv" / "me compartes tu cv" / "podrías mandarme el pdf"
+  new RegExp(`\\b${CV_SEND_VERB}\\b[^.?!\\n]{0,60}\\b${CV_WORD}\\b`, 'i'),
+  // "tu cv por aquí" / "cv actualizado" / "cv en pdf"
+  new RegExp(
+    `\\b${CV_WORD}\\b[^.?!\\n]{0,40}\\b(pdf|actualizad[oa]|reciente|por\\s+aqu[ií]|por\\s+whatsapp|a\\s+la\\s+mano)\\b`,
+    'i'
+  ),
+  // "podrías / me puedes / puedes ... verbo ... cv"
+  new RegExp(
+    `\\b(podr[ií]as|puedes|puedas|me\\s+puedes|te\\s+parece\\s+bien)\\b[^.?!\\n]{0,40}\\b${CV_SEND_VERB}\\b[^.?!\\n]{0,40}\\b${CV_WORD}\\b`,
+    'i'
+  ),
+  // "necesito / requiero / me hace falta / para agendar ... cv"
+  new RegExp(
+    `\\b(necesito|requiero|hace\\s+falta|me\\s+hace\\s+falta|para\\s+(esto|eso|agendar|revisar|revisarlo|continuar)[^.?!\\n]{0,20})\\b[^.?!\\n]{0,40}\\b${CV_WORD}\\b`,
+    'i'
+  ),
+  // "¿tienes / cuentas con un cv actualizado?"
+  new RegExp(
+    `\\b(tienes|cuentas\\s+con|dispones\\s+de|tendrias|tendrías|tuvieras)\\b[^.?!\\n]{0,20}(?:un|el|tu)?\\s*${CV_WORD}\\b`,
+    'i'
+  ),
+  // "quisiera / quiero / gustaría ver tu cv"
+  new RegExp(
+    `\\b(quisiera|quiero|me\\s+gustar[ií]a|nos\\s+gustar[ií]a|ser[ií]a\\s+ideal|ser[ií]a\\s+bueno|si\\s+puedes)\\b[^.?!\\n]{0,40}\\b${CV_WORD}\\b`,
+    'i'
+  )
+];
+
+const CV_HAVE_PATTERNS = [
+  /\bya\s+(lo\s+)?(tenemos|tengo|est[aá]|qued[oó])\b[^.?!\n]{0,30}\b(cv|curr[ií]culum?|curriculo|hoja\s+de\s+vida)\b/i,
+  /\bcon\s+el\s+(cv|curr[ií]culum?|curriculo|hoja\s+de\s+vida)\s+que\b/i
+];
+
+function normalizeForMatch(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+/**
+ * ¿La respuesta del modelo está pidiendo el CV?
+ * @param {string} text
+ */
+function looksLikeAskingForCv(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const norm = normalizeForMatch(raw);
+  if (CV_HAVE_PATTERNS.some((re) => re.test(norm))) return false;
+  return CV_ASK_PATTERNS.some((re) => re.test(norm));
+}
+
+/**
+ * Quita oraciones que piden CV; si toda la respuesta era eso, retorna null.
+ * @param {string} text
+ * @returns {string|null}
+ */
+function stripCvRequestFromReply(text) {
+  const original = String(text || '');
+  if (!original.trim()) return original || null;
+  if (!looksLikeAskingForCv(original)) return original;
+
+  const sentences = original
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const kept = sentences.filter((s) => !looksLikeAskingForCv(s));
+  const cleaned = kept.join(' ').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return null;
+  return cleaned;
 }
 
 /**
@@ -578,6 +666,28 @@ async function generateReplyMessage({
   const canUseDeepSeek = provider === 'deepseek' && hasDeepSeekKey();
   const canUseOllama = provider === 'ollama' && ollamaService.isConfigured();
 
+  const firstName = extractFirstName(contactName);
+
+  function sanitizeAgainstCvAsk(raw) {
+    const base = cleanReplyText(raw);
+    const cleaned = stripCvRequestFromReply(base);
+    if (cleaned && cleaned !== base) {
+      console.warn(
+        '[auto-reply] modelo pidió CV; se filtró del reply. original=',
+        String(raw).slice(0, 200)
+      );
+    }
+    if (cleaned) return cleaned;
+    console.warn(
+      '[auto-reply] reply completo era pedir CV; se sustituye por fallback sin CV. original=',
+      String(raw).slice(0, 200)
+    );
+    if (hasStoredCv) {
+      return `Perfecto, ${firstName}. Ya tenemos tu CV en el sistema. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
+    }
+    return `Perfecto, ${firstName}. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
+  }
+
   if (!canUseDeepSeek && !canUseOllama) {
     if (agendaContext) {
       const name = extractFirstName(contactName);
@@ -587,16 +697,16 @@ async function generateReplyMessage({
       }
       return `${hi}te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál de estos horarios te acomoda mejor? ☺️`;
     }
-    return generateBasicReply({
-      contactName,
-      incomingBody,
-      matchedRule,
-      senderName: sender,
-      agendaContext
-    });
+    return sanitizeAgainstCvAsk(
+      generateBasicReply({
+        contactName,
+        incomingBody,
+        matchedRule,
+        senderName: sender,
+        agendaContext
+      })
+    );
   }
-
-  const firstName = extractFirstName(contactName);
 
   const agendaInstructions = agendaContext
     ? String(agendaContext).startsWith('PREGUNTA_HORA:')
@@ -622,14 +732,17 @@ async function generateReplyMessage({
     ? `- Puedes abrir con un saludo breve (Hola / gusto saludarte) si encaja.`
     : `- NO saludes de nuevo (nada de "Hola", "gusto saludarte", "buenos días/tardes/noches" al inicio). Esta conversación ya está activa; ve directo a la respuesta.`;
 
-  const prompt = `${basePrompt || 'Eres un asistente de Pro Talent.'}
+  const prompt = `${cvPolicy}
+
+${basePrompt || 'Eres un asistente de Pro Talent.'}
 
 Nombre del contacto: ${firstName}
 Mensaje que te escribió:
 "${incomingBody}"
 ${ruleHint}${contextBlock}${historyBlock}${agendaBlock}
 
-INSTRUCCIONES DEL SISTEMA (prioritarias junto con tu playbook):
+INSTRUCCIONES DEL SISTEMA (prioritarias, sustituyen al playbook si hay conflicto):
+${cvPolicy}
 - Responde en español como Mónica: cercana, profesional y relajada; no suenes vendedora ni apresures a agendar.
 - Si el lead hace una PREGUNTA (servicio, proceso, costos, tiempos, dudas): responde ESA pregunta primero y completa. No cambies de tema ni metas horarios si no los pidió.
 - Tras responder una duda, puedes cerrar con una invitación SUAVE (ej. "¿te gustaría que un asesor te acompañe en una sesión breve?" o "¿quieres que sigamos con esto?"). Sin presionar ni repetirla en cada mensaje.
@@ -656,19 +769,21 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
         basePrompt: basePrompt || undefined,
         systemExtra: `${cvPolicy}\n${agendaInstructions}`
       });
-      return cleanReplyText(message);
+      return sanitizeAgainstCvAsk(message);
     } catch (error) {
       console.error(
         `[auto-reply] Ollama (${ollamaService.getModel()}):`,
         error.message
       );
-      return generateBasicReply({
-        contactName,
-        incomingBody,
-        matchedRule,
-        senderName: sender,
-        agendaContext
-      });
+      return sanitizeAgainstCvAsk(
+        generateBasicReply({
+          contactName,
+          incomingBody,
+          matchedRule,
+          senderName: sender,
+          agendaContext
+        })
+      );
     }
   }
 
@@ -677,7 +792,10 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
       DEEPSEEK_API_URL,
       {
         model: 'deepseek-chat',
-        messages: [{ role: 'user', content: prompt }],
+        messages: [
+          { role: 'system', content: cvPolicy },
+          { role: 'user', content: prompt }
+        ],
         temperature: 0.7,
         max_tokens: 450
       },
@@ -691,18 +809,20 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
     );
 
     if (response.data?.choices?.length > 0) {
-      return cleanReplyText(response.data.choices[0].message.content);
+      return sanitizeAgainstCvAsk(response.data.choices[0].message.content);
     }
     throw new Error('Respuesta inválida de DeepSeek');
   } catch (error) {
     console.error('Error generando auto-respuesta:', error.message);
-    return generateBasicReply({
-      contactName,
-      incomingBody,
-      matchedRule,
-      senderName: sender,
-      agendaContext
-    });
+    return sanitizeAgainstCvAsk(
+      generateBasicReply({
+        contactName,
+        incomingBody,
+        matchedRule,
+        senderName: sender,
+        agendaContext
+      })
+    );
   }
 }
 
@@ -718,5 +838,7 @@ module.exports = {
   extractFirstName,
   parseSaludoAndMessage,
   formatStoredCvContext,
-  replyCvPolicyInstructions
+  replyCvPolicyInstructions,
+  looksLikeAskingForCv,
+  stripCvRequestFromReply
 };

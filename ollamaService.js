@@ -50,7 +50,9 @@ function isConfigured() {
 async function chatReply(userPrompt, opts = {}) {
   const base = String(opts.basePrompt || '').trim();
   const extra = String(opts.systemExtra || '').trim();
-  const systemParts = [MONICA_SYSTEM, base, extra].filter(Boolean);
+  // extra (política CV/agenda) va PRIMERO: los modelos abiertos respetan más
+  // las instrucciones al inicio del system prompt.
+  const systemParts = [extra, MONICA_SYSTEM, base].filter(Boolean);
   const system = systemParts.join('\n\n');
 
   const response = await axios.post(

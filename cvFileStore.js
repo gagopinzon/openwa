@@ -4,7 +4,9 @@ const crypto = require('crypto');
 
 const DATA_DIR = path.join(__dirname, 'data');
 const CV_FILES_DIR = path.join(DATA_DIR, 'cv-files');
+const CV_HISTORY_DIR = path.join(CV_FILES_DIR, 'history');
 const MANIFEST_FILE = path.join(DATA_DIR, 'cvs-manifest.json');
+/** TTL solo para tokens de URL pública firmada (no borra PDFs). */
 const TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 días
 const CV_TTL_MS = TOKEN_TTL_SECONDS * 1000;
 
@@ -96,6 +98,9 @@ function ensureCvFilesDir() {
   }
   if (!fs.existsSync(CV_FILES_DIR)) {
     fs.mkdirSync(CV_FILES_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(CV_HISTORY_DIR)) {
+    fs.mkdirSync(CV_HISTORY_DIR, { recursive: true });
   }
 }
 
@@ -279,7 +284,7 @@ function resolveFilePath(cvId) {
   if (!/^[a-f0-9]{16,64}$/i.test(id)) return null;
 
   ensureCvFilesDir();
-  const entries = fs.readdirSync(CV_FILES_DIR);
+  const entries = fs.readdirSync(CV_FILES_DIR).filter((name) => name !== 'history');
   const match = entries.find((name) => name.startsWith(id + '.') || name === id);
   if (!match) return null;
   return path.join(CV_FILES_DIR, match);
@@ -365,8 +370,11 @@ function buildCvPublicUrl(cvId) {
 function clearAllCvFiles() {
   ensureCvFilesDir();
   for (const name of fs.readdirSync(CV_FILES_DIR)) {
+    if (name === 'history') continue;
+    const full = path.join(CV_FILES_DIR, name);
     try {
-      fs.unlinkSync(path.join(CV_FILES_DIR, name));
+      if (fs.statSync(full).isDirectory()) continue;
+      fs.unlinkSync(full);
     } catch (err) {
       console.warn(`[cvFileStore] No se pudo borrar ${name}:`, err.message);
     }
@@ -501,15 +509,10 @@ function loadCvsManifest() {
     const hadMissingSavedAt = restored.some((cv) => !cv.savedAt);
     const { kept, expired } = purgeExpiredCvs(restored);
 
-    if (dropped > 0 || expired.length > 0 || hadMissingSavedAt) {
+    if (dropped > 0 || hadMissingSavedAt) {
       if (dropped > 0) {
         console.warn(
           `[cvFileStore] Manifest: ${dropped} CV(s) omitidos (archivo faltante).`
-        );
-      }
-      if (expired.length > 0) {
-        console.warn(
-          `[cvFileStore] Caducidad 7 días: ${expired.length} CV(s) borrados. Quedan ${kept.length}.`
         );
       }
       saveCvsManifest(kept);
@@ -544,18 +547,41 @@ function deleteCvFile(cvId) {
 }
 
 /**
- * Quita CVs con más de 7 días y borra sus PDFs.
+ * Mueve un PDF activo a history/ (archivo permanente). No elimina el binario.
+ * @param {string} cvId
+ * @returns {{ retired: boolean, historyPath?: string, reason?: string }}
+ */
+function retireCvFileToHistory(cvId) {
+  const id = String(cvId || '').trim();
+  const filePath = resolveFilePath(id);
+  if (!filePath) {
+    return { retired: false, reason: 'not_found' };
+  }
+  ensureCvFilesDir();
+  const base = path.basename(filePath);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const historyName = `${id}-${stamp}${path.extname(base) || '.pdf'}`;
+  const historyPath = path.join(CV_HISTORY_DIR, historyName);
+  try {
+    fs.renameSync(filePath, historyPath);
+    console.log(`[cvFileStore] CV ${id} retirado a history/${historyName}`);
+    return { retired: true, historyPath };
+  } catch (err) {
+    console.warn(`[cvFileStore] No se pudo retirar CV ${id}:`, err.message);
+    return { retired: false, reason: err.message };
+  }
+}
+
+/**
+ * Archivo permanente: ya no borra CVs por edad.
+ * Conserva la firma por compatibilidad con callers / tests.
  * @param {Array} cvs
  * @param {number} [now]
  * @returns {{ kept: Array, expired: Array }}
  */
 function purgeExpiredCvs(cvs, now = Date.now()) {
   const stamped = stampMissingSavedAt(cvs, now);
-  const { kept, expired } = partitionExpired(stamped, now);
-  for (const cv of expired) {
-    if (cv && cv.cvId) deleteCvFile(cv.cvId);
-  }
-  return { kept, expired };
+  return { kept: stamped, expired: [] };
 }
 
 /** Borra PDFs + manifiesto */
@@ -571,6 +597,9 @@ function isPanelIntegrationConfigured() {
 module.exports = {
   CV_TTL_MS,
   TOKEN_TTL_SECONDS,
+  CV_FILES_DIR,
+  CV_HISTORY_DIR,
+  MANIFEST_FILE,
   isCvExpired,
   stampMissingSavedAt,
   partitionExpired,
@@ -583,6 +612,7 @@ module.exports = {
   readCvFileBuffer,
   getCvDisplayFilename,
   deleteCvFile,
+  retireCvFileToHistory,
   buildSignedToken,
   verifySignedToken,
   buildCvPublicUrl,
@@ -601,7 +631,5 @@ module.exports = {
   describeCvProbeFailure,
   isValidPdfBuffer,
   isPanelIntegrationConfigured,
-  publicBaseUrl,
-  CV_FILES_DIR,
-  MANIFEST_FILE
+  publicBaseUrl
 };

@@ -177,7 +177,7 @@ let cvsData = cvFileStore.loadCvsManifest();
 if (cvsData.length > 0) {
   const workspaceCount = cvFileStore.getWorkspaceCvs(cvsData).length;
   console.log(
-    `[cvs] Restaurados ${cvsData.length} CV(s) desde disco (${workspaceCount} en mesa de trabajo, caducan a los 7 días)`
+    `[cvs] Restaurados ${cvsData.length} CV(s) desde disco (${workspaceCount} en mesa de trabajo; archivo permanente)`
   );
 }
 
@@ -196,15 +196,10 @@ function workspaceCvs() {
 }
 
 function purgeExpiredArchive() {
-  const { kept, expired } = cvFileStore.purgeExpiredCvs(cvsData);
+  // Archivo permanente: solo normaliza savedAt; no borra PDFs.
+  const { kept } = cvFileStore.purgeExpiredCvs(cvsData);
   cvsData = kept;
-  if (expired.length > 0) {
-    persistCvsData();
-    console.log(
-      `🧹 Caducidad 7 días: ${expired.length} CV(s) borrados; quedan ${cvsData.length}`
-    );
-  }
-  return expired.length;
+  return 0;
 }
 
 purgeExpiredArchive();
@@ -216,7 +211,7 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000).unref();
 
-/** Saca de la mesa los CVs enviados; el archivo de 7 días se conserva. */
+/** Saca de la mesa los CVs enviados; el archivo permanente se conserva. */
 function removeSuccessfullySentFromWorkspace(results) {
   const remainingBefore = workspaceCvs().length;
   if (!Array.isArray(results) || results.length === 0) {
@@ -241,27 +236,25 @@ function removeSuccessfullySentFromWorkspace(results) {
   if (removed > 0) {
     persistCvsData();
     console.log(
-      `🧹 Mesa de trabajo: archivados ${removed} CV(s) enviados (${remaining} en mesa, ${cvsData.length} en archivo 7 días)`
+      `🧹 Mesa de trabajo: archivados ${removed} CV(s) enviados (${remaining} en mesa, ${cvsData.length} en archivo permanente)`
     );
   }
   return { removed, remaining };
 }
 
 function liveArchiveCvs() {
-  return cvsData.filter(
-    (c) => c && c.procesado && c.cvId && !cvFileStore.isCvExpired(c)
-  );
+  return cvsData.filter((c) => c && c.procesado && c.cvId);
 }
 
 /**
  * Resuelve el CV del lead por teléfono (o cvId del historial).
- * Busca en el archivo de 7 días, no solo en la mesa de trabajo.
+ * Busca en el archivo permanente, no solo en la mesa de trabajo.
  * @param {string} phone
  * @param {{ cvId?: string|null }} [hints]
  */
 function findCvForPhone(phone, hints = {}) {
   const reusable = cvFileStore.loadCvsManifest().filter(
-    (c) => c && c.procesado && c.cvId && !cvFileStore.isCvExpired(c)
+    (c) => c && c.procesado && c.cvId
   );
   if (hints.cvId) {
     const byId = reusable.find((c) => c.cvId === hints.cvId);
@@ -1487,7 +1480,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
       contactHistory.phonesMatch
     );
     for (const oldId of replacedIds) {
-      cvFileStore.deleteCvFile(oldId);
+      cvFileStore.retireCvFileToHistory(oldId);
     }
     cvsData = merged;
 
@@ -1522,7 +1515,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
     persistCvsData();
     const ws = workspaceCvs();
     console.log(
-      `Procesamiento completado. ${ws.length} CVs en mesa (${cvsData.length} en archivo 7 días).`
+      `Procesamiento completado. ${ws.length} CVs en mesa (${cvsData.length} en archivo permanente).`
     );
 
     res.json({
@@ -2246,7 +2239,7 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
           c.cvId !== entry.cvId &&
           contactHistory.phonesMatch(c.telefono, entry.telefono)
       );
-      if (prev && prev.cvId) cvFileStore.deleteCvFile(prev.cvId);
+      if (prev && prev.cvId) cvFileStore.retireCvFileToHistory(prev.cvId);
     }
 
     // Actualizar si ya hay uno con mismo teléfono; si no, agregar
@@ -3371,12 +3364,12 @@ app.post('/clear-data', (req, res) => {
   cvsData = cvFileStore.archiveAllWorkspace(cvsData);
   persistCvsData();
   console.log(
-    `Mesa de trabajo vaciada. Archivo 7 días: ${cvsData.length} CV(s) conservados.`
+    `Mesa de trabajo vaciada. Archivo permanente: ${cvsData.length} CV(s) conservados.`
   );
 
   res.json({
     success: true,
-    message: 'Mesa de trabajo limpiada. Los CVs de la última semana siguen disponibles para agendar.',
+    message: 'Mesa de trabajo limpiada. Los CVs del archivo permanente siguen disponibles para agendar.',
     cvs: [],
     archiveCount: cvsData.length
   });
@@ -3694,11 +3687,37 @@ app.get('/sending-status-all', (req, res) => {
 
 function getCvContextForPhone(phone, hints = {}) {
   const cv = findCvForPhone(phone, hints);
+  if (!cv) logCvLookupMiss(phone, hints);
   return formatStoredCvContext(cv);
 }
 
 function getLeadCvForPhone(phone, hints = {}) {
-  return findCvForPhone(phone, hints) || null;
+  const cv = findCvForPhone(phone, hints) || null;
+  if (!cv) logCvLookupMiss(phone, hints);
+  return cv;
+}
+
+/**
+ * Cuando no se encuentra CV por teléfono, imprime pistas para diagnosticar
+ * (formato de teléfono, manifest vacío, archivos borrados, cvId huérfano).
+ */
+function logCvLookupMiss(phone, hints = {}) {
+  try {
+    const manifest = cvFileStore.loadCvsManifest() || [];
+    const alive = manifest.filter((c) => c && c.procesado && c.cvId);
+    const phones = alive.map((c) => c.telefono).filter(Boolean).slice(0, 10);
+    const wantedCvId = String(hints.cvId || '').trim();
+    const wantedFileExists = wantedCvId
+      ? Boolean(cvFileStore.getCvFileMeta(wantedCvId))
+      : null;
+    console.warn(
+      `[cv lookup miss] phone=${phone || '?'} hintCvId=${wantedCvId || 'null'} ` +
+        `hintFileOnDisk=${wantedFileExists === null ? 'n/a' : wantedFileExists} ` +
+        `manifestAlive=${alive.length} sample=${JSON.stringify(phones)}`
+    );
+  } catch (err) {
+    console.warn('[cv lookup miss] log failed:', err.message);
+  }
 }
 
 function userHasAnyControl(req) {

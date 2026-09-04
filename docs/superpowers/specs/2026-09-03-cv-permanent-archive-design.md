@@ -1,7 +1,7 @@
 # Archivo permanente de CVs
 
 **Fecha:** 2026-09-03  
-**Estado:** pendiente de revisión  
+**Estado:** aprobado e implementado (2026-09-03)  
 **Contexto:** Tras “Cargar CVs” → generar mensajes → enviar, al agendar la IA pedía el CV otra vez porque el PDF ya no estaba en disco. Hoy el sistema **borra CVs a los 7 días** y, al re-subir el mismo teléfono, **elimina el PDF anterior**.
 
 ## Objetivo
