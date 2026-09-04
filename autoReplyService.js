@@ -720,7 +720,7 @@ async function sendCvPreviewDocument({
   }
 }
 
-function applyPreferredTimeDecision(decision, { today, normalizedPhone }) {
+function applyPreferredTimeDecision(decision, { today, normalizedPhone, slotsPrompt }) {
   if (decision.action === 'confirm' && decision.slot) {
     agendaOfferStore.rememberProposedSlot(normalizedPhone, decision.slot);
     return {
@@ -744,6 +744,13 @@ function applyPreferredTimeDecision(decision, { today, normalizedPhone }) {
         preferredTime: decision.preferredTime
       },
       agendaContext: null
+    };
+  }
+  if (decision.action === 'list' && slotsPrompt) {
+    return {
+      replyText: null,
+      agendaMeta: { reason: 'slots_offered_for_day' },
+      agendaContext: `${agendaPreferredTime.DAY_CHOSEN_PREFIX}${slotsPrompt}`
     };
   }
   return {
@@ -1701,7 +1708,11 @@ async function processBatchedAutoReply(items) {
           });
           const applied = applyPreferredTimeDecision(decision, {
             today,
-            normalizedPhone
+            normalizedPhone,
+            slotsPrompt:
+              decision.action === 'list'
+                ? agendaAvailability.formatSlotsForPrompt(slots, 1)
+                : undefined
           });
           if (applied.replyText) {
             replyText = applied.replyText;
@@ -1713,7 +1724,7 @@ async function processBatchedAutoReply(items) {
             agendaContext = applied.agendaContext;
             agendaMeta = { ...agendaMeta, ...applied.agendaMeta };
             console.log(
-              `[auto-reply] agenda pregunta hora preferida (${range.fechaInicio}…${range.fechaFin})`
+              `[auto-reply] agenda ${decision.action} (${range.fechaInicio}…${range.fechaFin})`
             );
           }
         } else {

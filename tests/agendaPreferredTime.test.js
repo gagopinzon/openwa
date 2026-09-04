@@ -7,7 +7,9 @@ const {
   formatConfirmReply,
   formatNearestReply,
   ASK_PREFERRED_CONTEXT,
-  resolvePreferredTimeOffer
+  DAY_CHOSEN_PREFIX,
+  resolvePreferredTimeOffer,
+  isAskPreferredContext
 } = require('../agendaPreferredTime');
 
 function slot(fecha, horaInicio, horaFin) {
@@ -112,6 +114,25 @@ describe('agendaPreferredTime', () => {
     assert.equal(nearest.action, 'nearest');
     assert.equal(nearest.preferredTime, '17:00');
     assert.ok(nearest.nearby.length >= 1);
+  });
+
+  it('si el lead ya eligió hoy o mañana, lista horas y no vuelve a preguntar el día', () => {
+    const slots = [
+      slot(today, '16:00'),
+      slot(today, '17:00'),
+      slot(tomorrow, '10:00')
+    ];
+    const now = new Date('2026-09-02T18:00:00-06:00');
+    const opts = { ...dayOpts, now };
+
+    const hoy = resolvePreferredTimeOffer('Hoy me parece bien', slots, opts);
+    assert.equal(hoy.action, 'list');
+
+    const manana = resolvePreferredTimeOffer('mañana está bien', slots, opts);
+    assert.equal(manana.action, 'list');
+
+    assert.equal(resolvePreferredTimeOffer('me interesa', slots, opts).action, 'ask');
+    assert.equal(isAskPreferredContext(DAY_CHOSEN_PREFIX), false);
   });
 
   it('el mensaje de confirmación pide el sí y no lista el calendario', () => {

@@ -5,6 +5,10 @@ const ASK_PREFERRED_CONTEXT =
   'NO listes horarios, tramos, ni ejemplos numéricos de disponibilidad. ' +
   'Pregunta UNA sola cosa: qué horario le acomoda mejor (hoy o mañana).';
 
+const DAY_CHOSEN_PREFIX =
+  'El lead ya eligió el día. NO vuelvas a preguntar si prefiere hoy o mañana. ' +
+  'Ofrece las horas libres de ese día y pregunta cuál le queda.\n';
+
 function timeToMinutes(hhmm) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
   if (!m) return NaN;
@@ -179,16 +183,21 @@ function dayOptsFromRange(range, today, tomorrow) {
  * @param {string} body
  * @param {Array<object>} slots
  * @param {{ today: string, tomorrow: string, now?: Date }} opts
- * @returns {{ action: 'ask'|'confirm'|'nearest', slot?: object, nearby?: object[], preferredTime?: string }}
+ * @returns {{ action: 'ask'|'list'|'confirm'|'nearest', slot?: object, nearby?: object[], preferredTime?: string }}
  */
 function resolvePreferredTimeOffer(body, slots, opts = {}) {
   const today = String(opts.today || agendaIntent.todayYmd(opts.now));
   const tomorrow =
     String(opts.tomorrow || '') || agendaIntent.addDaysYmd(today, 1);
   const hhmm = agendaPreferredHhmm(body);
-  if (!hhmm) return { action: 'ask' };
-
   const range = agendaIntent.resolveDateRangeFromMessage(body, opts.now);
+  if (!hhmm) {
+    if (range && range.fechaInicio === range.fechaFin) {
+      return { action: 'list' };
+    }
+    return { action: 'ask' };
+  }
+
   const days = dayOptsFromRange(range, today, tomorrow);
   const searchDays =
     days.today === days.tomorrow
@@ -212,6 +221,7 @@ function isAskPreferredContext(agendaContext) {
 
 module.exports = {
   ASK_PREFERRED_CONTEXT,
+  DAY_CHOSEN_PREFIX,
   agendaPreferredHhmm,
   pickExactSlotTodayOrTomorrow,
   selectNearestInWindow,
