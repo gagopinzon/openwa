@@ -8363,7 +8363,7 @@ class CVAnalyzer {
                 if (
                     this.activeConversation &&
                     this.activeConversation.sessionId === data.sessionId &&
-                    this.activeConversation.chatId === data.chatId
+                    this.sameConversationChatId(this.activeConversation.chatId, data.chatId)
                 ) {
                     this.activeConversationAiPaused = Boolean(data.aiPaused);
                     this.activeConversationKnownContact = true;

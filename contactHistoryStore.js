@@ -52,6 +52,68 @@ function phonesMatch(a, b) {
   return sa === sb || sa.slice(-10) === sb.slice(-10);
 }
 
+function isLidChatId(chatId) {
+  return /@lid$/i.test(String(chatId || ''));
+}
+
+function extractDigitsFromChatId(chatId) {
+  return String(chatId || '').replace(/@.*$/, '').replace(/\D/g, '');
+}
+
+function lidDigitsFrom(whatsappLid, chatId) {
+  const fromMeta = String(whatsappLid || '').replace(/\D/g, '');
+  if (fromMeta) return fromMeta;
+  return isLidChatId(chatId) ? extractDigitsFromChatId(chatId) : '';
+}
+
+function isLikelyLidKey(phone, chatId) {
+  const p = String(phone || '').trim();
+  if (!p) return false;
+  if (p.startsWith('lid_')) return true;
+  const lid = lidDigitsFrom('', chatId);
+  if (lid && p === lid) return true;
+  if (/^2000\d+$/.test(p) && p.length >= 13) return true;
+  return false;
+}
+
+/**
+ * Elige la clave Mongo a pausar/reactivar. Evita duplicar contactos por @lid o 52/521.
+ * @param {{
+ *   requestedPhone?: string,
+ *   chatId?: string,
+ *   whatsappLid?: string,
+ *   existingByLid?: { normalizedPhone?: string }|null,
+ *   existingByFuzzy?: { normalizedPhone?: string }|null,
+ *   existingByChatId?: { normalizedPhone?: string }|null
+ * }} opts
+ * @returns {string}
+ */
+function resolvePauseTargetPhone(opts = {}) {
+  const existingByLid = opts.existingByLid;
+  if (existingByLid && existingByLid.normalizedPhone) {
+    return String(existingByLid.normalizedPhone);
+  }
+  const existingByChatId = opts.existingByChatId;
+  if (existingByChatId && existingByChatId.normalizedPhone) {
+    return String(existingByChatId.normalizedPhone);
+  }
+  const existingByFuzzy = opts.existingByFuzzy;
+  if (existingByFuzzy && existingByFuzzy.normalizedPhone) {
+    return String(existingByFuzzy.normalizedPhone);
+  }
+
+  const requested = String(opts.requestedPhone || '').trim();
+  const lid = lidDigitsFrom(opts.whatsappLid, opts.chatId);
+  if (lid && (isLidChatId(opts.chatId) || requested === lid || requested === `lid_${lid}`)) {
+    return `lid_${lid}`;
+  }
+  return requested;
+}
+
+function aiPausedFromContactDocs(docs) {
+  return (Array.isArray(docs) ? docs : []).some((d) => Boolean(d && d.aiPaused));
+}
+
 function mongoUriConfigured() {
   return Boolean(process.env.MONGODB_URI && String(process.env.MONGODB_URI).trim());
 }
@@ -422,6 +484,80 @@ async function findContactByLid(whatsappLid) {
 }
 
 /**
+ * @param {string} chatId
+ * @returns {Promise<object|null>}
+ */
+async function findContactByChatId(chatId) {
+  const id = String(chatId || '').trim();
+  if (!id || !mongoUriConfigured()) return null;
+
+  let coll;
+  try {
+    coll = await getCollection();
+  } catch {
+    return null;
+  }
+  if (!coll) return null;
+
+  return coll.findOne({ chatId: id });
+}
+
+/**
+ * Contactos que representan al mismo lead (teléfono, LID, chatId, duplicados viejos).
+ * @param {{ phone?: string, whatsappLid?: string, chatId?: string }} opts
+ * @returns {Promise<object[]>}
+ */
+async function findMatchingContactDocs(opts = {}) {
+  const phone = String(opts.phone || '').trim();
+  const chatId = String(opts.chatId || '').trim();
+  const lid = lidDigitsFrom(opts.whatsappLid, chatId);
+  const found = new Map();
+
+  const add = (doc) => {
+    if (doc && doc.normalizedPhone && !found.has(doc.normalizedPhone)) {
+      found.set(doc.normalizedPhone, doc);
+    }
+  };
+
+  if (chatId) add(await findContactByChatId(chatId));
+  if (lid) {
+    add(await findContactByLid(lid));
+    add(await getContactByPhone(lid));
+    add(await getContactByPhone(`lid_${lid}`));
+  }
+  if (phone) {
+    add(await getContactByPhone(phone));
+    if (phone.startsWith('lid_')) {
+      add(await findContactByLid(phone.slice(4)));
+    } else if (!isLikelyLidKey(phone, chatId)) {
+      add(await findContactByPhoneFuzzy(phone));
+    }
+  }
+
+  return [...found.values()];
+}
+
+function mapContactSession(doc, aiPausedOverride) {
+  if (!doc) return null;
+  return {
+    logicalSessionId: doc.logicalSessionId || null,
+    openwaSessionId: doc.openwaSessionId || null,
+    name: doc.name || null,
+    preferredName: doc.preferredName || null,
+    cvId: doc.cvId || null,
+    lastOutboundAt: doc.lastOutboundAt
+      ? new Date(doc.lastOutboundAt).toISOString()
+      : null,
+    aiPaused: aiPausedOverride !== undefined ? Boolean(aiPausedOverride) : Boolean(doc.aiPaused),
+    aiPausedAt: doc.aiPausedAt || null,
+    lastAiGreetingAt: doc.lastAiGreetingAt
+      ? new Date(doc.lastAiGreetingAt).toISOString()
+      : null,
+    normalizedPhone: doc.normalizedPhone || null
+  };
+}
+
+/**
  * Alta automática al recibir un mensaje (contacto nuevo o solo LID).
  */
 async function enrollInboundContact({
@@ -488,26 +624,21 @@ async function enrollInboundContact({
 
 /**
  * @param {string} normalizedPhone
- * @returns {Promise<{ logicalSessionId?: string, openwaSessionId?: string, name?: string }|null>}
+ * @param {{ whatsappLid?: string, chatId?: string }} [extra]
+ * @returns {Promise<{ logicalSessionId?: string, openwaSessionId?: string, name?: string, aiPaused?: boolean }|null>}
  */
-async function getContactSession(normalizedPhone) {
-  const doc = await getContactByPhone(normalizedPhone);
-  if (!doc) return null;
-  return {
-    logicalSessionId: doc.logicalSessionId || null,
-    openwaSessionId: doc.openwaSessionId || null,
-    name: doc.name || null,
-    preferredName: doc.preferredName || null,
-    cvId: doc.cvId || null,
-    lastOutboundAt: doc.lastOutboundAt
-      ? new Date(doc.lastOutboundAt).toISOString()
-      : null,
-    aiPaused: Boolean(doc.aiPaused),
-    aiPausedAt: doc.aiPausedAt || null,
-    lastAiGreetingAt: doc.lastAiGreetingAt
-      ? new Date(doc.lastAiGreetingAt).toISOString()
-      : null
-  };
+async function getContactSession(normalizedPhone, extra = {}) {
+  const docs = await findMatchingContactDocs({
+    phone: normalizedPhone,
+    whatsappLid: extra.whatsappLid,
+    chatId: extra.chatId
+  });
+  if (!docs.length) return null;
+  const primary =
+    docs.find((d) => d.normalizedPhone === normalizedPhone) ||
+    docs.find((d) => d.normalizedPhone && !String(d.normalizedPhone).startsWith('lid_')) ||
+    docs[0];
+  return mapContactSession(primary, aiPausedFromContactDocs(docs));
 }
 
 /**
@@ -587,12 +718,32 @@ async function setContactAiPaused(normalizedPhone, paused, meta = {}) {
   }
   if (!coll) return { ok: false, error: 'MongoDB no disponible' };
 
+  const lid = lidDigitsFrom(meta.whatsappLid, meta.chatId);
+  const existingByLid = lid ? await findContactByLid(lid) : null;
+  const existingByChatId = meta.chatId ? await findContactByChatId(meta.chatId) : null;
+  let existingByFuzzy = null;
+  if (!isLikelyLidKey(normalizedPhone, meta.chatId)) {
+    existingByFuzzy = await findContactByPhoneFuzzy(normalizedPhone);
+  }
+
+  const targetPhone = resolvePauseTargetPhone({
+    requestedPhone: normalizedPhone,
+    chatId: meta.chatId,
+    whatsappLid: meta.whatsappLid || lid,
+    existingByLid,
+    existingByFuzzy,
+    existingByChatId
+  });
+  if (!targetPhone) {
+    return { ok: false, error: 'teléfono inválido' };
+  }
+
   const aiPaused = Boolean(paused);
   const now = new Date();
   const $set = { aiPaused };
   // No guardar pushName de WhatsApp sobre el nombre del pitch/CV.
   if (meta.name) {
-    const existing = await getContactByPhone(normalizedPhone);
+    const existing = await getContactByPhone(targetPhone);
     if (!existing?.preferredName) {
       $set.name = String(meta.name).trim();
     }
@@ -600,6 +751,7 @@ async function setContactAiPaused(normalizedPhone, paused, meta = {}) {
   if (meta.logicalSessionId) $set.logicalSessionId = String(meta.logicalSessionId);
   if (meta.openwaSessionId) $set.openwaSessionId = String(meta.openwaSessionId);
   if (meta.chatId) $set.chatId = String(meta.chatId);
+  if (lid) $set.whatsappLid = lid;
   if (aiPaused) {
     $set.aiPausedAt = now;
   }
@@ -609,11 +761,11 @@ async function setContactAiPaused(normalizedPhone, paused, meta = {}) {
     : { $set, $unset: { aiPausedAt: '' } };
 
   await coll.updateOne(
-    { normalizedPhone },
+    { normalizedPhone: targetPhone },
     {
       ...update,
       $setOnInsert: {
-        normalizedPhone,
+        normalizedPhone: targetPhone,
         contactedAt: now,
         source: meta.source || 'ai_control',
         enrolledFromInbound: true
@@ -621,16 +773,40 @@ async function setContactAiPaused(normalizedPhone, paused, meta = {}) {
     },
     { upsert: true }
   );
-  return { ok: true, aiPaused };
+
+  const extraKeys = new Set();
+  for (const doc of [existingByLid, existingByFuzzy, existingByChatId]) {
+    if (doc && doc.normalizedPhone && doc.normalizedPhone !== targetPhone) {
+      extraKeys.add(doc.normalizedPhone);
+    }
+  }
+  if (lid && lid !== targetPhone) extraKeys.add(lid);
+  if (lid) extraKeys.add(`lid_${lid}`);
+  if (normalizedPhone && normalizedPhone !== targetPhone) extraKeys.add(normalizedPhone);
+
+  const siblingUpdate = aiPaused
+    ? { $set: { aiPaused: true, aiPausedAt: now } }
+    : { $set: { aiPaused: false }, $unset: { aiPausedAt: '' } };
+  for (const key of extraKeys) {
+    if (!key || key === targetPhone) continue;
+    await coll.updateOne({ normalizedPhone: key }, siblingUpdate);
+  }
+
+  return { ok: true, aiPaused, normalizedPhone: targetPhone };
 }
 
 /**
  * @param {string} normalizedPhone
+ * @param {{ whatsappLid?: string, chatId?: string }} [extra]
  * @returns {Promise<boolean>}
  */
-async function isContactAiPaused(normalizedPhone) {
-  const doc = await getContactByPhone(normalizedPhone);
-  return Boolean(doc && doc.aiPaused);
+async function isContactAiPaused(normalizedPhone, extra = {}) {
+  const docs = await findMatchingContactDocs({
+    phone: normalizedPhone,
+    whatsappLid: extra.whatsappLid,
+    chatId: extra.chatId
+  });
+  return aiPausedFromContactDocs(docs);
 }
 
 /**
@@ -691,12 +867,15 @@ module.exports = {
   isKnownContact,
   findContactByPhoneFuzzy,
   findContactByLid,
+  findContactByChatId,
   enrollInboundContact,
   getContactSession,
   assignContactSession,
   touchLastAiGreeting,
   setContactAiPaused,
   isContactAiPaused,
+  resolvePauseTargetPhone,
+  aiPausedFromContactDocs,
   linkCvToContact,
   resolveAiContactName
 };

@@ -1,13 +1,16 @@
 const agendaIntent = require('./agendaIntent');
 
 const ASK_PREFERRED_CONTEXT =
-  'PREGUNTA_HORA: El lead quiere agendar pero aún no dijo una hora concreta. ' +
+  'PREGUNTA_HORA: El lead quiere agendar pero aún no dijo día ni hora concreta. ' +
   'NO listes horarios, tramos, ni ejemplos numéricos de disponibilidad. ' +
-  'Pregunta UNA sola cosa: qué horario le acomoda mejor (hoy o mañana).';
+  'Pregunta UNA sola cosa: qué día y hora le acomodan mejor (puede ser hoy, mañana u otro día).';
 
 const DAY_CHOSEN_PREFIX =
-  'El lead ya eligió el día. NO vuelvas a preguntar si prefiere hoy o mañana. ' +
-  'Ofrece las horas libres de ese día y pregunta cuál le queda.\n';
+  'El lead ya eligió el día. NO vuelvas a preguntar el día. ' +
+  'Ofrece las horas libres de ese día (usa la etiqueta del día que indica el reloj: hoy / mañana / el lunes…) y pregunta cuál le queda.\n';
+
+const NO_SLOTS_THAT_DAY_PREFIX =
+  'El día que pidió el lead NO tiene huecos. Ofrece las alternativas reales de abajo con la etiqueta correcta de cada día (nunca digas "mañana" si no es el día siguiente).\n';
 
 function timeToMinutes(hhmm) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
@@ -139,7 +142,7 @@ function selectNearestInWindow(slots, preferredHhmm, opts = {}) {
  */
 function formatConfirmReply(slot, today) {
   const hora = String((slot && slot.horaInicio) || '').trim();
-  const when = String((slot && slot.fecha) || '') === String(today) ? 'hoy' : 'mañana';
+  const when = agendaIntent.relativeDayLabel(slot && slot.fecha, today);
   return `Perfecto, te agendo a las ${hora} ${when}, ¿te queda?`;
 }
 
@@ -159,12 +162,13 @@ function formatNearestReply(nearby, preferredHhmm, today) {
   const fechas = [...byFecha.keys()].sort();
   const todayYmd = today ? String(today) : fechas[0];
   const lines = fechas.map((fecha) => {
-    const label = fecha === todayYmd ? 'Hoy' : 'Mañana';
-    return `${label}: ${byFecha.get(fecha).join(', ')}`;
+    const label = agendaIntent.relativeDayLabel(fecha, todayYmd);
+    const pretty = label.charAt(0).toUpperCase() + label.slice(1);
+    return `${pretty}: ${byFecha.get(fecha).join(', ')}`;
   });
   const hora = String(preferredHhmm || '').trim() || 'esa hora';
   if (!lines.length) {
-    return `A las ${hora} no hay hueco. ¿Te late otra hora hoy o mañana?`;
+    return `A las ${hora} no hay hueco. ¿Te late otra hora u otro día?`;
   }
   return (
     `A las ${hora} no hay hueco. Las más cercanas son:\n` +
@@ -222,6 +226,7 @@ function isAskPreferredContext(agendaContext) {
 module.exports = {
   ASK_PREFERRED_CONTEXT,
   DAY_CHOSEN_PREFIX,
+  NO_SLOTS_THAT_DAY_PREFIX,
   agendaPreferredHhmm,
   pickExactSlotTodayOrTomorrow,
   selectNearestInWindow,

@@ -184,6 +184,46 @@ async function run() {
   );
 
   resetForTests();
+
+  await withEnv(
+    {
+      AUTO_REPLY_SKIP_DELAYS: 'false',
+      AUTO_REPLY_BATCH_FIRST_MS: '5000',
+      AUTO_REPLY_BATCH_NEXT_MS: '5000'
+    },
+    async () => {
+      const { cancelMatching } = require('../messageBatcher');
+      const flushed = [];
+      const onFlush = async (items) => {
+        flushed.push(items.map((i) => i.body));
+        return { handled: true };
+      };
+
+      await enqueue({
+        key: 'ow1:188119869571223@lid',
+        item: { body: 'hola', normalizedPhone: '5215512345678' },
+        onFlush
+      });
+      await enqueue({
+        key: 'ow1:other@c.us',
+        item: { body: 'otro', normalizedPhone: '5219981112233' },
+        onFlush
+      });
+
+      const result = cancelMatching(
+        (item, key) =>
+          String(key).startsWith('ow1:') && item.normalizedPhone === '5215512345678'
+      );
+      assert.equal(result.count, 1);
+      assert.deepEqual(result.keys, ['ow1:188119869571223@lid']);
+      assert.equal(pendingCount('ow1:188119869571223@lid'), 0);
+      assert.equal(pendingCount('ow1:other@c.us'), 1);
+      await sleep(60);
+      assert.deepEqual(flushed, []);
+    }
+  );
+
+  resetForTests();
   console.log('messageBatcher.test.js OK');
 }
 

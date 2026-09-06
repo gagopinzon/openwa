@@ -49,6 +49,55 @@ describe('agendaIntent', () => {
     assert.equal(jue.fechaInicio, jue.fechaFin);
   });
 
+  it('no confunde "de la mañana" con el día mañana', () => {
+    const today = todayYmd(fixed);
+    const amOnly = resolveDateRangeFromMessage('a las 9 de la mañana', fixed);
+    // Intención de horario → ventana corta desde hoy, no fuerza solo mañana
+    assert.ok(amOnly);
+    assert.equal(amOnly.fechaInicio, today);
+    assert.notEqual(amOnly.fechaFin, addDaysYmd(today, 1));
+
+    const mananaAm = resolveDateRangeFromMessage('mañana a las 9 de la mañana', fixed);
+    assert.deepEqual(mananaAm, {
+      fechaInicio: addDaysYmd(today, 1),
+      fechaFin: addDaysYmd(today, 1)
+    });
+  });
+
+  it('resuelve pasado mañana, en N días y el lunes relativo', () => {
+    const today = todayYmd(fixed); // sábado 2026-08-01
+    assert.deepEqual(resolveDateRangeFromMessage('pasado mañana', fixed), {
+      fechaInicio: addDaysYmd(today, 2),
+      fechaFin: addDaysYmd(today, 2)
+    });
+    assert.deepEqual(resolveDateRangeFromMessage('en 3 días', fixed), {
+      fechaInicio: addDaysYmd(today, 3),
+      fechaFin: addDaysYmd(today, 3)
+    });
+    const lun = resolveDateRangeFromMessage('el lunes me sirve', fixed);
+    assert.equal(lun.fechaInicio, addDaysYmd(today, 2)); // sábado → lunes
+  });
+
+  it('relativeDayLabel y reloj CDMX', () => {
+    const {
+      relativeDayLabel,
+      formatClockContextForPrompt,
+      weekdayOfYmd
+    } = require('../agendaIntent');
+    const today = '2026-08-01'; // sábado
+    assert.equal(relativeDayLabel(today, today), 'hoy');
+    assert.equal(relativeDayLabel(addDaysYmd(today, 1), today), 'mañana');
+    assert.equal(relativeDayLabel(addDaysYmd(today, 2), today), 'pasado mañana');
+    assert.match(relativeDayLabel(addDaysYmd(today, 3), today), /martes/i);
+    assert.equal(weekdayOfYmd(today), 6);
+
+    const clock = formatClockContextForPrompt(fixed);
+    assert.match(clock, /AHORA \(CDMX\)/);
+    assert.match(clock, /tarde|mañana|noche/);
+    assert.match(clock, /Hoy =/);
+    assert.match(clock, /En 3 días =/);
+  });
+
   it('matchea slot por hora', () => {
     const slots = [
       { fecha: '2026-08-02', horaInicio: '10:00', horaFin: '10:30', label: 'a' },

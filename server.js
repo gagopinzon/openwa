@@ -4486,11 +4486,18 @@ app.post('/api/conversations/reply', async (req, res) => {
       chatId
     });
 
-    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    const resolved = await autoReplyService.resolveConversationContact(
+      session.openwaSessionId,
+      chatId
+    );
+    const phone = resolved && resolved.normalizedPhone;
     const willPause = Boolean(phone && contactHistory.mongoUriConfigured());
 
     if (willPause) {
-      autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId);
+      autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId, {
+        normalizedPhone: phone,
+        whatsappLid: resolved.whatsappLid
+      });
     }
 
     res.json({
@@ -4506,12 +4513,23 @@ app.post('/api/conversations/reply', async (req, res) => {
     if (willPause) {
       setImmediate(async () => {
         try {
-          const pauseResult = await contactHistory.setContactAiPaused(phone, true);
+          const pauseResult = await contactHistory.setContactAiPaused(phone, true, {
+            chatId,
+            whatsappLid: resolved.whatsappLid || undefined,
+            logicalSessionId: session.id,
+            openwaSessionId: session.openwaSessionId,
+            name: resolved.name || undefined,
+            source: 'manual_reply'
+          });
           if (pauseResult.ok) {
+            autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId, {
+              normalizedPhone: pauseResult.normalizedPhone || phone,
+              whatsappLid: resolved.whatsappLid
+            });
             broadcastEvent('aiControlChanged', {
               sessionId: session.id,
               chatId,
-              telefono: phone,
+              telefono: pauseResult.normalizedPhone || phone,
               aiPaused: true,
               reason: 'manual_reply',
               timestamp: new Date().toISOString()
@@ -4555,16 +4573,24 @@ app.get('/api/conversations/contact-status', async (req, res) => {
       });
     }
 
-    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    const resolved = await autoReplyService.resolveConversationContact(
+      session.openwaSessionId,
+      chatId
+    );
+    const phone = (resolved && resolved.normalizedPhone) || '';
     let aiPaused = false;
-    /** Cualquier chat 1:1 con teléfono válido puede pausar/reactivar IA */
+    /** Cualquier chat 1:1 con teléfono o LID válido puede pausar/reactivar IA */
     let knownContact = Boolean(phone);
     let linkedCvId = null;
     if (phone) {
-      const contactDoc = await contactHistory.getContactByPhone(phone);
-      if (contactDoc) {
-        aiPaused = Boolean(contactDoc.aiPaused);
-        linkedCvId = contactDoc.cvId || null;
+      const contactSession = await contactHistory.getContactSession(phone, {
+        whatsappLid: resolved && resolved.whatsappLid,
+        chatId
+      });
+      if (contactSession) {
+        aiPaused = Boolean(contactSession.aiPaused);
+        linkedCvId = contactSession.cvId || null;
+        knownContact = true;
       }
     }
 
@@ -4638,24 +4664,23 @@ app.post('/api/conversations/ai-control', async (req, res) => {
       });
     }
 
-    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    const resolved = await autoReplyService.resolveConversationContact(
+      session.openwaSessionId,
+      chatId
+    );
+    const phone = resolved && resolved.normalizedPhone;
     if (!phone) {
       return res.status(400).json({ success: false, error: 'No se pudo obtener el teléfono del chat' });
     }
 
-    let contactName = null;
-    try {
-      const contact = await getContact(session.openwaSessionId, chatId);
-      contactName = contact.name || null;
-    } catch {
-      /* nombre opcional */
-    }
+    const contactName = resolved.name || null;
 
     const result = await contactHistory.setContactAiPaused(phone, req.body.aiPaused, {
       name: contactName || undefined,
       logicalSessionId: session.id,
       openwaSessionId: session.openwaSessionId,
       chatId,
+      whatsappLid: resolved.whatsappLid || undefined,
       source: 'ai_control'
     });
     if (!result.ok) {
@@ -4664,13 +4689,16 @@ app.post('/api/conversations/ai-control', async (req, res) => {
 
     let cancelInfo = null;
     if (result.aiPaused) {
-      cancelInfo = autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId);
+      cancelInfo = autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId, {
+        normalizedPhone: result.normalizedPhone || phone,
+        whatsappLid: resolved.whatsappLid
+      });
     }
 
     broadcastEvent('aiControlChanged', {
       sessionId: session.id,
       chatId,
-      telefono: phone,
+      telefono: result.normalizedPhone || phone,
       aiPaused: result.aiPaused,
       reason: 'manual_toggle',
       timestamp: new Date().toISOString()
@@ -4680,7 +4708,7 @@ app.post('/api/conversations/ai-control', async (req, res) => {
       success: true,
       sessionId: session.id,
       chatId,
-      telefono: phone,
+      telefono: result.normalizedPhone || phone,
       aiPaused: result.aiPaused,
       cancelInfo
     });
@@ -5024,7 +5052,13 @@ app.post('/api/conversations/delete-chat', async (req, res) => {
       chatId
     });
 
-    const phone = contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
+    const resolved = await autoReplyService.resolveConversationContact(
+      session.openwaSessionId,
+      chatId
+    );
+    const phone =
+      (resolved && resolved.normalizedPhone) ||
+      contactHistory.normalizePhone(String(chatId).replace(/@.*$/, ''));
     let aiPaused = null;
     let inboxRemoved = 0;
 
@@ -5036,8 +5070,17 @@ app.post('/api/conversations/delete-chat', async (req, res) => {
       // Evita que la IA siga contestando tras limpiar el hilo
       if (contactHistory.mongoUriConfigured() && req.body.pauseAi !== false) {
         try {
-          autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId);
-          const pauseResult = await contactHistory.setContactAiPaused(phone, true);
+          autoReplyService.cancelPendingForChat(session.openwaSessionId, chatId, {
+            normalizedPhone: phone,
+            whatsappLid: resolved && resolved.whatsappLid
+          });
+          const pauseResult = await contactHistory.setContactAiPaused(phone, true, {
+            chatId,
+            whatsappLid: (resolved && resolved.whatsappLid) || undefined,
+            logicalSessionId: session.id,
+            openwaSessionId: session.openwaSessionId,
+            source: 'delete_chat'
+          });
           if (pauseResult.ok) aiPaused = true;
         } catch (err) {
           console.warn('[conversations] delete-chat aiPaused:', err.message);

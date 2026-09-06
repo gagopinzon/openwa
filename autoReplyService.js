@@ -47,6 +47,8 @@ const processedKeys = new Map();
 const chatLocks = new Map();
 /** Tokens de cancelación de envío en curso por chat (`openwaSessionId:chatId`). */
 const sendCancelTokens = new Map();
+/** Claves canceladas antes de que existiera token (carrera flush vs pausa). */
+const cancelledLockKeys = new Set();
 /** WhatsApp apaga el indicador ~25s; refrescar antes. */
 const TYPING_REFRESH_MS = 20000;
 
@@ -61,25 +63,150 @@ function isSendCancelled(lockKey) {
 
 /**
  * Cancela lote pendiente y marca cancelación de un envío en curso para el chat.
+ * También cancela claves relacionadas (@lid vs @c.us) y lotes del mismo teléfono.
  * @param {string} openwaSessionId
  * @param {string} chatId
+ * @param {{ normalizedPhone?: string, whatsappLid?: string, relatedChatIds?: string[] }} [extra]
  * @returns {{ cancelledBatchItems: number, sendCancelled: boolean }}
  */
-function cancelPendingForChat(openwaSessionId, chatId) {
-  const lockKey = chatLockKey(openwaSessionId, chatId);
-  const cancelledBatchItems = messageBatcher.cancelKey(lockKey);
-  const token = sendCancelTokens.get(lockKey);
-  let sendCancelled = false;
-  if (token) {
-    token.cancelled = true;
-    sendCancelled = true;
+function cancelPendingForChat(openwaSessionId, chatId, extra = {}) {
+  const sid = String(openwaSessionId || '').trim();
+  const cid = String(chatId || '').trim();
+  const related = new Set();
+  const addId = (id) => {
+    const s = String(id || '').trim();
+    if (s) related.add(s);
+  };
+  addId(cid);
+
+  const phone = String(extra.normalizedPhone || '').trim();
+  const lid = String(extra.whatsappLid || '').replace(/\D/g, '');
+  const digits = extractPhoneFromChatId(cid);
+
+  if (digits) {
+    addId(`${digits}@c.us`);
+    addId(`${digits}@lid`);
+    addId(`${digits}@s.whatsapp.net`);
   }
+  if (phone && !phone.startsWith('lid_')) {
+    addId(`${phone}@c.us`);
+    addId(`${phone}@s.whatsapp.net`);
+    const last10 = phone.slice(-10);
+    if (last10.length === 10) {
+      addId(`${last10}@c.us`);
+      addId(`52${last10}@c.us`);
+      addId(`521${last10}@c.us`);
+    }
+  }
+  if (phone.startsWith('lid_')) {
+    addId(`${phone.slice(4)}@lid`);
+  }
+  if (lid) addId(`${lid}@lid`);
+  if (Array.isArray(extra.relatedChatIds)) {
+    extra.relatedChatIds.forEach(addId);
+  }
+
+  let cancelledBatchItems = 0;
+  let sendCancelled = false;
+
+  const markToken = (lockKey) => {
+    cancelledLockKeys.add(lockKey);
+    const token = sendCancelTokens.get(lockKey);
+    if (token) {
+      token.cancelled = true;
+      sendCancelled = true;
+    }
+  };
+
+  for (const relatedId of related) {
+    const lockKey = chatLockKey(sid, relatedId);
+    cancelledBatchItems += messageBatcher.cancelKey(lockKey);
+    markToken(lockKey);
+  }
+
+  if (phone || lid) {
+    const matched = messageBatcher.cancelMatching((item, key) => {
+      if (!String(key).startsWith(`${sid}:`)) return false;
+      if (phone && item && contactHistory.phonesMatch(item.normalizedPhone, phone)) {
+        return true;
+      }
+      const itemLid = String(
+        (item && item.identity && item.identity.whatsappLid) || ''
+      ).replace(/\D/g, '');
+      if (lid && itemLid && itemLid === lid) return true;
+      return false;
+    });
+    cancelledBatchItems += matched.count;
+    for (const key of matched.keys) {
+      markToken(key);
+    }
+  }
+
+  for (const lockKey of sendCancelTokens.keys()) {
+    if (!lockKey.startsWith(`${sid}:`)) continue;
+    const tokenChatId = lockKey.slice(sid.length + 1);
+    if (related.has(tokenChatId)) markToken(lockKey);
+  }
+
   if (cancelledBatchItems || sendCancelled) {
     console.log(
-      `[auto-reply] cancel chat=${lockKey} batchItems=${cancelledBatchItems} sendInFlight=${sendCancelled}`
+      `[auto-reply] cancel chat=${sid}:${cid} batchItems=${cancelledBatchItems} sendInFlight=${sendCancelled}`
     );
   }
   return { cancelledBatchItems, sendCancelled };
+}
+
+/**
+ * Identidad del chat del panel (teléfono real o lid_*), misma lógica que el auto-reply.
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @returns {Promise<{ normalizedPhone: string, whatsappLid: string|null, chatId: string }|null>}
+ */
+async function resolveConversationContact(openwaSessionId, chatId) {
+  const cid = String(chatId || '').trim();
+  if (!cid) return null;
+
+  const identity = await resolveContactIdentity(openwaSessionId, cid, {
+    from: cid,
+    chatId: cid
+  });
+  const lid =
+    (identity && identity.whatsappLid) ||
+    (/@lid$/i.test(cid) ? extractPhoneFromChatId(cid) : '');
+  let phone = (identity && identity.normalizedPhone) || extractPhoneFromChatId(cid);
+
+  if (lid) {
+    const byLid = await contactHistory.findContactByLid(lid);
+    if (byLid && byLid.normalizedPhone) {
+      phone = byLid.normalizedPhone;
+    }
+  }
+  if (phone && !String(phone).startsWith('lid_') && phone !== lid) {
+    const fuzzy = await contactHistory.findContactByPhoneFuzzy(phone);
+    if (fuzzy && fuzzy.normalizedPhone) {
+      phone = fuzzy.normalizedPhone;
+    }
+  }
+  const byChat = await contactHistory.findContactByChatId(cid);
+  if (byChat && byChat.normalizedPhone) {
+    const chatPhone = String(byChat.normalizedPhone);
+    const chatIsLid = chatPhone.startsWith('lid_') || (lid && chatPhone === lid);
+    const currentIsReal = Boolean(phone && !String(phone).startsWith('lid_') && phone !== lid);
+    if (!currentIsReal || !chatIsLid) {
+      phone = chatPhone;
+    }
+  }
+
+  if (lid && (!phone || phone === lid || isLikelyLidPhone(phone, cid))) {
+    phone = `lid_${lid}`;
+  }
+
+  return {
+    normalizedPhone: phone || '',
+    whatsappLid: lid || null,
+    chatId: cid,
+    name: (identity && identity.name) || null
+  };
 }
 
 async function waitChatLockFree(lockKey, timeoutMs = 60000) {
@@ -728,7 +855,7 @@ async function sendCvPreviewDocument({
   }
 }
 
-function applyPreferredTimeDecision(decision, { today, normalizedPhone, slotsPrompt }) {
+function applyPreferredTimeDecision(decision, { today, normalizedPhone, slotsPrompt, noSlotsThatDay }) {
   if (decision.action === 'confirm' && decision.slot) {
     agendaOfferStore.rememberProposedSlot(normalizedPhone, decision.slot);
     return {
@@ -755,10 +882,15 @@ function applyPreferredTimeDecision(decision, { today, normalizedPhone, slotsPro
     };
   }
   if (decision.action === 'list' && slotsPrompt) {
+    const prefix = noSlotsThatDay
+      ? agendaPreferredTime.NO_SLOTS_THAT_DAY_PREFIX
+      : agendaPreferredTime.DAY_CHOSEN_PREFIX;
     return {
       replyText: null,
-      agendaMeta: { reason: 'slots_offered_for_day' },
-      agendaContext: `${agendaPreferredTime.DAY_CHOSEN_PREFIX}${slotsPrompt}`
+      agendaMeta: {
+        reason: noSlotsThatDay ? 'slots_wider_range' : 'slots_offered_for_day'
+      },
+      agendaContext: `${prefix}${slotsPrompt}`
     };
   }
   return {
@@ -1222,7 +1354,10 @@ async function handleIncomingWebhook({
     return { handled: false, reason: 'session_ai_disabled' };
   }
 
-  let contactSession = await contactHistory.getContactSession(normalizedPhone);
+  let contactSession = await contactHistory.getContactSession(normalizedPhone, {
+    whatsappLid: identity && identity.whatsappLid,
+    chatId
+  });
   if (contactSession && contactSession.aiPaused) {
     return { handled: false, reason: 'ai_paused_for_contact' };
   }
@@ -1236,14 +1371,20 @@ async function handleIncomingWebhook({
         logicalSessionId,
         openwaSessionId
       });
-      contactSession = await contactHistory.getContactSession(normalizedPhone);
+      contactSession = await contactHistory.getContactSession(normalizedPhone, {
+        whatsappLid: identity && identity.whatsappLid,
+        chatId
+      });
     }
   } else if (logicalSessionId) {
     await contactHistory.assignContactSession(normalizedPhone, {
       logicalSessionId,
       openwaSessionId
     });
-    contactSession = await contactHistory.getContactSession(normalizedPhone);
+    contactSession = await contactHistory.getContactSession(normalizedPhone, {
+      whatsappLid: identity && identity.whatsappLid,
+      chatId
+    });
   } else {
     return { handled: false, reason: 'session_not_mapped' };
   }
@@ -1356,7 +1497,12 @@ async function processBatchedAutoReply(items) {
     return { handled: false, reason: 'chat_busy_requeued' };
   }
   chatLocks.set(lockKey, true);
-  sendCancelTokens.set(lockKey, { cancelled: false });
+  const stickyCancelled = cancelledLockKeys.has(lockKey);
+  cancelledLockKeys.delete(lockKey);
+  const prevToken = sendCancelTokens.get(lockKey);
+  sendCancelTokens.set(lockKey, {
+    cancelled: Boolean(stickyCancelled || (prevToken && prevToken.cancelled))
+  });
 
   let presenceRefresher = null;
   let presenceCancelled = false;
@@ -1364,9 +1510,16 @@ async function processBatchedAutoReply(items) {
   let turnResult = { handled: false, reason: 'unknown' };
 
   try {
-    let contactSession = await contactHistory.getContactSession(normalizedPhone);
+    let contactSession = await contactHistory.getContactSession(normalizedPhone, {
+      whatsappLid: identity && identity.whatsappLid,
+      chatId
+    });
     if (contactSession && contactSession.aiPaused && !forceIgnorePause) {
       turnResult = { handled: false, reason: 'ai_paused_for_contact' };
+      return turnResult;
+    }
+    if (isTurnCancelled() && !forceIgnorePause) {
+      turnResult = { handled: false, reason: 'cancelled_by_pause' };
       return turnResult;
     }
 
@@ -1689,20 +1842,23 @@ async function processBatchedAutoReply(items) {
             fechaInicio: today,
             fechaFin: tomorrow
           };
+        const pinnedOneDay = range.fechaInicio === range.fechaFin;
         let aggregated = await agendaAvailability.getAggregatedSlotsCached({
           fechaInicio: range.fechaInicio,
           fechaFin: range.fechaFin
         });
         let slots = aggregated.slots || [];
-        // Si pidió "hoy"/rango corto y ya no hay huecos futuros, pasar a próximos días
+        let noSlotsThatDay = false;
+        // Si pidió un día/rango y ya no hay huecos futuros, pasar a próximos días
         if (!slots.length) {
+          noSlotsThatDay = pinnedOneDay;
           const from =
             range.fechaInicio <= today
               ? agendaIntent.addDaysYmd(today, 1)
               : range.fechaInicio;
           aggregated = await agendaAvailability.getAggregatedSlotsCached({
             fechaInicio: from,
-            fechaFin: agendaIntent.addDaysYmd(today, 6)
+            fechaFin: agendaIntent.addDaysYmd(from, 6)
           });
           slots = aggregated.slots || [];
           agendaMeta = {
@@ -1725,12 +1881,21 @@ async function processBatchedAutoReply(items) {
             today,
             tomorrow
           });
+          const listMaxDays =
+            decision.action === 'list'
+              ? noSlotsThatDay
+                ? 7
+                : 1
+              : noSlotsThatDay
+                ? 7
+                : 2;
           const applied = applyPreferredTimeDecision(decision, {
             today,
             normalizedPhone,
+            noSlotsThatDay,
             slotsPrompt:
               decision.action === 'list'
-                ? agendaAvailability.formatSlotsForPrompt(slots, 1)
+                ? agendaAvailability.formatSlotsForPrompt(slots, listMaxDays, today)
                 : undefined
           });
           if (applied.replyText) {
@@ -1815,7 +1980,10 @@ async function processBatchedAutoReply(items) {
     }
 
     if (!forceIgnorePause) {
-      contactSession = await contactHistory.getContactSession(normalizedPhone);
+      contactSession = await contactHistory.getContactSession(normalizedPhone, {
+        whatsappLid: identity && identity.whatsappLid,
+        chatId
+      });
       if (contactSession && contactSession.aiPaused) {
         turnResult = { handled: false, reason: 'ai_paused_for_contact' };
         return turnResult;
@@ -2580,6 +2748,8 @@ module.exports = {
   handleIncomingWebhook,
   triggerManualReply,
   cancelPendingForChat,
+  resolveConversationContact,
+  resolveContactIdentity,
   collectPendingInboundTail,
   captureIncomingMessage,
   extractIncomingMessage,

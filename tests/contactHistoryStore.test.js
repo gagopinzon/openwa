@@ -17,6 +17,52 @@ describe('dedupeCvsByPhone', () => {
   });
 });
 
+describe('resolvePauseTargetPhone', () => {
+  const { resolvePauseTargetPhone, aiPausedFromContactDocs } = contactHistory;
+
+  it('usa el contacto existente por LID, no los dígitos del chat @lid', () => {
+    const target = resolvePauseTargetPhone({
+      requestedPhone: '188119869571223',
+      chatId: '188119869571223@lid',
+      whatsappLid: '188119869571223',
+      existingByLid: { normalizedPhone: '5215512345678' }
+    });
+    assert.equal(target, '5215512345678');
+  });
+
+  it('usa el contacto fuzzy (52 vs 521) en vez de crear otra clave', () => {
+    const target = resolvePauseTargetPhone({
+      requestedPhone: '5213312345678',
+      chatId: '5213312345678@c.us',
+      existingByFuzzy: { normalizedPhone: '3312345678' }
+    });
+    assert.equal(target, '3312345678');
+  });
+
+  it('si el chat es @lid y no hay contacto, guarda lid_* y no los dígitos crudos', () => {
+    const target = resolvePauseTargetPhone({
+      requestedPhone: '188119869571223',
+      chatId: '188119869571223@lid',
+      whatsappLid: '188119869571223'
+    });
+    assert.equal(target, 'lid_188119869571223');
+  });
+
+  it('aiPausedFromContactDocs es true si CUALQUIER documento relacionado está pausado', () => {
+    assert.equal(
+      aiPausedFromContactDocs([
+        { normalizedPhone: '3312345678', aiPaused: false },
+        { normalizedPhone: '188119869571223', aiPaused: true }
+      ]),
+      true
+    );
+    assert.equal(
+      aiPausedFromContactDocs([{ normalizedPhone: '3312345678', aiPaused: false }]),
+      false
+    );
+  });
+});
+
 describe('marca local al enviar', () => {
   beforeEach(() => {
     contactHistory.clearLocalSentCache();

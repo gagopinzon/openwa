@@ -145,11 +145,16 @@ describe('agendaPreferredTime', () => {
 
     const manana = formatConfirmReply(slot(tomorrow, '17:00'), today);
     assert.match(manana, /mañana/i);
+
+    // Lunes (no es mañana): no debe decir "mañana"
+    const lunes = formatConfirmReply(slot('2026-09-07', '17:00'), today);
+    assert.match(lunes, /lunes/i);
+    assert.doesNotMatch(lunes, /\bmañana\b/i);
   });
 
-  it('el mensaje de cercanas lista hoy/mañana y no inventa la hora pedida', () => {
+  it('el mensaje de cercanas lista etiquetas reales por día', () => {
     const text = formatNearestReply(
-      [slot(today, '16:00'), slot(tomorrow, '16:30')],
+      [slot(today, '16:00'), slot(tomorrow, '16:30'), slot('2026-09-07', '10:00')],
       '17:00',
       today
     );
@@ -158,6 +163,7 @@ describe('agendaPreferredTime', () => {
     assert.match(text, /16:30/);
     assert.match(text, /hoy/i);
     assert.match(text, /mañana/i);
+    assert.match(text, /lunes/i);
   });
 
   it('ASK_PREFERRED_CONTEXT prohíbe listar horarios', () => {

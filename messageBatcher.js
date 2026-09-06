@@ -203,6 +203,31 @@ function cancelKey(key) {
   return count;
 }
 
+/**
+ * Cancela lotes cuyo item o clave cumple el predicado.
+ * @param {(item: object, key: string) => boolean} predicate
+ * @returns {{ count: number, keys: string[] }}
+ */
+function cancelMatching(predicate) {
+  if (typeof predicate !== 'function') return { count: 0, keys: [] };
+  const keys = [];
+  let count = 0;
+  for (const [key, entry] of [...batches.entries()]) {
+    const items = (entry && entry.items) || [];
+    const hit = items.some((item) => {
+      try {
+        return Boolean(predicate(item, key));
+      } catch {
+        return false;
+      }
+    });
+    if (!hit) continue;
+    keys.push(key);
+    count += cancelKey(key);
+  }
+  return { count, keys };
+}
+
 function resetForTests() {
   for (const key of [...batches.keys()]) {
     clearTimer(key);
@@ -215,6 +240,7 @@ module.exports = {
   requeue,
   flushKey,
   cancelKey,
+  cancelMatching,
   combineBatchBodies,
   getFirstDelayMs,
   getNextDelayMs,

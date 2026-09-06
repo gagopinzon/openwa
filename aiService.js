@@ -3,6 +3,7 @@ require('dotenv').config();
 const { SENDER_PLACEHOLDER } = require('./messageSignature');
 const ollamaService = require('./ollamaService');
 const { preferredFirstName, phraseWithName } = require('./preferredContactName');
+const agendaIntent = require('./agendaIntent');
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const API_KEY = process.env.DEEPSEEK_API_KEY;
@@ -716,14 +717,16 @@ async function generateReplyMessage({
   const agendaInstructions = agendaContext
     ? String(agendaContext).startsWith('PREGUNTA_HORA:')
       ? `
-- PRIORIDAD MÁXIMA: el lead quiere agendar pero AÚN NO dijo una hora.
+- PRIORIDAD MÁXIMA: el lead quiere agendar pero AÚN NO dijo día ni hora.
 - NO listes horarios, tramos, ni ejemplos de horas libres.
-- Pregunta UNA sola cosa: qué horario le acomoda mejor (hoy o mañana).
+- Pregunta UNA sola cosa: qué día y hora le acomodan mejor (hoy, mañana u otro día de la semana).
 - No inventes horas. Sé breve.`
       : `
 - PRIORIDAD MÁXIMA: los HORARIOS REALES de arriba sustituyen cualquier XXXX / ejemplo del playbook.
+- Respeta el reloj CDMX y las etiquetas de día (HOY / MAÑANA / nombre del día). Nunca digas "mañana" si el bloque no es el día siguiente.
 - Si el lead responde "sí", "perfecto" o "está bien" a una hora que TÚ acabas de proponer, NO vuelvas a preguntar el día ni la hora.
 - "5 de la tarde" es 17:00; "8 de la noche" es 20:00; "9 de la mañana" es 09:00. "A las 5" (sin am/pm) es 17:00.
+- "mañana" = día siguiente; "en la mañana"/"de la mañana" = periodo AM, no el día.
 - Si el sistema ya envió un PDF de CV para confirmar, no vuelvas a pedir el horario; espera que diga sí o envíe otro PDF.
 - Ofrece las horas listadas en HORARIOS REALES tal cual (lista de horas libres, no rangos "de X a Y").
 - Si el lead pide algo ENTRE dos horas ofrecidas (ej. "¿tienes entre las 10 y las 11?") y en las notas hay un tramo real que lo cubre, sugiere la media hora (ej. "¿te queda a las 10:30?").
@@ -737,6 +740,8 @@ async function generateReplyMessage({
     ? `- Puedes abrir con un saludo breve (Hola / gusto saludarte) si encaja.`
     : `- NO saludes de nuevo (nada de "Hola", "gusto saludarte", "buenos días/tardes/noches" al inicio). Esta conversación ya está activa; ve directo a la respuesta.`;
 
+  const clockBlock = `\n${agendaIntent.formatClockContextForPrompt()}\n`;
+
   const prompt = `${cvPolicy}
 
 ${basePrompt || 'Eres un asistente de Pro Talent.'}
@@ -744,7 +749,7 @@ ${basePrompt || 'Eres un asistente de Pro Talent.'}
 ${firstName ? `Nombre del contacto: ${firstName}` : 'Nombre del contacto: (desconocido — no uses nick de WhatsApp ni inventes nombre)'}
 Mensaje que te escribió:
 "${incomingBody}"
-${ruleHint}${contextBlock}${historyBlock}${agendaBlock}
+${ruleHint}${contextBlock}${historyBlock}${clockBlock}${agendaBlock}
 
 INSTRUCCIONES DEL SISTEMA (prioritarias, sustituyen al playbook si hay conflicto):
 ${cvPolicy}
@@ -754,7 +759,7 @@ ${cvPolicy}
 - No uses cierres agresivos ("¿agendamos ya?", "¿te paso horarios?") si el lead no mostró interés ni lo pidió.
 - Puedes ser breve pero humana (1–3 frases); reconoce lo que dijo el lead antes de aportar información.
 - Solo ofrece agendar o comparte horarios cuando el lead muestre interés en la sesión o pregunte por disponibilidad/horarios.
-- Zona horaria: México (CDMX).
+- Zona horaria: México (CDMX). Usa el bloque AHORA (CDMX) como fuente de verdad del día y la hora actuales.
 - No firmes con "Atte:" ni con nombre de sesión; ya te presentaste.
 - Emojis: solo 💙 y ☺️ si el playbook los usa; no uses otros.
 - Responde al mensaje del lead; no reenvíes el pitch frío completo.
@@ -772,7 +777,7 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
     try {
       const message = await ollamaService.chatReply(prompt, {
         basePrompt: basePrompt || undefined,
-        systemExtra: `${cvPolicy}\n${agendaInstructions}`
+        systemExtra: `${cvPolicy}\n${clockBlock}\n${agendaInstructions}`
       });
       return sanitizeAgainstCvAsk(message);
     } catch (error) {

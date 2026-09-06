@@ -2,6 +2,31 @@ const { slotKey } = require('./agendaAvailability');
 
 const TZ = 'America/Mexico_City';
 
+const DAY_NAMES_ES = [
+  'domingo',
+  'lunes',
+  'martes',
+  'miércoles',
+  'jueves',
+  'viernes',
+  'sábado'
+];
+
+const MONTH_SHORT_ES = [
+  'ene',
+  'feb',
+  'mar',
+  'abr',
+  'may',
+  'jun',
+  'jul',
+  'ago',
+  'sep',
+  'oct',
+  'nov',
+  'dic'
+];
+
 const WEEKDAY_NAMES = {
   domingo: 0,
   dom: 0,
@@ -62,11 +87,107 @@ function addDaysYmd(ymd, days) {
 
 /**
  * @param {string} ymd
- * @returns {number} 0=dom … 6=sáb
+ * @returns {number} 0=dom … 6=sáb (fecha civil, sin TZ local del servidor)
  */
 function weekdayOfYmd(ymd) {
   const [y, m, d] = String(ymd).split('-').map(Number);
-  return new Date(y, m - 1, d).getDay();
+  return new Date(Date.UTC(y, m - 1, d, 12, 0, 0)).getUTCDay();
+}
+
+/**
+ * Fecha y minutos actuales en CDMX.
+ * @param {Date} [now]
+ * @returns {{ ymd: string, minutes: number }}
+ */
+function mexicoNowParts(now = new Date()) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    })
+      .formatToParts(now)
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value])
+  );
+  let hour = Number(parts.hour);
+  if (hour === 24) hour = 0;
+  return {
+    ymd: `${parts.year}-${parts.month}-${parts.day}`,
+    minutes: hour * 60 + Number(parts.minute)
+  };
+}
+
+/**
+ * @param {number} minutes
+ * @returns {'mañana'|'tarde'|'noche'}
+ */
+function dayPeriodFromMinutes(minutes) {
+  const m = Number(minutes);
+  if (!Number.isFinite(m) || m < 12 * 60) return 'mañana';
+  if (m < 19 * 60) return 'tarde';
+  return 'noche';
+}
+
+/**
+ * Etiqueta humana relativa a hoy CDMX: hoy / mañana / pasado mañana / el lunes 8 sep
+ * @param {string} ymd
+ * @param {string} [today]
+ */
+function relativeDayLabel(ymd, today) {
+  const fecha = String(ymd || '').trim();
+  const hoy = String(today || todayYmd()).trim();
+  if (!fecha) return '';
+  if (fecha === hoy) return 'hoy';
+  if (fecha === addDaysYmd(hoy, 1)) return 'mañana';
+  if (fecha === addDaysYmd(hoy, 2)) return 'pasado mañana';
+  const abs = absoluteDayLabel(fecha);
+  return abs ? `el ${abs}` : fecha;
+}
+
+/**
+ * @param {string} ymd
+ * @returns {string} "lunes 8 sep"
+ */
+function absoluteDayLabel(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '').trim());
+  if (!m) return '';
+  const wd = DAY_NAMES_ES[weekdayOfYmd(ymd)] || '';
+  const dayNum = Number(m[3]);
+  const mon = MONTH_SHORT_ES[Number(m[2]) - 1] || '';
+  return `${wd} ${dayNum} ${mon}`.trim();
+}
+
+/**
+ * Texto corto de calendario para el prompt (reloj del servidor en CDMX).
+ * @param {Date} [now]
+ */
+function formatClockContextForPrompt(now = new Date()) {
+  const { ymd, minutes } = mexicoNowParts(now);
+  const period = dayPeriodFromMinutes(minutes);
+  const hh = String(Math.floor(minutes / 60)).padStart(2, '0');
+  const mm = String(minutes % 60).padStart(2, '0');
+  const todayAbs = absoluteDayLabel(ymd);
+  const year = String(ymd).slice(0, 4);
+
+  const lines = [
+    `AHORA (CDMX): ${todayAbs} ${year}, ${hh}:${mm} — ${period}`,
+    `Hoy = ${todayAbs} (${ymd})`,
+    `Mañana = ${absoluteDayLabel(addDaysYmd(ymd, 1))} (${addDaysYmd(ymd, 1)})`,
+    `Pasado mañana = ${absoluteDayLabel(addDaysYmd(ymd, 2))} (${addDaysYmd(ymd, 2)})`
+  ];
+  for (let i = 3; i <= 7; i += 1) {
+    const d = addDaysYmd(ymd, i);
+    lines.push(`En ${i} días = ${absoluteDayLabel(d)} (${d})`);
+  }
+  lines.push(
+    'Usa SOLO estas fechas. "mañana" = el día siguiente; "en la mañana"/"de la mañana" = periodo AM, no el día.'
+  );
+  return lines.join('\n');
 }
 
 /**
@@ -106,10 +227,7 @@ function shouldOfferSlots(text) {
  * @returns {{ fechaInicio: string, fechaFin: string } | null}
  */
 function resolveDateRangeFromMessage(text, now = new Date()) {
-  const raw = String(text || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
+  const raw = foldAgendaText(text);
   if (!raw.trim()) return null;
 
   const today = todayYmd(now);
@@ -117,10 +235,30 @@ function resolveDateRangeFromMessage(text, now = new Date()) {
   if (/\bhoy\b/.test(raw)) {
     return { fechaInicio: today, fechaFin: today };
   }
-  if (/\bmanana\b/.test(raw)) {
+
+  // "pasado mañana" antes de "mañana"
+  if (/\bpasado\s+manana\b/.test(raw)) {
+    const t = addDaysYmd(today, 2);
+    return { fechaInicio: t, fechaFin: t };
+  }
+
+  // "en 3 días" / "dentro de 2 dias"
+  const inDays = /\b(?:en|dentro\s+de)\s+(\d{1,2})\s+dias?\b/.exec(raw);
+  if (inDays) {
+    const n = Number(inDays[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 14) {
+      const t = addDaysYmd(today, n);
+      return { fechaInicio: t, fechaFin: t };
+    }
+  }
+
+  // "mañana" (día siguiente), NO "de/en/por la mañana" (periodo AM)
+  const withoutAmPeriod = raw.replace(/(?:de|en|por)\s+la\s+manana\b/g, ' ');
+  if (/\bmanana\b/.test(withoutAmPeriod)) {
     const t = addDaysYmd(today, 1);
     return { fechaInicio: t, fechaFin: t };
   }
+
   if (/\besta\s+semana\b/.test(raw) || /\bproxim[oa]s?\s+dias?\b/.test(raw)) {
     return { fechaInicio: today, fechaFin: addDaysYmd(today, 6) };
   }
@@ -490,6 +628,11 @@ module.exports = {
   TZ,
   todayYmd,
   addDaysYmd,
+  weekdayOfYmd,
+  mexicoNowParts,
+  dayPeriodFromMinutes,
+  relativeDayLabel,
+  formatClockContextForPrompt,
   looksLikeScheduleIntent,
   looksLikeBookingInterest,
   shouldOfferSlots,

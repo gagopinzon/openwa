@@ -415,14 +415,16 @@ function selectOfferStarts(daySlots, maxDense = 4) {
 }
 
 /**
- * Texto breve para el prompt: horas sueltas (hoy/mañana), no rangos de corrido.
+ * Texto breve para el prompt: horas sueltas por día, con etiqueta relativa a hoy CDMX.
  * Tramos ≤4 slots → todas las medias horas; >4 → cada hora.
  * @param {Array<object>} slots
- * @param {number} [maxDays] máx. días a mostrar (default 2 = hoy y mañana)
+ * @param {number} [maxDays] máx. días a mostrar (default 2)
+ * @param {string} [todayYmd] YYYY-MM-DD en CDMX
  */
-function formatSlotsForPrompt(slots, maxDays = 2) {
+function formatSlotsForPrompt(slots, maxDays = 2, todayYmd = null) {
   const list = Array.isArray(slots) ? slots : [];
   if (!list.length) return '';
+  const today = String(todayYmd || getMexicoNowParts().ymd);
 
   /** @type {Map<string, { dayLabel: string, slots: object[] }>} */
   const byFecha = new Map();
@@ -433,9 +435,13 @@ function formatSlotsForPrompt(slots, maxDays = 2) {
       const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fecha);
       let dayLabel = fecha;
       if (m) {
-        const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-        const name = DAY_UPPER[dt.getDay()] || fecha;
-        dayLabel = `${name} ${Number(m[3])} ${MONTH_SHORT[Number(m[2]) - 1] || ''}`.trim();
+        const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+        const name = DAY_UPPER[dt.getUTCDay()] || fecha;
+        const absolute = `${name} ${Number(m[3])} ${MONTH_SHORT[Number(m[2]) - 1] || ''}`.trim();
+        if (fecha === today) dayLabel = `HOY (${absolute})`;
+        else if (fecha === addDaysCivil(today, 1)) dayLabel = `MAÑANA (${absolute})`;
+        else if (fecha === addDaysCivil(today, 2)) dayLabel = `PASADO MAÑANA (${absolute})`;
+        else dayLabel = absolute;
       }
       byFecha.set(fecha, { dayLabel, slots: [] });
     }
@@ -468,7 +474,8 @@ function formatSlotsForPrompt(slots, maxDays = 2) {
 
   const notes = [
     'La sesión dura 15 minutos.',
-    'Ofrece solo las horas listadas arriba; no inventes otras.'
+    'Ofrece solo las horas listadas arriba; no inventes otras.',
+    'Respeta la etiqueta del día (HOY / MAÑANA / nombre del día); no digas "mañana" si el bloque no es MAÑANA.'
   ];
   if (hasSparseSampling && tramoHints.length) {
     notes.push(
@@ -480,6 +487,16 @@ function formatSlotsForPrompt(slots, maxDays = 2) {
   }
 
   return `${lines.join('\n')}\n(${notes.join(' ')})`;
+}
+
+function addDaysCivil(ymd, days) {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
 }
 
 /** Cache corta para no martillar el panel en cada mensaje. */
