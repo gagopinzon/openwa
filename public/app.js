@@ -1090,6 +1090,12 @@ class CVAnalyzer {
         this.autoReplyTestPhone = document.getElementById('autoReplyTestPhone');
         this.autoReplyTestMessage = document.getElementById('autoReplyTestMessage');
         this.autoReplyBasePrompt = document.getElementById('autoReplyBasePrompt');
+        this.autoReplyPersonaSystem = document.getElementById('autoReplyPersonaSystem');
+        this.autoReplySystemInstructions = document.getElementById('autoReplySystemInstructions');
+        this.autoReplyCvPolicyWithCv = document.getElementById('autoReplyCvPolicyWithCv');
+        this.autoReplyCvPolicyWithoutCv = document.getElementById('autoReplyCvPolicyWithoutCv');
+        this.autoReplyPromptPreview = document.getElementById('autoReplyPromptPreview');
+        this.restoreAutoReplyDefaultsBtn = document.getElementById('restoreAutoReplyDefaultsBtn');
         this.autoReplyRulesList = document.getElementById('autoReplyRulesList');
         this.addAutoReplyRuleBtn = document.getElementById('addAutoReplyRuleBtn');
         this.saveAutoReplyConfigBtn = document.getElementById('saveAutoReplyConfigBtn');
@@ -1164,12 +1170,27 @@ class CVAnalyzer {
         if (this.saveAutoReplyConfigBtn) {
             this.saveAutoReplyConfigBtn.addEventListener('click', () => this.saveAutoReplyConfig());
         }
+        if (this.restoreAutoReplyDefaultsBtn) {
+            this.restoreAutoReplyDefaultsBtn.addEventListener('click', () =>
+                this.restoreAutoReplyDefaults()
+            );
+        }
         if (this.saveSendDelayBtn) {
             this.saveSendDelayBtn.addEventListener('click', () => this.saveSendSettings());
         }
         if (this.addAutoReplyRuleBtn) {
             this.addAutoReplyRuleBtn.addEventListener('click', () => this.addAutoReplyRule());
         }
+        const promptPreviewInputs = [
+            this.autoReplyBasePrompt,
+            this.autoReplyPersonaSystem,
+            this.autoReplySystemInstructions,
+            this.autoReplyCvPolicyWithCv,
+            this.autoReplyCvPolicyWithoutCv
+        ].filter(Boolean);
+        promptPreviewInputs.forEach((el) => {
+            el.addEventListener('input', () => this.updateAutoReplyPromptPreview());
+        });
         if (this.activateAutoReplyBtn) {
             this.activateAutoReplyBtn.addEventListener('click', () => this.activateAutoReply());
         }
@@ -3271,6 +3292,96 @@ class CVAnalyzer {
         }
     }
 
+    applyAutoReplyPromptFields(config = {}) {
+        if (this.autoReplyBasePrompt) {
+            this.autoReplyBasePrompt.value = config.basePrompt || '';
+        }
+        if (this.autoReplyPersonaSystem) {
+            this.autoReplyPersonaSystem.value = config.personaSystem || '';
+        }
+        if (this.autoReplySystemInstructions) {
+            this.autoReplySystemInstructions.value = config.systemInstructions || '';
+        }
+        if (this.autoReplyCvPolicyWithCv) {
+            this.autoReplyCvPolicyWithCv.value = config.cvPolicyWithCv || '';
+        }
+        if (this.autoReplyCvPolicyWithoutCv) {
+            this.autoReplyCvPolicyWithoutCv.value = config.cvPolicyWithoutCv || '';
+        }
+        this.updateAutoReplyPromptPreview();
+    }
+
+    collectAutoReplyPromptFields() {
+        return {
+            basePrompt: this.autoReplyBasePrompt ? this.autoReplyBasePrompt.value : '',
+            personaSystem: this.autoReplyPersonaSystem
+                ? this.autoReplyPersonaSystem.value
+                : '',
+            systemInstructions: this.autoReplySystemInstructions
+                ? this.autoReplySystemInstructions.value
+                : '',
+            cvPolicyWithCv: this.autoReplyCvPolicyWithCv
+                ? this.autoReplyCvPolicyWithCv.value
+                : '',
+            cvPolicyWithoutCv: this.autoReplyCvPolicyWithoutCv
+                ? this.autoReplyCvPolicyWithoutCv.value
+                : ''
+        };
+    }
+
+    updateAutoReplyPromptPreview() {
+        if (!this.autoReplyPromptPreview) return;
+        const fields = this.collectAutoReplyPromptFields();
+        const parts = [
+            '=== SYSTEM ROLE (modelo) ===',
+            [fields.cvPolicyWithCv, fields.personaSystem, fields.systemInstructions]
+                .filter((s) => String(s || '').trim())
+                .join('\n\n'),
+            '',
+            '=== USER PROMPT (ejemplo, con CV cargado) ===',
+            fields.cvPolicyWithCv || '(sin política CV)',
+            '',
+            fields.basePrompt || '(sin prompt base)',
+            '',
+            'Nombre del contacto: (ejemplo)',
+            'Mensaje que te escribió:',
+            '"Hola, me interesa"',
+            '',
+            fields.systemInstructions || '(sin instrucciones de sistema)',
+            '',
+            '(+ bloques dinámicos: historial, reloj CDMX, HORARIOS REALES)',
+            '(+ nameInstruction / greetingInstructions / agendaInstructions del motor)'
+        ];
+        this.autoReplyPromptPreview.textContent = parts.join('\n');
+    }
+
+    async restoreAutoReplyDefaults() {
+        const ok = window.confirm(
+            '¿Restaurar prompt base, persona, instrucciones, política de CV y reglas a los defaults recomendados? No se guarda hasta que pulses Guardar.'
+        );
+        if (!ok) return;
+        try {
+            const response = await fetch('/api/auto-reply/defaults');
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'No se pudieron cargar defaults');
+            const defaults = data.defaults || {};
+            this.autoReplyRules = Array.isArray(defaults.rules)
+                ? defaults.rules.map((r) => ({
+                      ...r,
+                      keywords: Array.isArray(r.keywords) ? [...r.keywords] : []
+                  }))
+                : [];
+            this.applyAutoReplyPromptFields(defaults);
+            this.renderAutoReplyRules();
+            this.showStatus(
+                'Defaults cargados en el panel. Pulsa Guardar configuración para aplicarlos.',
+                'info'
+            );
+        } catch (error) {
+            this.showStatus(error.message, 'error');
+        }
+    }
+
     async loadAutoReplyConfig() {
         try {
             const response = await fetch('/api/auto-reply/config');
@@ -3284,9 +3395,7 @@ class CVAnalyzer {
                     : Array.isArray(config.enabledSessionIds)
                       ? config.enabledSessionIds
                       : null;
-            if (this.autoReplyBasePrompt) {
-                this.autoReplyBasePrompt.value = config.basePrompt || '';
-            }
+            this.applyAutoReplyPromptFields(config);
             if (this.autoReplyEnabledToggle) {
                 this.autoReplyEnabledToggle.checked = Boolean(config.enabled);
             }
@@ -3406,7 +3515,7 @@ class CVAnalyzer {
                 <label>Palabras clave (separadas por coma)</label>
                 <input type="text" class="auto-reply-rule-input rule-keywords" value="${this.escapeHtml((rule.keywords || []).join(', '))}">
                 <label>Instrucción para la IA</label>
-                <textarea class="auto-reply-rule-input rule-instruction" rows="2">${this.escapeHtml(rule.instruction || '')}</textarea>
+                <textarea class="auto-reply-rule-input rule-instruction" rows="4">${this.escapeHtml(rule.instruction || '')}</textarea>
                 <div class="auto-reply-rule-actions">
                     <button type="button" class="btn btn-danger btn-sm remove-rule-btn" data-index="${index}">Eliminar</button>
                 </div>
@@ -3459,7 +3568,7 @@ class CVAnalyzer {
             const maxSec = parseInt(this.autoReplyMaxDelaySec?.value, 10);
             const payload = {
                 enabled: this.autoReplyEnabledToggle ? this.autoReplyEnabledToggle.checked : false,
-                basePrompt: this.autoReplyBasePrompt ? this.autoReplyBasePrompt.value : '',
+                ...this.collectAutoReplyPromptFields(),
                 rules: options.enabledOnly ? undefined : this.collectAutoReplyRulesFromDom(),
                 enabledSessionIds: options.enabledOnly
                     ? this.autoReplyEnabledSessionIds
@@ -3494,6 +3603,7 @@ class CVAnalyzer {
                     ? null
                     : data.config.enabledSessionIds;
             if (!options.enabledOnly) {
+                this.applyAutoReplyPromptFields(data.config || {});
                 this.renderAutoReplyRules();
                 this.renderAutoReplySessions();
                 if (this.autoReplyMinDelaySec && data.config.minDelayMs != null) {

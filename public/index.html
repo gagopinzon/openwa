@@ -351,19 +351,69 @@
                     <div class="accordion" id="autoReplyAccordion">
                         <div class="accordion-item accordion-item-open">
                             <button type="button" class="accordion-header" data-accordion="basePrompt">
-                                Prompt base
+                                1. Prompt base (playbook Mónica)
                             </button>
                             <div class="accordion-body" id="accordionBasePrompt">
-                                <textarea id="autoReplyBasePrompt" rows="4" class="auto-reply-textarea" placeholder="Instrucciones generales para la IA..."></textarea>
+                                <p class="auto-reply-field-hint">
+                                    Identidad, objetivo (cerrar citas) y encuadre del servicio. Esto es lo que más controla el tono.
+                                </p>
+                                <textarea id="autoReplyBasePrompt" rows="12" class="auto-reply-textarea auto-reply-textarea-lg" placeholder="Instrucciones generales para la IA..."></textarea>
+                            </div>
+                        </div>
+                        <div class="accordion-item">
+                            <button type="button" class="accordion-header" data-accordion="personaSystem">
+                                2. Persona (system role)
+                            </button>
+                            <div class="accordion-body accordion-body-collapsed" id="accordionPersonaSystem">
+                                <p class="auto-reply-field-hint">
+                                    Identidad corta que va en el system role del modelo (Ollama/DeepSeek). Antes estaba oculta en el código.
+                                </p>
+                                <textarea id="autoReplyPersonaSystem" rows="6" class="auto-reply-textarea auto-reply-textarea-md" placeholder="Eres Mónica..."></textarea>
+                            </div>
+                        </div>
+                        <div class="accordion-item">
+                            <button type="button" class="accordion-header" data-accordion="systemInstructions">
+                                3. Instrucciones de sistema
+                            </button>
+                            <div class="accordion-body accordion-body-collapsed" id="accordionSystemInstructions">
+                                <p class="auto-reply-field-hint">
+                                    Reglas prioritarias (no repetir, emojis, no entrevista laboral, empujar a agendar, etc.). Antes estaban hardcodeadas.
+                                </p>
+                                <textarea id="autoReplySystemInstructions" rows="12" class="auto-reply-textarea auto-reply-textarea-lg" placeholder="INSTRUCCIONES DEL SISTEMA..."></textarea>
+                            </div>
+                        </div>
+                        <div class="accordion-item">
+                            <button type="button" class="accordion-header" data-accordion="cvPolicy">
+                                4. Política de CV
+                            </button>
+                            <div class="accordion-body accordion-body-collapsed" id="accordionCvPolicy">
+                                <p class="auto-reply-field-hint">
+                                    El sistema elige una u otra según si ya hay CV cargado para el contacto.
+                                </p>
+                                <label class="auto-reply-field-label" for="autoReplyCvPolicyWithCv">Con CV cargado</label>
+                                <textarea id="autoReplyCvPolicyWithCv" rows="7" class="auto-reply-textarea auto-reply-textarea-md" placeholder="REGLA CRÍTICA — CV..."></textarea>
+                                <label class="auto-reply-field-label" for="autoReplyCvPolicyWithoutCv">Sin CV cargado</label>
+                                <textarea id="autoReplyCvPolicyWithoutCv" rows="6" class="auto-reply-textarea auto-reply-textarea-md" placeholder="REGLA CRÍTICA — CV..."></textarea>
                             </div>
                         </div>
                         <div class="accordion-item">
                             <button type="button" class="accordion-header" data-accordion="rules">
-                                Reglas por palabras clave
+                                5. Reglas por palabras clave
                             </button>
                             <div class="accordion-body accordion-body-collapsed" id="accordionRules">
                                 <div id="autoReplyRulesList"></div>
                                 <button type="button" id="addAutoReplyRuleBtn" class="btn btn-secondary" style="margin-top: 8px;">+ Agregar regla</button>
+                            </div>
+                        </div>
+                        <div class="accordion-item">
+                            <button type="button" class="accordion-header" data-accordion="promptPreview">
+                                6. Vista previa del prompt
+                            </button>
+                            <div class="accordion-body accordion-body-collapsed" id="accordionPromptPreview">
+                                <p class="auto-reply-field-hint">
+                                    Aproximación de lo que recibe el modelo (sin horarios dinámicos ni historial real). Se actualiza al editar las capas.
+                                </p>
+                                <pre id="autoReplyPromptPreview" class="auto-reply-prompt-preview" aria-live="polite"></pre>
                             </div>
                         </div>
                         <div class="accordion-item">
@@ -399,7 +449,10 @@
                             </div>
                         </div>
                     </div>
-                    <button type="button" id="saveAutoReplyConfigBtn" class="btn btn-primary" style="margin-top: 16px;">Guardar configuración</button>
+                    <div class="auto-reply-config-actions">
+                        <button type="button" id="restoreAutoReplyDefaultsBtn" class="btn btn-secondary">Restaurar defaults recomendados</button>
+                        <button type="button" id="saveAutoReplyConfigBtn" class="btn btn-primary">Guardar configuración</button>
+                    </div>
                 </div>
             </section>
 

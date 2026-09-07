@@ -2179,12 +2179,67 @@ footer p {
 .auto-reply-textarea,
 .auto-reply-rule-input {
     width: 100%;
-    padding: 10px;
+    padding: 12px 14px;
     border: 1px solid #d1d5db;
     border-radius: 8px;
     font-family: inherit;
     font-size: 14px;
+    line-height: 1.45;
     resize: vertical;
+    box-sizing: border-box;
+}
+
+.auto-reply-textarea-md {
+    min-height: 140px;
+}
+
+.auto-reply-textarea-lg {
+    min-height: 220px;
+}
+
+.auto-reply-rule-input.rule-instruction {
+    min-height: 96px;
+}
+
+.auto-reply-field-hint {
+    font-size: 12px;
+    color: #64748b;
+    margin: 0 0 10px;
+    line-height: 1.4;
+}
+
+.auto-reply-field-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    margin: 12px 0 6px;
+}
+
+.auto-reply-field-label:first-of-type {
+    margin-top: 0;
+}
+
+.auto-reply-prompt-preview {
+    margin: 0;
+    padding: 14px;
+    max-height: 420px;
+    overflow: auto;
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.auto-reply-config-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 16px;
+    align-items: center;
 }
 
 .accordion {

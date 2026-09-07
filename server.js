@@ -5187,6 +5187,14 @@ app.get('/api/auto-reply/config', (req, res) => {
   }
 });
 
+app.get('/api/auto-reply/defaults', requireSuper, (req, res) => {
+  try {
+    res.json({ success: true, defaults: autoReplyStore.getRecommendedDefaults() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.patch('/api/auto-reply/sessions', (req, res) => {
   try {
     const sessionId = String(req.body.sessionId || '').trim();
@@ -5232,6 +5240,10 @@ app.put('/api/auto-reply/config', requireSuper, (req, res) => {
     const config = autoReplyStore.updateConfig({
       enabled: req.body.enabled,
       basePrompt: req.body.basePrompt,
+      personaSystem: req.body.personaSystem,
+      systemInstructions: req.body.systemInstructions,
+      cvPolicyWithCv: req.body.cvPolicyWithCv,
+      cvPolicyWithoutCv: req.body.cvPolicyWithoutCv,
       rules: req.body.rules,
       enabledSessionIds: req.body.enabledSessionIds,
       minDelayMs: req.body.minDelayMs,

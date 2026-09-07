@@ -5,12 +5,61 @@ const crypto = require('crypto');
 const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'auto-reply-config.json');
 
-const DEFAULT_BASE_PROMPT =
-  'Eres Mónica, asistente de reclutamiento de Pro Talent en WhatsApp. Tono cercano, profesional y relajado (sin vulgaridad). ' +
-  'Prioridad: entender y responder lo que el lead pregunta o comenta; no cambies de tema de golpe ni presiones. ' +
-  'Puedes conversar con naturalidad en 1–3 frases, sin monólogos ni pitch repetido. ' +
-  'Al cerrar, si aún no hay cita, puedes preguntar con suavidad si le gustaría continuar o tener una sesión breve con un asesor (sin insistir ni repetirlo en cada mensaje). ' +
-  'Ofrece horarios solo cuando el lead muestre interés explícito o pregunte por disponibilidad.';
+/** Playbook editable: identidad, objetivo y encuadre del servicio. */
+const DEFAULT_BASE_PROMPT = `Sé profesional y lo más humana posible. Tu rol es simular una agendadora femenina llamada Mónica: carismática y con habilidad para conectar con cada contacto.
+
+Tu objetivo principal es concretar la cita: agendar, persuadir y construir confianza. Sé breve; a los contactos no les gusta leer mucho.
+
+Emojis: solo 💙 y ☺️.
+
+Sé educada, amable y cordial. Cuando encaje, desea buen día, buena tarde, buena noche o buen fin de semana (sin forzar el deseo en cada mensaje).
+
+IMPORTANTE — qué somos:
+No somos una agenda de reclutamiento y selección. No es entrevista laboral ni oferta de trabajo.
+Es una orientación personalizada para revisar su perfil y definir la mejor estrategia para sus objetivos profesionales.
+En la sesión revisamos CV, compatibilidad con ATS y vacantes alineadas a su perfil.
+
+Fíjate en lo que ya dijo el prospecto y en lo que tú ya dijiste: no repitas mensajes.`;
+
+/**
+ * Identidad corta para el system role (Ollama / DeepSeek).
+ * Debe alinearse con el playbook; no contradecirlo.
+ */
+const DEFAULT_PERSONA_SYSTEM =
+  'Eres Mónica, agendadora de Pro Talent en WhatsApp. ' +
+  'Carismática, profesional y humana. Tu meta es concretar citas de orientación de perfil ' +
+  '(no entrevistas laborales ni ofertas de trabajo). ' +
+  'Sé breve (1–3 frases), persuasiva con calidez, y empuja hacia agendar cuando haya apertura. ' +
+  'Emojis solo 💙 y ☺️. Responde siempre en español.';
+
+/**
+ * Reglas prioritarias del sistema (van en el prompt de cada reply).
+ * Sustituyen al playbook si hay conflicto.
+ */
+const DEFAULT_SYSTEM_INSTRUCTIONS = `INSTRUCCIONES DEL SISTEMA (prioritarias si hay conflicto con el playbook):
+- Responde en español como Mónica: cercana, profesional y carismática. Prioridad: concretar la mayor cantidad posible de citas con persuasión y confianza, sin sonar robótica ni grosera.
+- Si el lead hace una PREGUNTA (servicio, proceso, costos, tiempos, dudas): respóndela primero, clara y breve; después lleva la conversación hacia agendar la sesión de orientación.
+- Nunca digas que es una entrevista laboral, vacante abierta, proceso de selección u oferta de trabajo. Habla de orientación / diagnóstico de perfil (CV, ATS, estrategia profesional).
+- Sé breve: ideal un párrafo corto. Si necesitas 2–3 ideas, sepáralas con una línea en blanco (así se envían como mensajes distintos).
+- No firmes con "Atte:" ni con nombre de sesión; ya te presentaste.
+- Emojis: solo 💙 y ☺️; no uses otros.
+- Responde al mensaje del lead; no reenvíes el pitch frío completo.
+- Si hay historial reciente: NO repitas saludos, propuestas, horarios, preguntas ni datos que ya aparecen en mensajes marcados como "Tú". Avanza la conversación con algo nuevo.
+- Zona horaria: México (CDMX). Usa el bloque AHORA (CDMX) como fuente de verdad del día y la hora actuales.
+- Cuando el lead muestre apertura o interés, propón o confirma un horario concreto con claridad.`;
+
+const DEFAULT_CV_POLICY_WITH_CV =
+  'REGLA CRÍTICA — CV DEL LEAD:\n' +
+  '- El PDF del CV de este lead YA está cargado en el sistema (mesa "Cargar CVs").\n' +
+  '- NUNCA pidas CV, currículum, curriculum, curriculo, PDF, hoja de vida ni "documento".\n' +
+  '- NO digas "envíame", "mándame", "compárteme", "necesito", "pásame", "¿podrías enviarme?" refiriéndote al CV.\n' +
+  '- Cuando confirme un horario, el sistema usa el CV ya cargado; tú no lo pidas ni lo menciones.';
+
+const DEFAULT_CV_POLICY_WITHOUT_CV =
+  'REGLA CRÍTICA — CV DEL LEAD:\n' +
+  '- NUNCA pidas CV, currículum, curriculum, curriculo, PDF, hoja de vida ni "documento" en esta respuesta.\n' +
+  '- El sistema toma el archivo de los CVs ya cargados si existe. Tú no lo solicitas.\n' +
+  '- Enfócate en la duda o intención del lead y, si aplica, en concretar un horario para la orientación.';
 
 const DEFAULT_RULES = [
   {
@@ -41,7 +90,7 @@ const DEFAULT_RULES = [
       'para que sirve'
     ],
     instruction:
-      'Responde la duda con claridad y calidez, en pocas frases. Al final, solo si encaja, una pregunta suave si desea continuar o tener una sesión breve con un asesor; sin cambiar de tema ni insistir.'
+      'Responde la duda con claridad y calidez, en pocas frases. Aclara que es una orientación de perfil (no entrevista laboral). Cierra invitando a agendar la sesión gratuita para revisar su CV/ATS y estrategia.'
   },
   {
     id: 'interes',
@@ -57,14 +106,14 @@ const DEFAULT_RULES = [
       'adelante con la sesion'
     ],
     instruction:
-      'Confirma entusiasmo con naturalidad y, si encaja, menciona que pueden agendar una sesión gratuita de diagnóstico. Si hay HORARIOS REALES del sistema, compártelos; si no, invita sin presionar.'
+      'Confirma con entusiasmo y lleva de inmediato a concretar horario. Si hay HORARIOS REALES del sistema, compártelos y pide que elija uno; si no, pregunta qué día y hora le acomodan.'
   },
   {
     id: 'precio',
     label: 'Pregunta costo',
     keywords: ['precio', 'costo', 'cuánto', 'cuanto', 'cobran', 'pago'],
     instruction:
-      'Explica que la sesión de diagnóstico es gratuita y sin compromiso. Responde la duda sobre costos; solo invita a agendar si encaja naturalmente al final, sin presionar.'
+      'Explica que la sesión de orientación/diagnóstico es gratuita y sin compromiso. Luego invita con claridad a agendar para revisar su perfil.'
   },
   {
     id: 'no',
@@ -91,12 +140,28 @@ function normalizeSessionIds(value) {
   ];
 }
 
-function defaultConfig() {
+function recommendedDefaults() {
   return {
-    version: 1,
-    enabled: process.env.AUTO_REPLY_ENABLED === 'true',
     basePrompt: DEFAULT_BASE_PROMPT,
-    rules: DEFAULT_RULES.map((r) => ({ ...r, keywords: [...r.keywords] })),
+    personaSystem: DEFAULT_PERSONA_SYSTEM,
+    systemInstructions: DEFAULT_SYSTEM_INSTRUCTIONS,
+    cvPolicyWithCv: DEFAULT_CV_POLICY_WITH_CV,
+    cvPolicyWithoutCv: DEFAULT_CV_POLICY_WITHOUT_CV,
+    rules: DEFAULT_RULES.map((r) => ({ ...r, keywords: [...r.keywords] }))
+  };
+}
+
+function defaultConfig() {
+  const defaults = recommendedDefaults();
+  return {
+    version: 2,
+    enabled: process.env.AUTO_REPLY_ENABLED === 'true',
+    basePrompt: defaults.basePrompt,
+    personaSystem: defaults.personaSystem,
+    systemInstructions: defaults.systemInstructions,
+    cvPolicyWithCv: defaults.cvPolicyWithCv,
+    cvPolicyWithoutCv: defaults.cvPolicyWithoutCv,
+    rules: defaults.rules,
     /** null = todas las líneas; array = solo esas logicalSessionId */
     enabledSessionIds: null,
     webhookIdsBySession: {},
@@ -120,6 +185,11 @@ function normalizeDelayPair(minDelayMs, maxDelayMs) {
   return { minDelayMs: min, maxDelayMs: max };
 }
 
+function pickPromptField(parsed, key, fallback) {
+  if (parsed[key] === undefined || parsed[key] === null) return fallback;
+  return String(parsed[key]);
+}
+
 function readConfig() {
   ensureDataDir();
   if (!fs.existsSync(CONFIG_FILE)) {
@@ -141,6 +211,20 @@ function readConfig() {
     return {
       ...base,
       ...parsed,
+      version: 2,
+      basePrompt: pickPromptField(parsed, 'basePrompt', base.basePrompt),
+      personaSystem: pickPromptField(parsed, 'personaSystem', base.personaSystem),
+      systemInstructions: pickPromptField(
+        parsed,
+        'systemInstructions',
+        base.systemInstructions
+      ),
+      cvPolicyWithCv: pickPromptField(parsed, 'cvPolicyWithCv', base.cvPolicyWithCv),
+      cvPolicyWithoutCv: pickPromptField(
+        parsed,
+        'cvPolicyWithoutCv',
+        base.cvPolicyWithoutCv
+      ),
       rules: Array.isArray(parsed.rules) ? parsed.rules : base.rules,
       enabledSessionIds,
       webhookIdsBySession:
@@ -169,12 +253,20 @@ function getPublicConfig() {
   return {
     enabled: cfg.enabled,
     basePrompt: cfg.basePrompt,
+    personaSystem: cfg.personaSystem,
+    systemInstructions: cfg.systemInstructions,
+    cvPolicyWithCv: cfg.cvPolicyWithCv,
+    cvPolicyWithoutCv: cfg.cvPolicyWithoutCv,
     rules: cfg.rules,
     enabledSessionIds: cfg.enabledSessionIds,
     webhookIdsBySession: cfg.webhookIdsBySession,
     minDelayMs: cfg.minDelayMs,
     maxDelayMs: cfg.maxDelayMs
   };
+}
+
+function getRecommendedDefaults() {
+  return recommendedDefaults();
 }
 
 /**
@@ -190,13 +282,36 @@ function isSessionEnabled(logicalSessionId, cfg = null) {
 }
 
 /**
- * @param {{ enabled?: boolean, basePrompt?: string, rules?: Array, enabledSessionIds?: string[]|null, minDelayMs?: number|null, maxDelayMs?: number|null }} patch
+ * @param {{
+ *   enabled?: boolean,
+ *   basePrompt?: string,
+ *   personaSystem?: string,
+ *   systemInstructions?: string,
+ *   cvPolicyWithCv?: string,
+ *   cvPolicyWithoutCv?: string,
+ *   rules?: Array,
+ *   enabledSessionIds?: string[]|null,
+ *   minDelayMs?: number|null,
+ *   maxDelayMs?: number|null
+ * }} patch
  */
 function updateConfig(patch) {
   const cfg = readConfig();
   const webhooksBefore = { ...(cfg.webhookIdsBySession || {}) };
   if (patch.enabled !== undefined) cfg.enabled = Boolean(patch.enabled);
   if (patch.basePrompt !== undefined) cfg.basePrompt = String(patch.basePrompt).trim();
+  if (patch.personaSystem !== undefined) {
+    cfg.personaSystem = String(patch.personaSystem).trim();
+  }
+  if (patch.systemInstructions !== undefined) {
+    cfg.systemInstructions = String(patch.systemInstructions).trim();
+  }
+  if (patch.cvPolicyWithCv !== undefined) {
+    cfg.cvPolicyWithCv = String(patch.cvPolicyWithCv).trim();
+  }
+  if (patch.cvPolicyWithoutCv !== undefined) {
+    cfg.cvPolicyWithoutCv = String(patch.cvPolicyWithoutCv).trim();
+  }
   if (patch.enabledSessionIds !== undefined) {
     cfg.enabledSessionIds =
       patch.enabledSessionIds === null ? null : normalizeSessionIds(patch.enabledSessionIds);
@@ -222,6 +337,7 @@ function updateConfig(patch) {
       instruction: String(rule.instruction || '').trim()
     }));
   }
+  cfg.version = 2;
   writeConfig(cfg);
   const webhooksAfter = { ...(cfg.webhookIdsBySession || {}) };
   console.log(
@@ -321,6 +437,7 @@ function setSessionEnabled(sessionId, enabled, allSessionIds) {
 module.exports = {
   getConfig,
   getPublicConfig,
+  getRecommendedDefaults,
   updateConfig,
   isSessionEnabled,
   setSessionEnabled,
@@ -329,5 +446,9 @@ module.exports = {
   getWebhookUrl,
   matchRule,
   DEFAULT_BASE_PROMPT,
+  DEFAULT_PERSONA_SYSTEM,
+  DEFAULT_SYSTEM_INSTRUCTIONS,
+  DEFAULT_CV_POLICY_WITH_CV,
+  DEFAULT_CV_POLICY_WITHOUT_CV,
   DEFAULT_RULES
 };

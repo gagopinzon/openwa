@@ -511,9 +511,12 @@ function formatStoredCvContext(cv) {
 
 /**
  * @param {boolean} hasStoredCv
+ * @param {{ cvPolicyWithCv?: string, cvPolicyWithoutCv?: string }} [overrides]
  */
-function replyCvPolicyInstructions(hasStoredCv) {
+function replyCvPolicyInstructions(hasStoredCv, overrides = {}) {
   if (hasStoredCv) {
+    const custom = String(overrides.cvPolicyWithCv || '').trim();
+    if (custom) return custom;
     return (
       'REGLA CRÍTICA — CV DEL LEAD:\n' +
       '- El PDF del CV de este lead YA está cargado en el sistema (mesa "Cargar CVs").\n' +
@@ -522,11 +525,13 @@ function replyCvPolicyInstructions(hasStoredCv) {
       '- Cuando confirme un horario, el sistema usa el CV ya cargado; tú no lo pidas ni lo menciones.'
     );
   }
+  const custom = String(overrides.cvPolicyWithoutCv || '').trim();
+  if (custom) return custom;
   return (
     'REGLA CRÍTICA — CV DEL LEAD:\n' +
     '- NUNCA pidas CV, currículum, curriculum, curriculo, PDF, hoja de vida ni "documento" en esta respuesta.\n' +
     '- El sistema toma el archivo de los CVs ya cargados si existe. Tú no lo solicitas.\n' +
-    '- Enfócate en la duda o intención del lead y, si aplica, en horarios.'
+    '- Enfócate en la duda o intención del lead y, si aplica, en concretar un horario para la orientación.'
   );
 }
 
@@ -640,6 +645,10 @@ async function generateReplyMessage({
   contactName,
   incomingBody,
   basePrompt,
+  personaSystem,
+  systemInstructions,
+  cvPolicyWithCv,
+  cvPolicyWithoutCv,
   matchedRule,
   senderName,
   conversationContext,
@@ -656,7 +665,19 @@ async function generateReplyMessage({
     ? `\nContexto del candidato (CV):\n${conversationContext}`
     : '';
   const hasStoredCv = Boolean(String(conversationContext || '').trim());
-  const cvPolicy = replyCvPolicyInstructions(hasStoredCv);
+  const cvPolicy = replyCvPolicyInstructions(hasStoredCv, {
+    cvPolicyWithCv,
+    cvPolicyWithoutCv
+  });
+  const systemBlock =
+    String(systemInstructions || '').trim() ||
+    `INSTRUCCIONES DEL SISTEMA (prioritarias si hay conflicto con el playbook):
+- Responde en español como Mónica: cercana, profesional y carismática. Prioridad: concretar citas de orientación de perfil.
+- Si el lead pregunta, responde primero; luego lleva a agendar.
+- No digas que es entrevista laboral ni oferta de trabajo.
+- Sé breve. Emojis solo 💙 y ☺️. No firmes con "Atte:".
+- Si hay historial: no repitas lo que ya enviaste ("Tú").`;
+  const personaBlock = String(personaSystem || '').trim();
 
   const agendaBlock = agendaContext
     ? `\nHORARIOS REALES DISPONIBLES (sustituyen cualquier XXXX / XXXXXXX del playbook; NO inventes otros):\n${agendaContext}`
@@ -734,7 +755,7 @@ async function generateReplyMessage({
 - NUNCA inventes horas ni digas nombres de vendedores.
 - Sé breve: una sola pregunta o confirmación por mensaje; evita confirmaciones redundantes.`
     : `
-- Si no hay lista de horarios reales inyectada, NO inventes horas concretas ni empujes agendar; responde lo que preguntó el lead y deja la puerta abierta sin presionar.`;
+- Si no hay lista de horarios reales inyectada, NO inventes horas concretas. Pregunta qué día y franja le acomodan para la orientación, o invita a agendar sin inventar slots.`;
 
   const greetingInstructions = allowGreeting
     ? `- Puedes abrir con un saludo breve (Hola / gusto saludarte) si encaja.`
@@ -744,39 +765,30 @@ async function generateReplyMessage({
 
   const prompt = `${cvPolicy}
 
-${basePrompt || 'Eres un asistente de Pro Talent.'}
+${basePrompt || 'Eres Mónica, agendadora de Pro Talent.'}
 
 ${firstName ? `Nombre del contacto: ${firstName}` : 'Nombre del contacto: (desconocido — no uses nick de WhatsApp ni inventes nombre)'}
 Mensaje que te escribió:
 "${incomingBody}"
 ${ruleHint}${contextBlock}${historyBlock}${clockBlock}${agendaBlock}
 
-INSTRUCCIONES DEL SISTEMA (prioritarias, sustituyen al playbook si hay conflicto):
+${systemBlock}
+
 ${cvPolicy}
-- Responde en español como Mónica: cercana, profesional y relajada; no suenes vendedora ni apresures a agendar.
-- Si el lead hace una PREGUNTA (servicio, proceso, costos, tiempos, dudas): responde ESA pregunta primero y completa. No cambies de tema ni metas horarios si no los pidió.
-- Tras responder una duda, puedes cerrar con una invitación SUAVE (ej. "¿te gustaría que un asesor te acompañe en una sesión breve?" o "¿quieres que sigamos con esto?"). Sin presionar ni repetirla en cada mensaje.
-- No uses cierres agresivos ("¿agendamos ya?", "¿te paso horarios?") si el lead no mostró interés ni lo pidió.
-- Puedes ser breve pero humana (1–3 frases); reconoce lo que dijo el lead antes de aportar información.
-- Solo ofrece agendar o comparte horarios cuando el lead muestre interés en la sesión o pregunte por disponibilidad/horarios.
-- Zona horaria: México (CDMX). Usa el bloque AHORA (CDMX) como fuente de verdad del día y la hora actuales.
-- No firmes con "Atte:" ni con nombre de sesión; ya te presentaste.
-- Emojis: solo 💙 y ☺️ si el playbook los usa; no uses otros.
-- Responde al mensaje del lead; no reenvíes el pitch frío completo.
-- Si hay historial reciente: NO repitas saludos, propuestas, horarios, preguntas ni datos que ya aparecen en mensajes marcados como "Tú". Avanza la conversación con algo nuevo.
 ${nameInstruction}
-- Sé breve: los leads no quieren paredes de texto; resume el playbook.
-- Ideal: un solo párrafo corto. Si necesitas 2–3 ideas, sepáralas con una línea en blanco entre párrafos (así se envían como mensajes distintos).
-${cvPolicy}
 ${greetingInstructions}
 ${agendaInstructions}
 
 Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.`;
 
+  const systemRoleParts = [cvPolicy, personaBlock, systemBlock].filter(Boolean);
+  const systemRole = systemRoleParts.join('\n\n');
+
   if (canUseOllama) {
     try {
       const message = await ollamaService.chatReply(prompt, {
         basePrompt: basePrompt || undefined,
+        personaSystem: personaBlock || undefined,
         systemExtra: `${cvPolicy}\n${clockBlock}\n${agendaInstructions}`
       });
       return sanitizeAgainstCvAsk(message);
@@ -803,7 +815,7 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
       {
         model: 'deepseek-chat',
         messages: [
-          { role: 'system', content: cvPolicy },
+          { role: 'system', content: systemRole },
           { role: 'user', content: prompt }
         ],
         temperature: 0.7,
