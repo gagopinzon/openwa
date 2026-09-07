@@ -1551,6 +1551,9 @@ class CVAnalyzer {
         const el = document.createElement('div');
         el.className = `incoming-inbox-item fade-in${options.highlight ? ' is-new' : ''}`;
         el.dataset.id = id;
+        el.setAttribute('role', 'button');
+        el.tabIndex = 0;
+        el.title = 'Abrir conversación';
         el.innerHTML = `
             <div class="meta">
                 <span class="phone">${this.escapeHtml(phone)}${this.escapeHtml(name)}</span>
@@ -1560,6 +1563,13 @@ class CVAnalyzer {
             <div class="body">${this.escapeHtml(item.body || '')}</div>
             ${replyHint}
         `;
+        el.addEventListener('click', () => this.openConversationFromIncomingMessage(item));
+        el.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                this.openConversationFromIncomingMessage(item);
+            }
+        });
 
         if (options.prepend === false) {
             this.incomingInboxList.appendChild(el);
@@ -1810,7 +1820,7 @@ class CVAnalyzer {
         if (!chat) {
             chat = {
                 id: hit.chatId,
-                name: hit.chatId,
+                name: hit.chatName || hit.contactName || hit.chatId,
                 sessionId: hit.sessionId,
                 sessionLabel: hit.sessionLabel || hit.sessionId,
                 openwaSessionId: hit.openwaSessionId || null,
@@ -1827,8 +1837,90 @@ class CVAnalyzer {
             };
             this.conversationsChats.unshift(chat);
             this.renderConversationsChatList();
+        } else if (hit.chatName || hit.contactName) {
+            chat.name = hit.chatName || hit.contactName || chat.name;
         }
         await this.openConversationChat(chat);
+    }
+
+    /**
+     * Desde la bandeja "Mensajes entrantes" → abre el hilo en Conversaciones.
+     * @param {object} item
+     */
+    async openConversationFromIncomingMessage(item) {
+        if (!item) return;
+
+        let sessionId = item.sessionId || null;
+        let sessionLabel = null;
+        let openwaSessionId = item.openwaSessionId || null;
+
+        if (!sessionId && openwaSessionId) {
+            const session = (this.configuredSessions || []).find(
+                (s) => String(s.openwaSessionId) === String(openwaSessionId)
+            );
+            if (session) {
+                sessionId = session.id;
+                sessionLabel = session.label || session.id;
+            }
+        }
+        if (sessionId && !sessionLabel) {
+            sessionLabel = this.getSessionLabel(sessionId) || sessionId;
+        }
+
+        let chatId = String(item.chatId || '').trim();
+        if (!chatId) {
+            const phone = String(item.telefono || '').trim();
+            if (phone.startsWith('lid_')) {
+                chatId = `${phone.slice(4)}@lid`;
+            } else if (phone) {
+                const digits = phone.replace(/\D/g, '');
+                if (digits) chatId = `${digits}@c.us`;
+            }
+        }
+
+        if (!sessionId || !chatId) {
+            this.showStatus(
+                'No se pudo abrir la conversación (falta sesión o chat)',
+                'error'
+            );
+            return;
+        }
+
+        if (this.conversationsSessionSelect) {
+            const selectable =
+                this.conversationsSessionSelect.value === 'all' ||
+                this.conversationsSessionSelect.value === String(sessionId) ||
+                [...this.conversationsSessionSelect.options].some(
+                    (o) => o.value === String(sessionId)
+                );
+            if (selectable && this.conversationsSessionSelect.value !== 'all') {
+                // Mantén el filtro si ya es esa sesión; si filtra otra, pasa a todas
+                if (this.conversationsSessionSelect.value !== String(sessionId)) {
+                    this.conversationsSessionSelect.value = 'all';
+                }
+            }
+        }
+
+        const panel = document.getElementById('conversationsPanel');
+        if (panel && typeof panel.scrollIntoView === 'function') {
+            panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        const ts = item.timestamp ? Date.parse(item.timestamp) : NaN;
+        await this.openConversationFromSearchHit({
+            chatId,
+            sessionId,
+            sessionLabel,
+            openwaSessionId,
+            body: item.body || '',
+            chatName: item.contactName || null,
+            timestamp: Number.isFinite(ts) ? ts : null
+        });
+
+        // openConversationChat ya enfoca el composer; reafirma por si el scroll tarda
+        if (this.conversationsReplyInput && !this.conversationsReplyInput.disabled) {
+            setTimeout(() => this.conversationsReplyInput.focus(), 200);
+        }
     }
 
     scheduleConversationsRefresh(delayMs = 600) {

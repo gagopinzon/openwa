@@ -2006,6 +2006,18 @@ footer p {
     margin-bottom: 10px;
     font-size: 13px;
     background: #fff;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.incoming-inbox-item:hover {
+    border-color: #93c5fd;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.12);
+}
+
+.incoming-inbox-item:focus-visible {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
 }
 
 .incoming-inbox-item:last-child {
