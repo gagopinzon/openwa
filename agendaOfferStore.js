@@ -74,7 +74,7 @@ function rememberProposedTimes(phone, times) {
 }
 
 /**
- * Slot que el bot acaba de confirmar ("Perfecto, te agendo a las 17:00 hoy, ¿te queda?").
+ * Slot propuesto al lead (legado). El flujo actual agenda al elegir horario concreto.
  * El "sí" posterior debe usar este slot, no otro del mismo horario en otro día.
  * @param {string} phone
  * @param {object} slot

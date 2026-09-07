@@ -144,12 +144,11 @@ describe('agendaPreferredTime', () => {
     assert.equal(isAskPreferredContext(DAY_CHOSEN_PREFIX), false);
   });
 
-  it('el mensaje de confirmación pide el sí y no lista el calendario', () => {
+  it('formatConfirmReply describe el horario (legado; el flujo ya agenda directo)', () => {
     const text = formatConfirmReply(slot(today, '17:00'), today);
     assert.match(text, /perfecto/i);
     assert.match(text, /te agendo a las 17:00/i);
     assert.match(text, /hoy/i);
-    assert.match(text, /te queda/i);
     assert.doesNotMatch(text, /libres /i);
 
     const manana = formatConfirmReply(slot(tomorrow, '17:00'), today);

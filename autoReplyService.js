@@ -980,12 +980,13 @@ async function sendCvPreviewDocument({
 }
 
 function applyPreferredTimeDecision(decision, { today, normalizedPhone, slotsPrompt, noSlotsThatDay }) {
+  // 'confirm' se agenda en el caller (processChosenSlot); aquí no pedimos otro OK.
   if (decision.action === 'confirm' && decision.slot) {
-    agendaOfferStore.rememberProposedSlot(normalizedPhone, decision.slot);
     return {
-      replyText: agendaPreferredTime.formatConfirmReply(decision.slot, today),
+      replyText: null,
+      bookSlot: decision.slot,
       agendaMeta: {
-        reason: 'slot_confirm_pending',
+        reason: 'slot_book_direct',
         slot: decision.slot.label || decision.slot.horaInicio
       },
       agendaContext: null
@@ -2052,32 +2053,23 @@ async function processBatchedAutoReply(items, opts = {}) {
           slotMatchOpts
         );
         if (chosen) {
-          if (confirmingYes) {
-            const booked = await processChosenSlot({
-              chosen,
-              cvId,
-              normalizedPhone,
-              contactName: contactDisplayName,
-              identity,
-              chatId,
-              logicalSessionId,
-              openwaSessionId,
-              broadcastEvent,
-              testMode,
-              userWillSendCv: agendaIntent.userMentionsSendingCv(body)
-            });
-            replyText = booked.replyText;
-            agendaMeta = booked.agendaMeta;
-            agendaPendingId = booked.agendaPendingId;
-          } else {
-            const today = agendaIntent.todayYmd();
-            const applied = applyPreferredTimeDecision(
-              { action: 'confirm', slot: chosen },
-              { today, normalizedPhone }
-            );
-            replyText = applied.replyText;
-            agendaMeta = applied.agendaMeta;
-          }
+          // Ya eligió horario concreto (o confirmó): agendar de una, sin segundo "¿te queda?"
+          const booked = await processChosenSlot({
+            chosen,
+            cvId,
+            normalizedPhone,
+            contactName: contactDisplayName,
+            identity,
+            chatId,
+            logicalSessionId,
+            openwaSessionId,
+            broadcastEvent,
+            testMode,
+            userWillSendCv: agendaIntent.userMentionsSendingCv(body)
+          });
+          replyText = booked.replyText;
+          agendaMeta = booked.agendaMeta;
+          agendaPendingId = booked.agendaPendingId;
         } else {
           logAgenda('auto-reply.booking.sinMatch', {
             phone: normalizedPhone,
@@ -2157,35 +2149,59 @@ async function processBatchedAutoReply(items, opts = {}) {
             today,
             tomorrow
           });
-          const listMaxDays =
-            decision.action === 'list'
-              ? noSlotsThatDay
-                ? 7
-                : 1
-              : noSlotsThatDay
-                ? 7
-                : 2;
-          const applied = applyPreferredTimeDecision(decision, {
-            today,
-            normalizedPhone,
-            noSlotsThatDay,
-            slotsPrompt:
-              decision.action === 'list'
-                ? agendaAvailability.formatSlotsForPrompt(slots, listMaxDays, today)
-                : undefined
-          });
-          if (applied.replyText) {
-            replyText = applied.replyText;
-            agendaMeta = { ...agendaMeta, ...applied.agendaMeta };
+
+          if (decision.action === 'confirm' && decision.slot) {
+            // Día + hora concretos y hay hueco → agendar ya (sin pedir otro OK).
+            const booked = await processChosenSlot({
+              chosen: decision.slot,
+              cvId,
+              normalizedPhone,
+              contactName: contactDisplayName,
+              identity,
+              chatId,
+              logicalSessionId,
+              openwaSessionId,
+              broadcastEvent,
+              testMode,
+              userWillSendCv: agendaIntent.userMentionsSendingCv(body)
+            });
+            replyText = booked.replyText;
+            agendaMeta = { ...agendaMeta, ...booked.agendaMeta };
+            agendaPendingId = booked.agendaPendingId;
             console.log(
-              `[auto-reply] agenda ${decision.action} (${range.fechaInicio}…${range.fechaFin})`
+              `[auto-reply] agenda book-direct (${range.fechaInicio}…${range.fechaFin}) ${decision.slot.horaInicio}`
             );
           } else {
-            agendaContext = applied.agendaContext;
-            agendaMeta = { ...agendaMeta, ...applied.agendaMeta };
-            console.log(
-              `[auto-reply] agenda ${decision.action} (${range.fechaInicio}…${range.fechaFin})`
-            );
+            const listMaxDays =
+              decision.action === 'list'
+                ? noSlotsThatDay
+                  ? 7
+                  : 1
+                : noSlotsThatDay
+                  ? 7
+                  : 2;
+            const applied = applyPreferredTimeDecision(decision, {
+              today,
+              normalizedPhone,
+              noSlotsThatDay,
+              slotsPrompt:
+                decision.action === 'list'
+                  ? agendaAvailability.formatSlotsForPrompt(slots, listMaxDays, today)
+                  : undefined
+            });
+            if (applied.replyText) {
+              replyText = applied.replyText;
+              agendaMeta = { ...agendaMeta, ...applied.agendaMeta };
+              console.log(
+                `[auto-reply] agenda ${decision.action} (${range.fechaInicio}…${range.fechaFin})`
+              );
+            } else {
+              agendaContext = applied.agendaContext;
+              agendaMeta = { ...agendaMeta, ...applied.agendaMeta };
+              console.log(
+                `[auto-reply] agenda ${decision.action} (${range.fechaInicio}…${range.fechaFin})`
+              );
+            }
           }
         } else {
           const errMsg =

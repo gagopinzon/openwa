@@ -148,7 +148,7 @@ function selectNearestInWindow(slots, preferredHhmm, opts = {}) {
 function formatConfirmReply(slot, today) {
   const hora = String((slot && slot.horaInicio) || '').trim();
   const when = agendaIntent.relativeDayLabel(slot && slot.fecha, today);
-  return `Perfecto, te agendo a las ${hora} ${when}, ¿te queda?`;
+  return `Perfecto, te agendo a las ${hora} ${when}.`;
 }
 
 /**
