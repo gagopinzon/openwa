@@ -195,7 +195,8 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-El script `deploy.sh` hace: `git pull` → `npm install` → `pm2 startOrReload ecosystem.config.cjs` → `pm2 save`.
+El script `deploy.sh` hace: backup de `data/auto-reply-config.json` → `git stash` si hace falta → `git pull` → restaura tus prompts locales sobre la config nueva → `npm install` → `pm2 startOrReload` → `pm2 save`.
+Los backups quedan en `data/.deploy-backups/`.
 
 ### Actualizaciones
 
