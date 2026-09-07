@@ -175,6 +175,21 @@ function listPending(filter = {}) {
   return items;
 }
 
+/**
+ * Cita pendiente activa del lead (PENDING_LINK), si existe.
+ * @param {string} telefono
+ * @returns {object|null}
+ */
+function findPendingByPhone(telefono) {
+  const key = String(telefono || '').replace(/\D/g, '');
+  if (!key) return null;
+  return (
+    listPending({ status: STATUS.PENDING_LINK }).find(
+      (item) => String(item.telefono || '').replace(/\D/g, '') === key
+    ) || null
+  );
+}
+
 function getById(id) {
   const sid = String(id || '').trim();
   if (!sid) return null;
@@ -222,6 +237,7 @@ module.exports = {
   createPending,
   listPending,
   getById,
+  findPendingByPhone,
   updatePending,
   confirmPending,
   cancelPending,

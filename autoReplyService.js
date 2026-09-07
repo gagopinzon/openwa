@@ -1058,6 +1058,14 @@ async function processChosenSlot({
     testMode: Boolean(testMode)
   });
   if (!effectiveCvId) {
+    const prevAwaiting = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
+    const sameSlotWaiting =
+      prevAwaiting &&
+      prevAwaiting.stage === 'need_upload' &&
+      prevAwaiting.chosen &&
+      String(prevAwaiting.chosen.fecha) === String(chosen.fecha) &&
+      String(prevAwaiting.chosen.horaInicio) === String(chosen.horaInicio);
+
     agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
       chosen,
       stage: 'need_upload',
@@ -1069,8 +1077,22 @@ async function processChosenSlot({
     warnAgenda('auto-reply.booking.sinCv', {
       phone: normalizedPhone,
       slot: slotLog(chosen),
-      nota: 'no se agenda ni se manda liga; se pide CV'
+      nota: sameSlotWaiting
+        ? 'ya esperábamos CV; no repetir el mismo mensaje de cita'
+        : 'no se agenda ni se manda liga; se pide CV'
     });
+    // Si ya avisamos de esta cita, no spamear: dejar que la IA conteste la duda del lead.
+    if (sameSlotWaiting) {
+      return {
+        replyText: null,
+        agendaMeta: { reason: 'awaiting_cv_already', slot: chosen.label || chosen.horaInicio },
+        agendaPendingId: null,
+        agendaContext:
+          `CITA YA ANOTADA (sin repetir): ${chosen.label || `${chosen.fecha} ${chosen.horaInicio}`}. ` +
+          `El lead aún no mandó CV. Responde SU mensaje actual (duda/pregunta/comentario). ` +
+          `No vuelvas a decir "quedó anotado" ni prometas la liga otra vez; si encaja, una frase breve al final.`
+      };
+    }
     return {
       replyText: buildAskCvReply(displayName, chosen, { userWillSendCv }),
       agendaMeta: { reason: 'awaiting_cv', slot: chosen.label || chosen.horaInicio },
@@ -1835,6 +1857,7 @@ async function processBatchedAutoReply(items, opts = {}) {
     let replyText = preparedReply || null;
     let agendaPendingId = null;
     let agendaMeta = null;
+    let deferredAgendaContext = null;
 
     if (!preparedReply && incomingDocument) {
       const cvBooked = await tryIngestCvAndBook({
@@ -1952,7 +1975,7 @@ async function processBatchedAutoReply(items, opts = {}) {
       }
     }
 
-    // Fase 2: el lead elige un horario previamente ofrecido
+    // Fase 2b: esperando CV — solo reintentar agenda si ya hay PDF; si no, NO repetir "quedó anotado"
     const priorOffer = agendaOfferStore.getOffer(normalizedPhone);
     const awaitingCvAfterLeadData = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
     if (
@@ -1987,12 +2010,23 @@ async function processBatchedAutoReply(items, opts = {}) {
           reason: booked.agendaMeta?.reason || 'awaiting_cv_recovered'
         };
         agendaPendingId = booked.agendaPendingId;
+        if (booked.agendaContext) deferredAgendaContext = booked.agendaContext;
+      } else if (agendaIntent.userMentionsSendingCv(body)) {
+        replyText =
+          `${phraseWithName('Va', contactDisplayName)}. Cuando lo tengas, mándame el PDF por aquí y te paso la liga. ☺️`;
+        agendaMeta = { reason: 'awaiting_cv_ack_send' };
       } else {
-        replyText = buildAskCvReply(
-          contactDisplayName,
-          awaitingCvAfterLeadData.chosen
-        );
-        agendaMeta = { reason: 'awaiting_cv_reminder' };
+        // Duda / gracias / ¿? → la IA responde; no reenviar el mensaje de cita.
+        const when =
+          (awaitingCvAfterLeadData.chosen &&
+            (awaitingCvAfterLeadData.chosen.label ||
+              `${awaitingCvAfterLeadData.chosen.fecha} ${awaitingCvAfterLeadData.chosen.horaInicio}`)) ||
+          'el horario acordado';
+        deferredAgendaContext =
+          `CITA YA ANOTADA: ${when}. Responde el mensaje actual del lead (pregunta o comentario). ` +
+          `No digas otra vez "quedó anotado" ni "en breve te confirmamos la liga". ` +
+          `Si aplica, aclara que no somos reclutadores de vacante abierta: es orientación de perfil.`;
+        agendaMeta = { reason: 'awaiting_cv_defer_to_ai', slot: when };
       }
     }
     const dateRangeFromBody = agendaIntent.resolveDateRangeFromMessage(body);
@@ -2021,15 +2055,23 @@ async function processBatchedAutoReply(items, opts = {}) {
 
     if (!replyText && priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
       const confirmingYes = agendaIntent.looksLikeTimeConfirmYes(body);
+      const alreadyPending = agendaPendingStore.findPendingByPhone(normalizedPhone);
       logAgenda('auto-reply.booking.offerMatch', {
         phone: normalizedPhone,
         confirmingYes,
         hasProposedSlot: Boolean(priorOffer.proposedSlot && priorOffer.proposedSlot.horaInicio),
         proposedSlot: slotLog(priorOffer.proposedSlot),
         slotCount: priorOffer.slots.length,
+        alreadyPending: Boolean(alreadyPending),
         body: String(body || '').slice(0, 160)
       });
-      if (confirmingYes && priorOffer.proposedSlot && priorOffer.proposedSlot.horaInicio) {
+      if (alreadyPending) {
+        // Cita ya creada: no re-agendar por cada mensaje.
+        deferredAgendaContext =
+          (deferredAgendaContext ? `${deferredAgendaContext}\n` : '') +
+          `CITA YA PENDIENTE: ${alreadyPending.label || `${alreadyPending.fecha} ${alreadyPending.horaInicio}`}. ` +
+          `Responde el mensaje actual; no repitas que quedó anotado.`;
+      } else if (confirmingYes && priorOffer.proposedSlot && priorOffer.proposedSlot.horaInicio) {
         const booked = await processChosenSlot({
           chosen: priorOffer.proposedSlot,
           cvId,
@@ -2046,6 +2088,7 @@ async function processBatchedAutoReply(items, opts = {}) {
         replyText = booked.replyText;
         agendaMeta = booked.agendaMeta;
         agendaPendingId = booked.agendaPendingId;
+        if (booked.agendaContext) deferredAgendaContext = booked.agendaContext;
       } else {
         const chosen = agendaIntent.matchSlotFromMessage(
           body,
@@ -2070,6 +2113,7 @@ async function processBatchedAutoReply(items, opts = {}) {
           replyText = booked.replyText;
           agendaMeta = booked.agendaMeta;
           agendaPendingId = booked.agendaPendingId;
+          if (booked.agendaContext) deferredAgendaContext = booked.agendaContext;
         } else {
           logAgenda('auto-reply.booking.sinMatch', {
             phone: normalizedPhone,
@@ -2100,8 +2144,18 @@ async function processBatchedAutoReply(items, opts = {}) {
     }
 
     // Fase 1: en el playbook casi siempre se cierran con horarios (XXXX → slots reales)
-    let agendaContext = null;
-    if (!replyText && agendaIntent.shouldOfferSlots(body) && !skipReslotOnYes) {
+    let agendaContext = deferredAgendaContext || null;
+    const existingPending = agendaPendingStore.findPendingByPhone(normalizedPhone);
+    if (existingPending && !replyText) {
+      const when =
+        existingPending.label ||
+        `${existingPending.fecha} ${existingPending.horaInicio}`;
+      agendaContext =
+        (agendaContext ? `${agendaContext}\n` : '') +
+        `CITA YA PENDIENTE: ${when}. No vuelvas a agendar ni digas "quedó anotado". Responde la duda o mensaje actual del lead.`;
+      agendaMeta = agendaMeta || { reason: 'pending_exists_defer_to_ai', pendingId: existingPending.id };
+    }
+    if (!replyText && agendaIntent.shouldOfferSlots(body) && !skipReslotOnYes && !existingPending) {
       try {
         const today = agendaIntent.todayYmd();
         const tomorrow = agendaIntent.addDaysYmd(today, 1);
@@ -2168,6 +2222,9 @@ async function processBatchedAutoReply(items, opts = {}) {
             replyText = booked.replyText;
             agendaMeta = { ...agendaMeta, ...booked.agendaMeta };
             agendaPendingId = booked.agendaPendingId;
+            if (!replyText && booked.agendaContext) {
+              agendaContext = (agendaContext ? `${agendaContext}\n` : '') + booked.agendaContext;
+            }
             console.log(
               `[auto-reply] agenda book-direct (${range.fechaInicio}…${range.fechaFin}) ${decision.slot.horaInicio}`
             );
