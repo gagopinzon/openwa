@@ -5650,6 +5650,10 @@ class CVAnalyzer {
         this.agendarGerenteEmail = document.getElementById('agendarGerenteEmail');
         this.agendarVendedor = document.getElementById('agendarVendedor');
         this.agendarSlot = document.getElementById('agendarSlot');
+        this.agendarDia = document.getElementById('agendarDia');
+        this.agendarHora = document.getElementById('agendarHora');
+        this.agendarTimeFirstWrap = document.getElementById('agendarTimeFirstWrap');
+        this.agendarVendorSlotWrap = document.getElementById('agendarVendorSlotWrap');
         this.agendarLeadCorreo = document.getElementById('agendarLeadCorreo');
         this.agendarHint = document.getElementById('agendarHint');
         this.agendarStatus = document.getElementById('agendarStatus');
@@ -5663,6 +5667,8 @@ class CVAnalyzer {
         this.agendarLeadNombre = '';
         this.agendarLeadTelefono = '';
         this.agendarNeedsCvUpload = false;
+        this.agendarTimeFirst = false;
+        this.agendarDisponibilidadRange = null;
 
         const close = () => this.closeAgendarModal();
         const closeBtn = document.getElementById('agendarModalClose');
@@ -5675,7 +5681,15 @@ class CVAnalyzer {
             });
         }
         if (this.agendarVendedor) {
-            this.agendarVendedor.addEventListener('change', () => this.renderAgendarSlots());
+            this.agendarVendedor.addEventListener('change', () => {
+                if (!this.agendarTimeFirst) this.renderAgendarSlots();
+            });
+        }
+        if (this.agendarDia) {
+            this.agendarDia.addEventListener('change', () => this.renderAgendarHoras());
+        }
+        if (this.agendarHora) {
+            this.agendarHora.addEventListener('change', () => this.renderAgendarVendedoresForHora());
         }
         if (this.agendarConfirmBtn) {
             this.agendarConfirmBtn.addEventListener('click', () => this.confirmAgendarReunion());
@@ -5687,10 +5701,11 @@ class CVAnalyzer {
                     this.applyAgendarSoftWarnings();
                     return;
                 }
-                this.fetchDisponibilidad(email, true)
+                const range = this.agendarTimeFirst ? this.getCalendarWeekRange(0) : null;
+                this.fetchDisponibilidad(email, true, range)
                     .then((data) => {
                         this.disponibilidadData = data;
-                        this.populateAgendarVendedores(data);
+                        this.applyAgendarDisponibilidad(data, range);
                         this.setAgendarStatus('', '');
                     })
                     .catch((error) => {
@@ -5745,12 +5760,38 @@ class CVAnalyzer {
         this.agendarLeadNombre = '';
         this.agendarLeadTelefono = '';
         this.agendarNeedsCvUpload = false;
+        this.agendarTimeFirst = false;
+        this.agendarDisponibilidadRange = null;
+        this.setAgendarUiMode(false);
         if (this.agendarConfirmBtn) this.agendarConfirmBtn.disabled = false;
         if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
         if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
         if (this.agendarCvFile) this.agendarCvFile.value = '';
         if (this.agendarCvSelect) this.agendarCvSelect.innerHTML = '';
         if (this.agendarCvSelect) this.agendarCvSelect.disabled = false;
+    }
+
+    setAgendarUiMode(timeFirst) {
+        this.agendarTimeFirst = Boolean(timeFirst);
+        if (this.agendarTimeFirstWrap) {
+            this.agendarTimeFirstWrap.style.display = this.agendarTimeFirst ? 'block' : 'none';
+        }
+        if (this.agendarVendorSlotWrap) {
+            this.agendarVendorSlotWrap.style.display = this.agendarTimeFirst ? 'none' : 'block';
+        }
+        if (this.agendarHint) {
+            this.agendarHint.textContent = this.agendarTimeFirst
+                ? 'Elige primero el día y la hora; luego solo verás vendedores libres en ese horario. El panel crea la reunión y la liga de Meet.'
+                : 'Completa o confirma los datos. Lo que ya tengamos (gerente, CV, lead) se precarga. El panel analiza el CV, crea la reunión y genera la liga de Meet automáticamente.';
+        }
+    }
+
+    applyAgendarDisponibilidad(data, range = null) {
+        if (this.agendarTimeFirst) {
+            this.populateAgendarTimeFirst(data, range || this.agendarDisponibilidadRange);
+            return;
+        }
+        this.populateAgendarVendedores(data);
     }
 
     async refreshCvsFromServer({ silent = false, render = true } = {}) {
@@ -5862,7 +5903,9 @@ class CVAnalyzer {
             '';
         if (!gerente) {
             this.setAgendarStatus(
-                'Escribe el correo del gerente para cargar vendedores y horarios.',
+                this.agendarTimeFirst
+                    ? 'Escribe el correo del gerente para cargar días, horarios y vendedores.'
+                    : 'Escribe el correo del gerente para cargar vendedores y horarios.',
                 'warning'
             );
             return;
@@ -5900,12 +5943,14 @@ class CVAnalyzer {
         preferredPhone = '',
         lockMatchedCv = false,
         matchSource = '',
-        presetSlot = null
+        presetSlot = null,
+        timeFirst = false
     }) {
         this.agendarCvId = cvId || null;
         this.agendarLeadNombre = leadNombre || '';
         this.agendarLeadTelefono = leadTelefono || '';
         this.agendarNeedsCvUpload = Boolean(needsUpload);
+        this.setAgendarUiMode(timeFirst);
 
         if (this.agendarCvLabel) {
             this.agendarCvLabel.textContent = label || 'Agendar reunión';
@@ -5972,14 +6017,7 @@ class CVAnalyzer {
             this.agendarLeadCorreo.value = fromCv;
         }
         if (!lockMatchedCv && !this.agendarCvId) this.setAgendarStatus('');
-        if (this.agendarVendedor) {
-            this.agendarVendedor.innerHTML = '<option value="">Cargando disponibilidad…</option>';
-            this.agendarVendedor.disabled = true;
-        }
-        if (this.agendarSlot) {
-            this.agendarSlot.innerHTML = '<option value="">Elige un vendedor primero</option>';
-            this.agendarSlot.disabled = true;
-        }
+        this.resetAgendarAvailabilityFields();
 
         // Abrir siempre: el modal es el lugar para completar datos
         if (this.agendarModal) {
@@ -6003,26 +6041,60 @@ class CVAnalyzer {
 
         const gerenteEmail = (this.agendarGerenteEmail?.value || '').trim();
         if (!gerenteEmail) {
+            this.resetAgendarAvailabilityFields({ waitingForGerente: true });
+            return;
+        }
+
+        const range = this.agendarTimeFirst ? this.getCalendarWeekRange(0) : null;
+        this.agendarDisponibilidadRange = range;
+
+        try {
+            const data = await this.fetchDisponibilidad(gerenteEmail, false, range);
+            this.disponibilidadData = data;
+            this.applyAgendarDisponibilidad(data, range);
+            if (presetSlot && presetSlot.vendedorId && !this.agendarTimeFirst) {
+                this.applyPresetAgendarSlot(presetSlot);
+            }
+        } catch (error) {
+            this.setAgendarStatus(error.message || 'No se pudo cargar disponibilidad', 'error');
+            this.resetAgendarAvailabilityFields({ empty: true });
+        }
+    }
+
+    resetAgendarAvailabilityFields({ waitingForGerente = false, empty = false } = {}) {
+        const loadingMsg = waitingForGerente
+            ? 'Escribe el correo del gerente primero'
+            : empty
+              ? 'Sin disponibilidad'
+              : 'Cargando disponibilidad…';
+
+        if (this.agendarTimeFirst) {
+            if (this.agendarDia) {
+                this.agendarDia.innerHTML = `<option value="">${
+                    waitingForGerente ? loadingMsg : empty ? 'Sin días' : 'Cargando días…'
+                }</option>`;
+                this.agendarDia.disabled = true;
+            }
+            if (this.agendarHora) {
+                this.agendarHora.innerHTML = '<option value="">Elige un día primero</option>';
+                this.agendarHora.disabled = true;
+            }
             if (this.agendarVendedor) {
-                this.agendarVendedor.innerHTML =
-                    '<option value="">Escribe el correo del gerente primero</option>';
+                this.agendarVendedor.innerHTML = `<option value="">${
+                    waitingForGerente || empty ? loadingMsg : 'Elige día y hora primero'
+                }</option>`;
                 this.agendarVendedor.disabled = true;
             }
             return;
         }
 
-        try {
-            const data = await this.fetchDisponibilidad(gerenteEmail);
-            this.disponibilidadData = data;
-            this.populateAgendarVendedores(data);
-            if (presetSlot && presetSlot.vendedorId) {
-                this.applyPresetAgendarSlot(presetSlot);
-            }
-        } catch (error) {
-            this.setAgendarStatus(error.message || 'No se pudo cargar disponibilidad', 'error');
-            if (this.agendarVendedor) {
-                this.agendarVendedor.innerHTML = '<option value="">Sin disponibilidad</option>';
-            }
+        if (this.agendarVendedor) {
+            this.agendarVendedor.innerHTML = `<option value="">${loadingMsg}</option>`;
+            this.agendarVendedor.disabled = true;
+        }
+        if (this.agendarSlot) {
+            this.agendarSlot.innerHTML = '<option value="">Elige un vendedor primero</option>';
+            this.agendarSlot.disabled = true;
         }
     }
 
@@ -6132,7 +6204,8 @@ class CVAnalyzer {
             showCvPicker: !quickMatch,
             preferredPhone: phone,
             lockMatchedCv: Boolean(quickMatch),
-            matchSource: quickMatch ? 'telefono' : ''
+            matchSource: quickMatch ? 'telefono' : '',
+            timeFirst: true
         });
 
         // Enriquecer en paralelo (no bloquea la apertura visual)
@@ -6508,11 +6581,11 @@ class CVAnalyzer {
         return this.formatYmd(dt);
     }
 
-    getCalendarWeekRange() {
+    getCalendarWeekRange(weekOffset = this.dispWeekOffset) {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const start = new Date(today);
-        start.setDate(start.getDate() + this.dispWeekOffset * 7);
+        start.setDate(start.getDate() + weekOffset * 7);
         const fechaInicio = this.formatYmd(start);
         const fechaFin = this.addDaysYmd(fechaInicio, 6);
         return { fechaInicio, fechaFin };
@@ -6731,8 +6804,177 @@ class CVAnalyzer {
         this.renderAgendarSlots();
     }
 
+    /**
+     * Modo Conversaciones: día (todos del rango) → horas libres → vendedores en esa hora.
+     */
+    populateAgendarTimeFirst(data, range = null) {
+        if (!this.agendarDia) return;
+        const resolvedRange = range || this.agendarDisponibilidadRange || this.getCalendarWeekRange(0);
+        this.agendarDisponibilidadRange = resolvedRange;
+
+        const days = [];
+        for (let i = 0; i < 7; i += 1) {
+            days.push(this.addDaysYmd(resolvedRange.fechaInicio, i));
+        }
+
+        const slotsByDate = this.groupAgendarSlotsByDate(data, days);
+        const weekdayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+        const today = this.formatYmd(new Date());
+
+        this.agendarDia.innerHTML =
+            '<option value="">Selecciona un día…</option>' +
+            days
+                .map((fecha) => {
+                    const [y, m, dayNum] = fecha.split('-').map(Number);
+                    const dt = new Date(y, m - 1, dayNum);
+                    const wd = weekdayNames[dt.getDay()];
+                    const n = (slotsByDate[fecha] || []).length;
+                    const todayMark = fecha === today ? ' · hoy' : '';
+                    const label = `${wd} ${dayNum}/${m}${todayMark} (${n} libre${n === 1 ? '' : 's'})`;
+                    return `<option value="${this.escapeHtml(fecha)}">${this.escapeHtml(label)}</option>`;
+                })
+                .join('');
+        this.agendarDia.disabled = false;
+
+        if (this.agendarHora) {
+            this.agendarHora.innerHTML = '<option value="">Elige un día primero</option>';
+            this.agendarHora.disabled = true;
+        }
+        if (this.agendarVendedor) {
+            this.agendarVendedor.innerHTML = '<option value="">Elige día y hora primero</option>';
+            this.agendarVendedor.disabled = true;
+        }
+        this.setAgendarStatus('');
+    }
+
+    groupAgendarSlotsByDate(data, days) {
+        const byDate = {};
+        (days || []).forEach((d) => {
+            byDate[d] = [];
+        });
+        (data?.vendedores || []).forEach((v) => {
+            (v.disponibilidad || []).forEach((s) => {
+                if (!s || !s.fecha || !byDate[s.fecha]) return;
+                byDate[s.fecha].push({
+                    ...s,
+                    vendedorId: v.id,
+                    vendedorNombre: v.nombre || v.correo || 'Vendedor'
+                });
+            });
+        });
+        Object.keys(byDate).forEach((d) => {
+            byDate[d].sort((a, b) => String(a.horaInicio).localeCompare(String(b.horaInicio)));
+        });
+        return byDate;
+    }
+
+    renderAgendarHoras() {
+        if (!this.agendarHora || !this.agendarDia) return;
+        const fecha = (this.agendarDia.value || '').trim();
+        if (this.agendarVendedor) {
+            this.agendarVendedor.innerHTML = '<option value="">Elige día y hora primero</option>';
+            this.agendarVendedor.disabled = true;
+        }
+        if (!fecha) {
+            this.agendarHora.innerHTML = '<option value="">Elige un día primero</option>';
+            this.agendarHora.disabled = true;
+            return;
+        }
+
+        const range = this.agendarDisponibilidadRange || this.getCalendarWeekRange(0);
+        const daySlots = slotsByDate[fecha] || [];
+
+        if (daySlots.length === 0) {
+            this.agendarHora.innerHTML = '<option value="">Sin horarios libres este día</option>';
+            this.agendarHora.disabled = true;
+            return;
+        }
+
+        const seen = new Set();
+        const unique = [];
+        daySlots.forEach((s) => {
+            const key = `${s.horaInicio}|${s.horaFin}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            unique.push(s);
+        });
+
+        this.agendarHora.innerHTML =
+            '<option value="">Selecciona una hora…</option>' +
+            unique
+                .map((s) => {
+                    const count = daySlots.filter(
+                        (x) => x.horaInicio === s.horaInicio && x.horaFin === s.horaFin
+                    ).length;
+                    const label = `${s.horaInicio}–${s.horaFin} (${count} vendedor${count === 1 ? '' : 'es'})`;
+                    const value = encodeURIComponent(
+                        JSON.stringify({
+                            fecha,
+                            horaInicio: s.horaInicio,
+                            horaFin: s.horaFin
+                        })
+                    );
+                    return `<option value="${value}">${this.escapeHtml(label)}</option>`;
+                })
+                .join('');
+        this.agendarHora.disabled = false;
+    }
+
+    renderAgendarVendedoresForHora() {
+        if (!this.agendarVendedor || !this.agendarHora) return;
+        const slotRaw = this.agendarHora.value;
+        if (!slotRaw) {
+            this.agendarVendedor.innerHTML = '<option value="">Elige día y hora primero</option>';
+            this.agendarVendedor.disabled = true;
+            return;
+        }
+
+        let slot;
+        try {
+            slot = JSON.parse(decodeURIComponent(slotRaw));
+        } catch {
+            this.agendarVendedor.innerHTML = '<option value="">Hora inválida</option>';
+            this.agendarVendedor.disabled = true;
+            return;
+        }
+
+        const available = [];
+        (this.disponibilidadData?.vendedores || []).forEach((v) => {
+            const match = (v.disponibilidad || []).some(
+                (s) =>
+                    s.fecha === slot.fecha &&
+                    s.horaInicio === slot.horaInicio &&
+                    s.horaFin === slot.horaFin
+            );
+            if (match) {
+                available.push({
+                    id: v.id,
+                    nombre: v.nombre || v.correo || 'Vendedor'
+                });
+            }
+        });
+
+        if (available.length === 0) {
+            this.agendarVendedor.innerHTML =
+                '<option value="">Nadie disponible a esa hora</option>';
+            this.agendarVendedor.disabled = true;
+            return;
+        }
+
+        this.agendarVendedor.innerHTML =
+            '<option value="">Selecciona vendedor…</option>' +
+            available
+                .map((v) => {
+                    const label = String(v.nombre).replace(/</g, '&lt;');
+                    return `<option value="${String(v.id).replace(/"/g, '')}">${label}</option>`;
+                })
+                .join('');
+        this.agendarVendedor.disabled = false;
+    }
+
     renderAgendarSlots() {
         if (!this.agendarSlot || !this.agendarVendedor) return;
+        if (this.agendarTimeFirst) return;
         const vendedorId = this.agendarVendedor.value;
         const vendedores = Array.isArray(this.disponibilidadData?.vendedores)
             ? this.disponibilidadData.vendedores
@@ -6762,9 +7004,22 @@ class CVAnalyzer {
 
     async confirmAgendarReunion() {
         const vendedorId = this.agendarVendedor?.value;
-        const slotRaw = this.agendarSlot?.value;
+        const slotRaw = this.agendarTimeFirst
+            ? this.agendarHora?.value
+            : this.agendarSlot?.value;
         const gerenteEmail = (this.agendarGerenteEmail?.value || '').trim();
         const leadCorreo = (this.agendarLeadCorreo?.value || '').trim();
+
+        if (this.agendarTimeFirst) {
+            if (!(this.agendarDia?.value || '').trim()) {
+                this.setAgendarStatus('Selecciona un día', 'error');
+                return;
+            }
+            if (!slotRaw) {
+                this.setAgendarStatus('Selecciona una hora', 'error');
+                return;
+            }
+        }
 
         if (!vendedorId) {
             this.setAgendarStatus('Selecciona un vendedor', 'error');
@@ -6816,9 +7071,12 @@ class CVAnalyzer {
                 this.setAgendarStatus((data.error || data.message || 'Error al agendar') + hint, 'error');
                 if (response.status === 409) {
                     try {
-                        const fresh = await this.fetchDisponibilidad(gerenteEmail, true);
+                        const range = this.agendarTimeFirst
+                            ? this.agendarDisponibilidadRange || this.getCalendarWeekRange(0)
+                            : null;
+                        const fresh = await this.fetchDisponibilidad(gerenteEmail, true, range);
                         this.disponibilidadData = fresh;
-                        this.populateAgendarVendedores(fresh);
+                        this.applyAgendarDisponibilidad(fresh, range);
                     } catch {
                         /* ignore refresh errors */
                     }

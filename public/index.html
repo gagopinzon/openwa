@@ -733,15 +733,29 @@
                 <label class="agendar-field-label" for="agendarGerenteEmail">Correo del gerente</label>
                 <input type="email" id="agendarGerenteEmail" class="agendar-input" placeholder="gerente@protalentconnections.com" />
 
+                <div id="agendarTimeFirstWrap" style="display: none;">
+                    <label class="agendar-field-label" for="agendarDia">Día</label>
+                    <select id="agendarDia" class="agendar-input" disabled>
+                        <option value="">Cargando días…</option>
+                    </select>
+
+                    <label class="agendar-field-label" for="agendarHora">Hora disponible</label>
+                    <select id="agendarHora" class="agendar-input" disabled>
+                        <option value="">Elige un día primero</option>
+                    </select>
+                </div>
+
                 <label class="agendar-field-label" for="agendarVendedor">Vendedor</label>
                 <select id="agendarVendedor" class="agendar-input">
                     <option value="">Cargando disponibilidad…</option>
                 </select>
 
-                <label class="agendar-field-label" for="agendarSlot">Horario disponible</label>
-                <select id="agendarSlot" class="agendar-input" disabled>
-                    <option value="">Elige un vendedor primero</option>
-                </select>
+                <div id="agendarVendorSlotWrap">
+                    <label class="agendar-field-label" for="agendarSlot">Horario disponible</label>
+                    <select id="agendarSlot" class="agendar-input" disabled>
+                        <option value="">Elige un vendedor primero</option>
+                    </select>
+                </div>
 
                 <label class="agendar-field-label" for="agendarLeadCorreo">Email del candidato (opcional, override)</label>
                 <input type="email" id="agendarLeadCorreo" class="agendar-input" placeholder="Solo si el CV no trae email visible" />
@@ -759,7 +773,7 @@
         </div>
     </div>
 
-    <script src="app.js?v=agendar-fast-open-4"></script>
+    <script src="app.js?v=agendar-time-first-1"></script>
     <script>
         (async function initAuthUi() {
             try {
