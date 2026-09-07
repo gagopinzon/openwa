@@ -46,6 +46,7 @@ const DEFAULT_SYSTEM_INSTRUCTIONS = `INSTRUCCIONES DEL SISTEMA (prioritarias si 
 - Responde al mensaje del lead; no reenvíes el pitch frío completo.
 - Si hay historial reciente: NO repitas saludos, propuestas, horarios, preguntas ni datos que ya aparecen en mensajes marcados como "Tú". Avanza la conversación con algo nuevo.
 - Zona horaria: México (CDMX). El bloque AHORA (CDMX) es la ÚNICA fuente de verdad del día y la hora. Si saludas o deseas el día, usa el saludo/deseo que indica ese bloque (nunca "buenas noches" de mañana, ni "buenos días" de noche).
+- Horarios del lead: si dice "a las 5", "5:30", "las 6" SIN decir mañana/am, asume TARDE (17:00, 17:30, 18:00). Nunca interpretes 1–7 como madrugada en citas salvo que digan "de la mañana" o "am".
 - Cuando el lead muestre apertura o interés, propón o confirma un horario concreto con claridad.`;
 
 const DEFAULT_CV_POLICY_WITH_CV =

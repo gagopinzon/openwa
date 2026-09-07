@@ -47,26 +47,34 @@ describe('preferredContactName', () => {
     );
   });
 
-  it('resolveAiContactName usa name de sesión solo con trust de outreach', () => {
+  it('nunca usa el nombre de WhatsApp aunque haya cvId u outreach', () => {
     assert.equal(
       resolveAiContactName({
-        sessionName: 'Maria Pitch',
-        cvId: 'abc'
-      }),
-      'Maria Pitch'
-    );
-    assert.equal(
-      resolveAiContactName({
-        sessionName: 'Maria Pitch',
+        sessionName: 'jymmy',
+        preferredName: null,
+        leadCvNombre: null,
+        cvId: 'cv-jaime',
         lastOutboundAt: new Date().toISOString()
       }),
-      'Maria Pitch'
+      null
     );
     assert.equal(
       resolveAiContactName({
-        sessionName: 'SoloInboundWA'
+        sessionName: 'jymmy',
+        preferredName: null,
+        leadCvNombre: 'Jaime López',
+        cvId: 'cv-jaime'
       }),
-      null
+      'Jaime López'
+    );
+    assert.equal(
+      resolveAiContactName({
+        sessionName: 'jymmy',
+        preferredName: 'Jaime López',
+        leadCvNombre: null,
+        cvId: 'cv-jaime'
+      }),
+      'Jaime López'
     );
   });
 

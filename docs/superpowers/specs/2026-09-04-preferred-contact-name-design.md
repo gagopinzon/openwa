@@ -15,16 +15,15 @@ La auto-respuesta IA a veces saluda con el nombre de WhatsApp (`pushName` / `not
 - Campo Mongo `contact_history.preferredName` (string).
 - Se escribe en `recordSuccessfulContact` y `linkCvToContact` cuando hay nombre de CV.
 - No se escribe ni se pisa desde enroll inbound / pushName.
-- `getContactSession` expone `preferredName` (+ `lastOutboundAt` para legado).
+- `getContactSession` expone `preferredName` (+ `lastOutboundAt` para legado) y prioriza docs con `preferredName` sobre `lid_*`.
 
 ## Resolution (AI)
 
 Orden:
 
 1. `preferredName`
-2. `leadCv.nombre`
-3. legado: `name` solo si el contacto tiene `cvId` o `lastOutboundAt` (hubo outreach)
-4. `null` → plantillas/prompt sin nombre
+2. `leadCv.nombre` (o nombre del manifesto por `cvId`)
+3. `null` → plantillas/prompt sin nombre (nunca `name`/pushName de WhatsApp)
 
 ## Out of scope
 

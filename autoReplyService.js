@@ -1751,13 +1751,42 @@ async function processBatchedAutoReply(items, opts = {}) {
 
     const leadCv =
       typeof getLeadCv === 'function' ? getLeadCv(normalizedPhone, cvHints) : null;
+    // Si el CV está ligado por cvId pero el lookup por teléfono falló (chat @lid),
+    // aún así toma el nombre del manifesto — nunca el pushName de WhatsApp.
+    let leadCvNombre = leadCv && leadCv.nombre;
+    if (!leadCvNombre && contactSession && contactSession.cvId) {
+      const fromId = (cvFileStore.loadCvsManifest() || []).find(
+        (c) => c && c.cvId === contactSession.cvId
+      );
+      if (fromId && fromId.nombre) leadCvNombre = fromId.nombre;
+    }
     const contactDisplayName = resolveAiContactName({
       preferredName: contactSession && contactSession.preferredName,
       sessionName: contactSession && contactSession.name,
-      leadCvNombre: leadCv && leadCv.nombre,
+      leadCvNombre,
       cvId: (contactSession && contactSession.cvId) || (leadCv && leadCv.cvId),
       lastOutboundAt: contactSession && contactSession.lastOutboundAt
     });
+    // Backfill preferredName cuando descubrimos el nombre del CV.
+    if (
+      contactDisplayName &&
+      contactSession &&
+      !contactSession.preferredName
+    ) {
+      const cvIdForBind =
+        (contactSession && contactSession.cvId) || (leadCv && leadCv.cvId) || null;
+      const bindKey = [normalizedPhone, contactSession.normalizedPhone]
+        .map((p) => String(p || '').trim())
+        .find((p) => p && !p.startsWith('lid_'));
+      if (cvIdForBind && bindKey) {
+        contactHistory
+          .linkCvToContact(bindKey, {
+            cvId: cvIdForBind,
+            name: contactDisplayName
+          })
+          .catch(() => {});
+      }
+    }
     const cvId = resolveUsableCvId({
       leadCv,
       contactSession,
@@ -2367,7 +2396,7 @@ async function processBatchedAutoReply(items, opts = {}) {
     const eventData = {
       sessionId: logicalSessionId,
       openwaSessionId,
-      contactName: contactDisplayName || contactSession?.preferredName || contactSession?.name || normalizedPhone,
+      contactName: contactDisplayName || contactSession?.preferredName || normalizedPhone,
       telefono: normalizedPhone,
       incomingMessage: body,
       replyMessage: messageParts.join('\n\n'),

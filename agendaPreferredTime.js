@@ -26,7 +26,8 @@ function formatHhMm(hour, minute) {
 }
 
 /**
- * Hora que el lead pidió. "a las 5" / "a las 6" sin am/pm → tarde (17:00 / 18:00).
+ * Hora que el lead pidió. "a las 5" / "5:30" sin am/pm → tarde (17:00 / 17:30).
+ * Conserva minutos. Solo aplica sesgo 1–7 → +12h si no dijeron mañana/am.
  * @param {string} text
  * @returns {string|null} HH:MM
  */
@@ -41,15 +42,19 @@ function agendaPreferredHhmm(text) {
   const hasPeriod = /(?:de\s+la|en\s+la|por\s+la)\s+(tarde|manana|noche)|\b(?:a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b/.test(
     raw
   );
-  const bare = /\ba\s+las\s+(\d{1,2})\b/.exec(raw);
-  if (!hasPeriod && bare) {
-    const h = Number(bare[1]);
-    if (h >= 1 && h <= 7) {
-      const pm = formatHhMm(h + 12, '00');
-      if (pm) return pm;
-    }
+  if (hasPeriod) return times[0];
+
+  // Preferir la hora "completa" si extractTimes dejó varias (legado); tomar la primera.
+  const primary = times[0];
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(primary || '').trim());
+  if (!m) return primary;
+  const h = Number(m[1]);
+  const min = m[2];
+  // En citas MX, "las 5" / "5:30" casi nunca es madrugada.
+  if (h >= 1 && h <= 7) {
+    return formatHhMm(h + 12, min) || primary;
   }
-  return times[0];
+  return primary;
 }
 
 /**

@@ -189,6 +189,11 @@ describe('agendaIntent', () => {
     assert.deepEqual(extractTimesFromMessage('8 de la noche'), ['20:00']);
   });
 
+  it('a las 5:30 no inventa también 05:00 suelta', () => {
+    assert.deepEqual(extractTimesFromMessage('a las 5:30'), ['05:30']);
+    assert.deepEqual(extractTimesFromMessage('esta bien a las 5:30 esta bien'), ['05:30']);
+  });
+
   it('matchea el jueves a las 5 de la tarde con el slot 17:00', () => {
     const now = new Date('2026-09-02T18:00:00Z'); // miércoles CDMX
     const slots = [

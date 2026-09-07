@@ -39,6 +39,15 @@ describe('agendaPreferredTime', () => {
     assert.equal(agendaPreferredHhmm('quiero agendar'), null);
   });
 
+  it('interpreta "a las 5:30" / "5:30" como 17:30, no madrugada', () => {
+    assert.equal(agendaPreferredHhmm('esta bien a las 5:30 esta bien'), '17:30');
+    assert.equal(agendaPreferredHhmm('a las 5:30'), '17:30');
+    assert.equal(agendaPreferredHhmm('me late a las 6:30'), '18:30');
+    assert.equal(agendaPreferredHhmm('5:30'), '17:30');
+    assert.equal(agendaPreferredHhmm('a las 5:30 de la mañana'), '05:30');
+    assert.equal(agendaPreferredHhmm('a las 5:30 pm'), '17:30');
+  });
+
   it('elige el hueco exacto de hoy y si no el de mañana', () => {
     const slots = [
       slot(today, '16:00'),

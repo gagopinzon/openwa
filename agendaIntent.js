@@ -434,14 +434,20 @@ function extractTimesFromMessage(text) {
   while ((m = hhmmRe.exec(raw))) {
     if (overlaps(m.index, m[0].length)) continue;
     const hhmm = formatHhMm(m[1], m[2]);
-    if (hhmm) out.add(hhmm);
+    if (hhmm) {
+      out.add(hhmm);
+      consume(m.index, m[0].length);
+    }
   }
 
-  const bare = /\ba\s+las\s+(\d{1,2})\b/gi;
+  const bare = /\ba\s+las\s+(\d{1,2})(?::(\d{2}))?\b/gi;
   while ((m = bare.exec(raw))) {
     if (overlaps(m.index, m[0].length)) continue;
-    const hhmm = formatHhMm(m[1], '00');
-    if (hhmm) out.add(hhmm);
+    const hhmm = formatHhMm(m[1], m[2]);
+    if (hhmm) {
+      out.add(hhmm);
+      consume(m.index, m[0].length);
+    }
   }
 
   return [...out];

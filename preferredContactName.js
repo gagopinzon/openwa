@@ -32,7 +32,7 @@ function preferredFirstName(fullName) {
 }
 
 /**
- * Resuelve el nombre para IA (nunca WhatsApp pushName).
+ * Resuelve el nombre para IA (nunca WhatsApp pushName / sessionName).
  * @param {{
  *   preferredName?: string|null,
  *   sessionName?: string|null,
@@ -49,14 +49,7 @@ function resolveAiContactName(args = {}) {
   const fromCv = normalizePreferredName(args.leadCvNombre);
   if (fromCv) return fromCv;
 
-  const hasOutboundTrust = Boolean(
-    String(args.cvId || '').trim() || args.lastOutboundAt
-  );
-  if (hasOutboundTrust) {
-    const fromSession = normalizePreferredName(args.sessionName);
-    if (fromSession) return fromSession;
-  }
-
+  // sessionName suele ser pushName de WhatsApp (jymmy, etc.). Nunca usarlo para la IA.
   return null;
 }
 

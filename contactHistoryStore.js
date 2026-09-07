@@ -634,11 +634,46 @@ async function getContactSession(normalizedPhone, extra = {}) {
     chatId: extra.chatId
   });
   if (!docs.length) return null;
+  // Preferir el doc de outreach (preferredName / teléfono real) sobre el lid_* con pushName.
   const primary =
-    docs.find((d) => d.normalizedPhone === normalizedPhone) ||
-    docs.find((d) => d.normalizedPhone && !String(d.normalizedPhone).startsWith('lid_')) ||
+    docs.find(
+      (d) =>
+        d &&
+        d.preferredName &&
+        d.normalizedPhone &&
+        !String(d.normalizedPhone).startsWith('lid_')
+    ) ||
+    docs.find((d) => d && d.preferredName) ||
+    docs.find(
+      (d) =>
+        d &&
+        d.cvId &&
+        d.normalizedPhone &&
+        !String(d.normalizedPhone).startsWith('lid_')
+    ) ||
+    docs.find((d) => d && d.normalizedPhone === normalizedPhone) ||
+    docs.find((d) => d && d.normalizedPhone && !String(d.normalizedPhone).startsWith('lid_')) ||
     docs[0];
-  return mapContactSession(primary, aiPausedFromContactDocs(docs));
+
+  const merged = mapContactSession(primary, aiPausedFromContactDocs(docs));
+  if (!merged) return null;
+
+  // Unificar campos útiles de docs hermanos (p. ej. teléfono con Jaime + lid con jymmy).
+  if (!merged.preferredName) {
+    const withPreferred = docs.find((d) => d && d.preferredName);
+    if (withPreferred) merged.preferredName = withPreferred.preferredName;
+  }
+  if (!merged.cvId) {
+    const withCv = docs.find((d) => d && d.cvId);
+    if (withCv) merged.cvId = withCv.cvId;
+  }
+  if (!merged.lastOutboundAt) {
+    const withOut = docs.find((d) => d && d.lastOutboundAt);
+    if (withOut) {
+      merged.lastOutboundAt = new Date(withOut.lastOutboundAt).toISOString();
+    }
+  }
+  return merged;
 }
 
 /**
