@@ -274,6 +274,29 @@
                         <div class="conversations-thread-messages" id="conversationsThreadMessages">
                             <p class="auto-reply-empty">Aquí verás el historial de la conversación.</p>
                         </div>
+                        <div class="conversations-ai-draft" id="conversationsAiDraft" hidden>
+                            <div class="conversations-ai-draft-header">
+                                <strong>Respuesta de la IA</strong>
+                                <span class="conversations-ai-draft-status" id="conversationsAiDraftStatus"></span>
+                            </div>
+                            <textarea
+                                id="conversationsAiDraftText"
+                                class="conversations-ai-draft-text"
+                                rows="3"
+                                placeholder="Generando borrador…"
+                            ></textarea>
+                            <div class="conversations-ai-draft-actions">
+                                <button type="button" id="conversationsAiDraftPauseBtn" class="btn btn-warning btn-sm">
+                                    Pausar envío
+                                </button>
+                                <button type="button" id="conversationsAiDraftResumeBtn" class="btn btn-secondary btn-sm" hidden>
+                                    Reanudar
+                                </button>
+                                <button type="button" id="conversationsAiDraftSendBtn" class="btn btn-success btn-sm">
+                                    Enviar ya
+                                </button>
+                            </div>
+                        </div>
                         <div class="conversations-reply" id="conversationsReply">
                             <textarea
                                 id="conversationsReplyInput"

@@ -36,6 +36,7 @@ const {
 const { buildConfirmedMeetingReply } = require('./agendaMeetMessages');
 const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
 const messageBatcher = require('./messageBatcher');
+const replyDraftService = require('./replyDraftService');
 const {
   resolveAiContactName,
   preferredFirstName,
@@ -121,6 +122,7 @@ function cancelPendingForChat(openwaSessionId, chatId, extra = {}) {
   for (const relatedId of related) {
     const lockKey = chatLockKey(sid, relatedId);
     cancelledBatchItems += messageBatcher.cancelKey(lockKey);
+    replyDraftService.cancel(sid, relatedId, 'cancelled_by_pause');
     markToken(lockKey);
   }
 
@@ -140,6 +142,11 @@ function cancelPendingForChat(openwaSessionId, chatId, extra = {}) {
     for (const key of matched.keys) {
       markToken(key);
     }
+    replyDraftService.cancelMatching((d) => {
+      if (String(d.openwaSessionId || '') !== sid) return false;
+      if (phone && contactHistory.phonesMatch(d.telefono, phone)) return true;
+      return related.has(String(d.chatId || ''));
+    });
   }
 
   for (const lockKey of sendCancelTokens.keys()) {
@@ -1407,29 +1414,19 @@ async function handleIncomingWebhook({
     testMode: Boolean(testMode)
   };
 
-  const queued = await messageBatcher.enqueue({
-    key: lockKey,
-    item: batchItem,
-    onFlush: processBatchedAutoReply,
+  const queued = await replyDraftService.enqueueInbound(batchItem, {
     immediate: Boolean(incomingDocument),
     skipDelay: Boolean(testMode) || skipAutoReplyDelays()
   });
 
-  if (queued.flushed) {
-    return queued.result || { handled: false, reason: 'batch_empty' };
+  if (queued && queued.handled !== undefined && queued.reason !== 'draft_pending') {
+    return queued;
   }
-
-  return {
-    handled: false,
-    reason: 'batch_pending',
-    batchCount: queued.count,
-    delayMs: queued.delayMs,
-    telefono: normalizedPhone,
-    openwaSessionId,
-    sessionId: logicalSessionId
-  };
+  if (queued && queued.reason === 'draft_pending') {
+    return queued;
+  }
+  return queued || { handled: false, reason: 'batch_empty' };
 }
-
 /**
  * Actualiza la bandeja local para todos los mensajes del lote tras responder.
  * @param {object[]} items
@@ -1463,11 +1460,16 @@ function markBatchInbox(items, result) {
 /**
  * Procesa un lote de mensajes del mismo chat (texto combinado → una respuesta).
  * @param {object[]} items
+ * @param {{ draftOnly?: boolean, preparedReply?: string, genId?: number }} [opts]
  */
-async function processBatchedAutoReply(items) {
+async function processBatchedAutoReply(items, opts = {}) {
   if (!Array.isArray(items) || !items.length) {
     return { handled: false, reason: 'batch_empty' };
   }
+
+  const draftOnly = Boolean(opts.draftOnly);
+  const preparedReply =
+    opts.preparedReply != null ? String(opts.preparedReply || '').trim() : '';
 
   const last = items[items.length - 1];
   const docItem = items.find((i) => i.incomingDocument) || null;
@@ -1491,6 +1493,9 @@ async function processBatchedAutoReply(items) {
   const cfg = autoReplyStore.getConfig();
 
   if (chatLocks.has(lockKey)) {
+    if (draftOnly || preparedReply) {
+      return { handled: false, reason: 'chat_busy' };
+    }
     messageBatcher.requeue(lockKey, items, processBatchedAutoReply, undefined, {
       front: true
     });
@@ -1568,21 +1573,22 @@ async function processBatchedAutoReply(items) {
     const receivedAt = Date.now();
     presenceRefresher = null;
     presenceCancelled = false;
-    const presencePromise = !testMode
-      ? runPresenceLeadIn(openwaSessionId, chatId, {
-          receivedAt,
-          isCancelled: () => isTurnCancelled()
-        }).then((presence) => {
-          if (presence.refresher) presenceRefresher = presence.refresher;
-          return presence;
-        })
-      : null;
+    const presencePromise =
+      !testMode && !draftOnly
+        ? runPresenceLeadIn(openwaSessionId, chatId, {
+            receivedAt,
+            isCancelled: () => isTurnCancelled()
+          }).then((presence) => {
+            if (presence.refresher) presenceRefresher = presence.refresher;
+            return presence;
+          })
+        : null;
 
-    let replyText = null;
+    let replyText = preparedReply || null;
     let agendaPendingId = null;
     let agendaMeta = null;
 
-    if (incomingDocument) {
+    if (!preparedReply && incomingDocument) {
       const cvBooked = await tryIngestCvAndBook({
         msg,
         openwaSessionId,
@@ -1967,6 +1973,20 @@ async function processBatchedAutoReply(items) {
 
     if (!replyText) {
       turnResult = { handled: false, reason: 'empty_reply' };
+      return turnResult;
+    }
+
+    if (draftOnly) {
+      turnResult = {
+        handled: false,
+        reason: 'draft_ready',
+        replyMessage: replyText,
+        sessionId: logicalSessionId,
+        openwaSessionId,
+        telefono: normalizedPhone,
+        batchSize: items.length,
+        timestamp: new Date().toISOString()
+      };
       return turnResult;
     }
 
@@ -2748,6 +2768,12 @@ function scheduleStartupWebhookActivation() {
   startupWebhookTimer = setTimeout(() => tryActivateWebhooksOnStartup(1), delayMs);
 }
 
+function bindReplyDraftHandlers() {
+  replyDraftService.setHandlers({
+    processBatched: processBatchedAutoReply
+  });
+}
+
 module.exports = {
   handleIncomingWebhook,
   triggerManualReply,
@@ -2770,5 +2796,9 @@ module.exports = {
   typingDurationMsForText,
   splitReplyIntoMessages,
   simulateHumanTyping,
-  skipAutoReplyDelays
+  skipAutoReplyDelays,
+  replyDraftService,
+  bindReplyDraftHandlers
 };
+
+bindReplyDraftHandlers();

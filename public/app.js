@@ -1138,6 +1138,15 @@ class CVAnalyzer {
         this.conversationsAiPauseBtn = document.getElementById('conversationsAiPauseBtn');
         this.conversationsAiReplyBtn = document.getElementById('conversationsAiReplyBtn');
         this.conversationsAgendarBtn = document.getElementById('conversationsAgendarBtn');
+        this.conversationsAiDraft = document.getElementById('conversationsAiDraft');
+        this.conversationsAiDraftStatus = document.getElementById('conversationsAiDraftStatus');
+        this.conversationsAiDraftText = document.getElementById('conversationsAiDraftText');
+        this.conversationsAiDraftPauseBtn = document.getElementById('conversationsAiDraftPauseBtn');
+        this.conversationsAiDraftResumeBtn = document.getElementById('conversationsAiDraftResumeBtn');
+        this.conversationsAiDraftSendBtn = document.getElementById('conversationsAiDraftSendBtn');
+        this._activeReplyDraft = null;
+        this._replyDraftCountdownTimer = null;
+        this._replyDraftSaveTimer = null;
         this._conversationsAiReplyInFlight = false;
         this.conversationsChats = [];
         this.activeConversation = null;
@@ -1283,6 +1292,26 @@ class CVAnalyzer {
         }
         if (this.conversationsAgendarBtn) {
             this.conversationsAgendarBtn.addEventListener('click', () => this.openAgendarFromConversation());
+        }
+        if (this.conversationsAiDraftPauseBtn) {
+            this.conversationsAiDraftPauseBtn.addEventListener('click', () =>
+                this.pauseActiveReplyDraft()
+            );
+        }
+        if (this.conversationsAiDraftResumeBtn) {
+            this.conversationsAiDraftResumeBtn.addEventListener('click', () =>
+                this.resumeActiveReplyDraft()
+            );
+        }
+        if (this.conversationsAiDraftSendBtn) {
+            this.conversationsAiDraftSendBtn.addEventListener('click', () =>
+                this.sendActiveReplyDraftNow()
+            );
+        }
+        if (this.conversationsAiDraftText) {
+            this.conversationsAiDraftText.addEventListener('input', () => {
+                this.scheduleSaveActiveReplyDraft();
+            });
         }
         if (this.conversationsThreadMessages && !this._conversationActionsBound) {
             this._conversationActionsBound = true;
@@ -1505,6 +1534,7 @@ class CVAnalyzer {
             duplicate: 'duplicado',
             chat_busy: 'chat ocupado',
             batch_pending: 'esperando más mensajes',
+            draft_pending: 'borrador en gracia',
             chat_busy_requeued: 'reencolado (chat ocupado)',
             mongodb_not_configured: 'sin MongoDB'
         };
@@ -2369,6 +2399,7 @@ class CVAnalyzer {
         this.activeConversationKnownContact = false;
         this.activeConversationSessionAiEnabled = true;
         this.activeConversationAutoReplyEnabled = false;
+        this.clearReplyDraftPanel();
         // Marcar leído en UI y recordar para que el sync no lo restaure al cambiar de chat.
         chat.unreadCount = 0;
         if (!this._conversationsLocallyRead) this._conversationsLocallyRead = new Set();
@@ -2396,8 +2427,240 @@ class CVAnalyzer {
         await Promise.all([
             this.refreshActiveConversationMessages({ silent: false }),
             this.refreshActiveConversationBlockStatus(),
-            this.markConversationRead(chat)
+            this.markConversationRead(chat),
+            this.loadReplyDraftForActiveConversation()
         ]);
+    }
+
+    clearReplyDraftPanel() {
+        this._activeReplyDraft = null;
+        if (this._replyDraftCountdownTimer) {
+            clearInterval(this._replyDraftCountdownTimer);
+            this._replyDraftCountdownTimer = null;
+        }
+        if (this._replyDraftSaveTimer) {
+            clearTimeout(this._replyDraftSaveTimer);
+            this._replyDraftSaveTimer = null;
+        }
+        if (this.conversationsAiDraft) {
+            this.conversationsAiDraft.hidden = true;
+        }
+        if (this.conversationsAiDraftText) {
+            this.conversationsAiDraftText.value = '';
+        }
+        if (this.conversationsAiDraftStatus) {
+            this.conversationsAiDraftStatus.textContent = '';
+        }
+    }
+
+    isReplyDraftForActive(draft) {
+        const active = this.activeConversation;
+        if (!active || !draft) return false;
+        const sameChat = this.sameConversationChatId(active.chatId, draft.chatId);
+        const sameSession =
+            String(active.sessionId) === String(draft.sessionId) ||
+            String(active.sessionId) === String(draft.logicalSessionId);
+        return sameChat && sameSession;
+    }
+
+    handleReplyDraftUpdated(draft) {
+        if (!this.isReplyDraftForActive(draft)) return;
+        this.renderReplyDraftPanel(draft);
+    }
+
+    handleReplyDraftCleared(data) {
+        const active = this.activeConversation;
+        if (!active || !data) return;
+        if (!this.sameConversationChatId(active.chatId, data.chatId)) return;
+        if (
+            data.sessionId &&
+            String(active.sessionId) !== String(data.sessionId) &&
+            String(active.sessionId) !== String(data.openwaSessionId)
+        ) {
+            // sessionId lógico puede faltar; si chat coincide y hay draft activo, limpia
+        }
+        this.clearReplyDraftPanel();
+        if (data.reason === 'sent' || data.reason === 'sent_immediate') {
+            this.refreshActiveConversationMessages({ silent: true });
+        }
+    }
+
+    async loadReplyDraftForActiveConversation() {
+        const active = this.activeConversation;
+        if (!active || active.isGroup) {
+            this.clearReplyDraftPanel();
+            return;
+        }
+        try {
+            const response = await fetch(
+                `/api/conversations/reply-draft?sessionId=${encodeURIComponent(active.sessionId)}&chatId=${encodeURIComponent(active.chatId)}`
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) {
+                this.clearReplyDraftPanel();
+                return;
+            }
+            if (data.draft) this.renderReplyDraftPanel(data.draft);
+            else this.clearReplyDraftPanel();
+        } catch {
+            this.clearReplyDraftPanel();
+        }
+    }
+
+    renderReplyDraftPanel(draft) {
+        if (!this.conversationsAiDraft || !draft) return;
+        this._activeReplyDraft = draft;
+        this.conversationsAiDraft.hidden = false;
+        if (this.conversationsAiDraftText) {
+            const focused = document.activeElement === this.conversationsAiDraftText;
+            if (!focused || !this.conversationsAiDraftText.value) {
+                this.conversationsAiDraftText.value = draft.replyText || '';
+            } else if (draft.replyText && !draft.edited) {
+                // Si la IA regeneró y el usuario no editó localmente, actualizar
+                this.conversationsAiDraftText.value = draft.replyText;
+            }
+            this.conversationsAiDraftText.disabled = draft.status === 'sending';
+        }
+        const paused = draft.status === 'paused';
+        if (this.conversationsAiDraftPauseBtn) {
+            this.conversationsAiDraftPauseBtn.hidden = paused;
+            this.conversationsAiDraftPauseBtn.disabled = draft.status === 'sending';
+        }
+        if (this.conversationsAiDraftResumeBtn) {
+            this.conversationsAiDraftResumeBtn.hidden = !paused;
+        }
+        if (this.conversationsAiDraftSendBtn) {
+            this.conversationsAiDraftSendBtn.disabled =
+                draft.status === 'sending' ||
+                (!draft.replyText && draft.status === 'generating');
+        }
+        this.updateReplyDraftCountdown();
+        if (this._replyDraftCountdownTimer) clearInterval(this._replyDraftCountdownTimer);
+        this._replyDraftCountdownTimer = setInterval(() => this.updateReplyDraftCountdown(), 500);
+    }
+
+    updateReplyDraftCountdown() {
+        if (!this.conversationsAiDraftStatus || !this._activeReplyDraft) return;
+        const d = this._activeReplyDraft;
+        if (d.status === 'generating') {
+            this.conversationsAiDraftStatus.textContent = 'Generando…';
+            return;
+        }
+        if (d.status === 'paused') {
+            this.conversationsAiDraftStatus.textContent = 'Envío pausado';
+            return;
+        }
+        if (d.status === 'sending') {
+            this.conversationsAiDraftStatus.textContent = 'Enviando…';
+            return;
+        }
+        const sendAt = Number(d.sendAt) || 0;
+        const left = Math.max(0, Math.ceil((sendAt - Date.now()) / 1000));
+        this.conversationsAiDraftStatus.textContent =
+            left > 0 ? `Se envía en ${left}s` : 'Enviando…';
+    }
+
+    scheduleSaveActiveReplyDraft() {
+        if (!this._activeReplyDraft || !this.activeConversation) return;
+        if (this._replyDraftSaveTimer) clearTimeout(this._replyDraftSaveTimer);
+        this._replyDraftSaveTimer = setTimeout(() => this.saveActiveReplyDraft(), 500);
+    }
+
+    async saveActiveReplyDraft() {
+        const active = this.activeConversation;
+        if (!active || !this.conversationsAiDraftText) return;
+        const text = this.conversationsAiDraftText.value;
+        try {
+            const response = await fetch('/api/conversations/reply-draft', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId,
+                    text
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (response.ok && data.draft) {
+                this._activeReplyDraft = data.draft;
+            }
+        } catch (error) {
+            console.warn('[conversations] draft save:', error.message);
+        }
+    }
+
+    async pauseActiveReplyDraft() {
+        const active = this.activeConversation;
+        if (!active) return;
+        try {
+            const response = await fetch('/api/conversations/reply-draft/pause', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || 'No se pudo pausar');
+            }
+            this.renderReplyDraftPanel(data.draft);
+        } catch (error) {
+            this.showStatus(error.message || 'No se pudo pausar el envío', 'error');
+        }
+    }
+
+    async resumeActiveReplyDraft() {
+        const active = this.activeConversation;
+        if (!active) return;
+        try {
+            const response = await fetch('/api/conversations/reply-draft/resume', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || 'No se pudo reanudar');
+            }
+            this.renderReplyDraftPanel(data.draft);
+        } catch (error) {
+            this.showStatus(error.message || 'No se pudo reanudar', 'error');
+        }
+    }
+
+    async sendActiveReplyDraftNow() {
+        const active = this.activeConversation;
+        if (!active) return;
+        if (this.conversationsAiDraftText) {
+            await this.saveActiveReplyDraft();
+        }
+        try {
+            const response = await fetch('/api/conversations/reply-draft/send-now', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sessionId: active.sessionId,
+                    chatId: active.chatId,
+                    text: this.conversationsAiDraftText
+                        ? this.conversationsAiDraftText.value
+                        : undefined
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || 'No se pudo enviar');
+            }
+            this.clearReplyDraftPanel();
+            this.showStatus('Respuesta de IA enviada', 'success');
+            await this.refreshActiveConversationMessages({ silent: true });
+        } catch (error) {
+            this.showStatus(error.message || 'No se pudo enviar el borrador', 'error');
+        }
     }
 
     applyLocallyReadConversations() {
@@ -8479,9 +8742,28 @@ class CVAnalyzer {
                     this.activeConversationKnownContact = true;
                     this.updateConversationThreadActions();
                     this.updateActiveConversationHeaderBadges();
+                    if (data.aiPaused) this.clearReplyDraftPanel();
                 }
             } catch (error) {
                 console.warn('aiControlChanged SSE:', error);
+            }
+        });
+
+        this.eventSource.addEventListener('replyDraftUpdated', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                this.handleReplyDraftUpdated(data);
+            } catch (error) {
+                console.warn('replyDraftUpdated SSE:', error);
+            }
+        });
+
+        this.eventSource.addEventListener('replyDraftCleared', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                this.handleReplyDraftCleared(data);
+            } catch (error) {
+                console.warn('replyDraftCleared SSE:', error);
             }
         });
 

@@ -4718,6 +4718,136 @@ app.post('/api/conversations/ai-control', async (req, res) => {
   }
 });
 
+// Borrador de auto-respuesta (gracia / preview en Conversaciones)
+app.get('/api/conversations/reply-draft', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.query.sessionId);
+    if (!session) {
+      return res.status(400).json({
+        success: false,
+        error: 'Indica sessionId de una sesión configurada'
+      });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+
+    const chatId = String(req.query.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+
+    const draft =
+      autoReplyService.replyDraftService.getPublic(session.openwaSessionId, chatId) ||
+      autoReplyService.replyDraftService.getPublicByLogical(session.id, chatId);
+
+    res.json({ success: true, draft });
+  } catch (error) {
+    console.error('[conversations] reply-draft get:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/reply-draft/pause', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({ success: false, error: 'sessionId inválido' });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+    const chatId = String(req.body.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    const draft = autoReplyService.replyDraftService.pauseSend(
+      session.openwaSessionId,
+      chatId
+    );
+    if (!draft) {
+      return res.status(404).json({ success: false, error: 'No hay borrador pendiente' });
+    }
+    res.json({ success: true, draft });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/reply-draft/resume', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({ success: false, error: 'sessionId inválido' });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+    const chatId = String(req.body.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    const draft = autoReplyService.replyDraftService.resumeSend(
+      session.openwaSessionId,
+      chatId
+    );
+    if (!draft) {
+      return res.status(404).json({ success: false, error: 'No hay borrador pendiente' });
+    }
+    res.json({ success: true, draft });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/conversations/reply-draft/send-now', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({ success: false, error: 'sessionId inválido' });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+    const chatId = String(req.body.chatId || '').trim();
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    const text =
+      req.body.text != null ? String(req.body.text) : null;
+    if (text != null) {
+      autoReplyService.replyDraftService.updateText(
+        session.openwaSessionId,
+        chatId,
+        text
+      );
+    }
+    await autoReplyService.replyDraftService.sendNow(session.openwaSessionId, chatId);
+    res.json({ success: true });
+  } catch (error) {
+    const status = error.status || 500;
+    res.status(status).json({ success: false, error: error.message });
+  }
+});
+
+app.patch('/api/conversations/reply-draft', async (req, res) => {
+  try {
+    const session = resolveConfiguredSession(req.body.sessionId);
+    if (!session) {
+      return res.status(400).json({ success: false, error: 'sessionId inválido' });
+    }
+    if (!forbidUnlessControlSessions([session.id], req, res)) return;
+    const chatId = String(req.body.chatId || '').trim();
+    const text = String(req.body.text || '');
+    if (!chatId) {
+      return res.status(400).json({ success: false, error: 'chatId es obligatorio' });
+    }
+    const draft = autoReplyService.replyDraftService.updateText(
+      session.openwaSessionId,
+      chatId,
+      text
+    );
+    if (!draft) {
+      return res.status(404).json({ success: false, error: 'No hay borrador pendiente' });
+    }
+    res.json({ success: true, draft });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/conversations/ai-reply', async (req, res) => {
   try {
     const session = resolveConfiguredSession(req.body.sessionId);
