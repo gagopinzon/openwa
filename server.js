@@ -284,12 +284,14 @@ function findCvForPhone(phone, hints = {}) {
       };
     }
   }
-  if (!phone && !hints.name) return null;
-  const byPhone = phone
-    ? reusable.find((c) => contactHistory.phonesMatch(c.telefono, phone))
+  const phoneKey =
+    phone && !String(phone).startsWith('lid_') ? String(phone).trim() : '';
+  if (!phoneKey && !hints.name) return null;
+  const byPhone = phoneKey
+    ? reusable.find((c) => contactHistory.phonesMatch(c.telefono, phoneKey))
     : null;
   if (byPhone) return byPhone;
-  const fromArchive = lookupCvIdFromArchive(phone, { name: hints.name });
+  const fromArchive = lookupCvIdFromArchive(phoneKey, { name: hints.name });
   if (fromArchive) {
     return reusable.find((c) => c.cvId === fromArchive) || null;
   }
@@ -2308,6 +2310,23 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
   }
 });
 
+/**
+ * Descarta IDs internos de WhatsApp (@lid / lid_*) para no mandarlos al panel como teléfono.
+ * @param {unknown} raw
+ * @returns {string}
+ */
+function sanitizeLeadTelefono(raw) {
+  const value = String(raw || '').trim();
+  if (!value || value === 'No encontrado') return '';
+  if (/^lid_/i.test(value)) return '';
+  const digits = value.replace(/\D/g, '');
+  if (!digits || digits.length < 10) return '';
+  if (/^2000\d+$/.test(digits) && digits.length >= 13) return '';
+  // LIDs típicos: muy largos y sin pinta de E.164 MX/US (521… / 52… / 1…)
+  if (digits.length >= 15 && !/^(52|521|1)\d{10,12}$/.test(digits)) return '';
+  return value;
+}
+
 // Proxy autenticado → crear reunión en panel
 app.post('/api/panel/reuniones', async (req, res) => {
   try {
@@ -2360,8 +2379,13 @@ app.post('/api/panel/reuniones', async (req, res) => {
 
     const panelExtras = await cvAnalysisService.buildPanelAgendaExtras(cvId, {
       nombre: leadNombre || cv?.nombre,
-      telefono: leadTelefono || cv?.telefono
+      telefono: sanitizeLeadTelefono(leadTelefono || cv?.telefono)
     });
+
+    const resolvedLeadTelefono =
+      sanitizeLeadTelefono(leadTelefono) ||
+      sanitizeLeadTelefono(cv?.telefono) ||
+      sanitizeLeadTelefono(panelExtras.leadExtraido.leadTelefono);
 
     const data = await panelMsgClient.crearReunion({
       gerenteEmail: resolvedGerente,
@@ -2377,10 +2401,13 @@ app.post('/api/panel/reuniones', async (req, res) => {
         `Sesión — ${leadNombre || cv?.nombre || cv?.archivoOriginal || 'candidato'}`,
       leadCorreo: leadCorreo || panelExtras.leadExtraido.leadCorreo,
       leadNombre: leadNombre || panelExtras.leadExtraido.leadNombre,
-      leadTelefono: leadTelefono || panelExtras.leadExtraido.leadTelefono,
+      leadTelefono: resolvedLeadTelefono,
       leadCiudad: leadCiudad || panelExtras.leadExtraido.leadCiudad,
       leadEstado: leadEstado || panelExtras.leadExtraido.leadEstado,
-      leadExtraido: panelExtras.leadExtraido,
+      leadExtraido: {
+        ...panelExtras.leadExtraido,
+        ...(resolvedLeadTelefono ? { leadTelefono: resolvedLeadTelefono } : {})
+      },
       analisisCV: panelExtras.analisisCV,
       cvAnalizadoEnMsg: panelExtras.cvAnalizadoEnMsg,
       origen: 'msg'
@@ -4594,42 +4621,44 @@ app.get('/api/conversations/contact-status', async (req, res) => {
       }
     }
 
-    const matchedCv = publicCvSummary(findCvForPhone(phone, { cvId: linkedCvId }));
-
+    let contactName = '';
+    let isBlocked = false;
+    let contactWarning = null;
     try {
       const contact = await getContact(session.openwaSessionId, chatId);
-      res.json({
-        success: true,
-        sessionId: session.id,
-        chatId,
-        telefono: phone || null,
-        isGroup: false,
-        isBlocked: contact.isBlocked,
-        name: contact.name,
-        knownContact,
-        aiPaused,
-        linkedCvId,
-        matchedCv,
-        sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
-        autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled)
-      });
+      contactName = String(contact.name || '').trim();
+      isBlocked = Boolean(contact.isBlocked);
     } catch (err) {
-      res.json({
-        success: true,
-        sessionId: session.id,
-        chatId,
-        telefono: phone || null,
-        isGroup: false,
-        isBlocked: false,
-        knownContact,
-        aiPaused,
-        linkedCvId,
-        matchedCv,
-        sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
-        autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled),
-        warning: err.message
-      });
+      contactWarning = err.message;
     }
+
+    // No buscar CV con claves lid_*: el archivo guarda el teléfono real del lead.
+    const phoneForCv =
+      phone && !String(phone).startsWith('lid_') ? phone : '';
+    const matchedCv = publicCvSummary(
+      findCvForPhone(phoneForCv, {
+        cvId: linkedCvId,
+        name: contactName
+      })
+    );
+
+    return res.json({
+      success: true,
+      sessionId: session.id,
+      chatId,
+      telefono: phoneForCv || null,
+      telefonoRaw: phone || null,
+      isGroup: false,
+      isBlocked,
+      name: contactName || null,
+      knownContact,
+      aiPaused,
+      linkedCvId,
+      matchedCv,
+      sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
+      autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled),
+      ...(contactWarning ? { warning: contactWarning } : {})
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

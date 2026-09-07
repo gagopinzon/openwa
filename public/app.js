@@ -2900,6 +2900,13 @@ class CVAnalyzer {
             this.activeConversationSessionAiEnabled =
                 data.sessionAiEnabled !== undefined ? Boolean(data.sessionAiEnabled) : true;
             this.activeConversationAutoReplyEnabled = Boolean(data.autoReplyEnabled);
+            if (this.activeConversation) {
+                this.activeConversation.telefono = data.telefono || null;
+                this.activeConversation.telefonoRaw = data.telefonoRaw || null;
+                this.activeConversation.matchedCv = data.matchedCv || null;
+                this.activeConversation.linkedCvId = data.linkedCvId || null;
+                if (data.name) this.activeConversation.contactName = data.name;
+            }
             this.updateActiveConversationHeaderBadges();
         } catch (error) {
             console.warn('contact-status:', error.message);
@@ -5932,6 +5939,57 @@ class CVAnalyzer {
         return this.normalizePhoneDigits(local);
     }
 
+    isLidChatId(chatId) {
+        return /@lid$/i.test(String(chatId || ''));
+    }
+
+    /**
+     * Evita mandar IDs internos de WhatsApp (@lid / lid_*) como si fueran teléfono.
+     */
+    isLikelyLidPhone(phone, chatId = '') {
+        const raw = String(phone || '').trim();
+        if (!raw) return false;
+        if (/^lid_/i.test(raw)) return true;
+        const digits = this.normalizePhoneDigits(raw);
+        if (!digits) return false;
+        if (/^2000\d+$/.test(digits) && digits.length >= 13) return true;
+        if (this.isLidChatId(chatId)) {
+            const lidDigits = this.phoneFromChatId(chatId);
+            if (lidDigits && digits === lidDigits) return true;
+        }
+        return false;
+    }
+
+    formatAgendarLeadTelefono(phone) {
+        const raw = String(phone || '').trim();
+        if (!raw || this.isLikelyLidPhone(raw)) return '';
+        if (raw.startsWith('+')) return raw;
+        const digits = this.normalizePhoneDigits(raw);
+        return digits ? `+${digits}` : '';
+    }
+
+    /**
+     * Teléfono real del lead para agendar: contact-status / CV / @c.us.
+     * Nunca usa dígitos de un chat @lid.
+     */
+    resolveAgendarPhoneFromConversation(active, cv = null) {
+        const chatId = active && active.chatId ? active.chatId : '';
+        const candidates = [
+            active && active.telefono,
+            cv && (cv.telefono || cv.leadTelefono),
+            !this.isLidChatId(chatId) ? this.phoneFromChatId(chatId) : ''
+        ];
+        for (const candidate of candidates) {
+            if (!candidate) continue;
+            if (this.isLikelyLidPhone(candidate, chatId)) continue;
+            const digits = this.normalizePhoneDigits(candidate);
+            if (digits && digits.length >= 10) {
+                return this.formatAgendarLeadTelefono(candidate);
+            }
+        }
+        return '';
+    }
+
     async prepareAgendarModalShell({
         label,
         leadNombre,
@@ -6177,41 +6235,79 @@ class CVAnalyzer {
         }
         if (!this.canOpenAgendarModal()) return;
 
-        const phone = this.phoneFromChatId(active.chatId);
+        // Resolver teléfono real (evita mandar @lid) y CV ligado vía contact-status
+        try {
+            await this.refreshActiveConversationBlockStatus();
+        } catch {
+            /* ignore */
+        }
+
         const name = String(active.name || '').trim() || 'Candidato';
         const openToken = `${active.sessionId || ''}|${active.chatId || ''}|${Date.now()}`;
         this._agendarOpenToken = openToken;
 
-        // Abrir YA con match local (memoria). No esperar red ni re-render de la tabla.
-        const quickMatch = phone ? this.findCvByPhone(phone) : null;
+        let quickMatch = null;
+        if (active.matchedCv && active.matchedCv.cvId) {
+            quickMatch =
+                this.getReusableCvs().find((c) => c.cvId === active.matchedCv.cvId) ||
+                active.matchedCv;
+        }
+        if (!quickMatch && active.linkedCvId) {
+            quickMatch =
+                this.getReusableCvs().find((c) => c.cvId === active.linkedCvId) || {
+                    cvId: active.linkedCvId,
+                    nombre: active.contactName || name,
+                    telefono: active.telefono || '',
+                    archivoOriginal: active.linkedCvId,
+                    procesado: true
+                };
+        }
+        if (!quickMatch) {
+            const hintPhone = this.resolveAgendarPhoneFromConversation(active, null);
+            quickMatch = hintPhone ? this.findCvByPhone(hintPhone) : null;
+        }
+        if (!quickMatch) {
+            const chatDigits = this.isLidChatId(active.chatId)
+                ? ''
+                : this.phoneFromChatId(active.chatId);
+            quickMatch = chatDigits ? this.findCvByPhone(chatDigits) : null;
+        }
+
+        const leadTelefono = this.resolveAgendarPhoneFromConversation(active, quickMatch);
+        const phoneDigits = this.normalizePhoneDigits(leadTelefono);
+
         this.agendarCvIndex = quickMatch
             ? (this.cvsData || []).findIndex((c) => c.cvId === quickMatch.cvId)
             : null;
 
         const label = quickMatch
             ? `Chat: ${name} · CV: ${quickMatch.nombre || quickMatch.archivoOriginal}`
-            : `Chat: ${name}${phone ? ` · +${phone}` : ''} — buscando CV…`;
+            : `Chat: ${name}${leadTelefono ? ` · ${leadTelefono}` : ''} — buscando CV…`;
 
         const shellPromise = this.prepareAgendarModalShell({
             label,
             leadNombre: (quickMatch && quickMatch.nombre) || name,
-            leadTelefono: phone ? `+${phone}` : (quickMatch && quickMatch.telefono) || '',
+            leadTelefono,
             leadCorreo:
                 (quickMatch && (quickMatch.correo || quickMatch.email || quickMatch.leadCorreo)) ||
                 '',
             cvId: quickMatch ? quickMatch.cvId : null,
             needsUpload: !quickMatch,
             showCvPicker: !quickMatch,
-            preferredPhone: phone,
+            preferredPhone: phoneDigits,
             lockMatchedCv: Boolean(quickMatch),
-            matchSource: quickMatch ? 'telefono' : '',
+            matchSource: quickMatch
+                ? active.linkedCvId && quickMatch.cvId === active.linkedCvId
+                    ? 'historial'
+                    : 'telefono'
+                : '',
             timeFirst: true
         });
 
         // Enriquecer en paralelo (no bloquea la apertura visual)
         this.enrichAgendarConversationMatch({
             openToken,
-            phone,
+            phone: phoneDigits,
             name,
             hadQuickMatch: Boolean(quickMatch)
         }).catch((err) => console.warn('enrich agendar:', err.message));
@@ -6229,7 +6325,28 @@ class CVAnalyzer {
 
             let matched = null;
             let matchSource = '';
-            if (phone) {
+            const active = this.activeConversation;
+            if (active && active.matchedCv && active.matchedCv.cvId) {
+                matched =
+                    this.getReusableCvs().find((c) => c.cvId === active.matchedCv.cvId) ||
+                    active.matchedCv;
+                matchSource =
+                    active.linkedCvId && matched && matched.cvId === active.linkedCvId
+                        ? 'historial'
+                        : 'telefono';
+            }
+            if (!matched && active && active.linkedCvId) {
+                matched =
+                    this.getReusableCvs().find((c) => c.cvId === active.linkedCvId) || {
+                        cvId: active.linkedCvId,
+                        nombre: active.contactName || name,
+                        telefono: active.telefono || '',
+                        archivoOriginal: active.linkedCvId,
+                        procesado: true
+                    };
+                matchSource = 'historial';
+            }
+            if (!matched && phone && !this.isLikelyLidPhone(phone, active && active.chatId)) {
                 try {
                     const response = await fetch(
                         `/api/panel/cv-by-phone?phone=${encodeURIComponent(phone)}`
@@ -6245,7 +6362,7 @@ class CVAnalyzer {
                     console.warn('cv-by-phone:', err.message);
                 }
             }
-            if (!matched) {
+            if (!matched && phone && !this.isLikelyLidPhone(phone, active && active.chatId)) {
                 matched = this.findCvByPhone(phone);
                 if (matched) matchSource = 'telefono';
             }
@@ -6265,8 +6382,16 @@ class CVAnalyzer {
             this.agendarCvId = matched.cvId;
             this.agendarNeedsCvUpload = false;
             this.agendarLeadNombre = matched.nombre || name || this.agendarLeadNombre || '';
-            if (phone) this.agendarLeadTelefono = `+${phone}`;
-            else if (matched.telefono) this.agendarLeadTelefono = matched.telefono;
+
+            const resolvedPhone = this.resolveAgendarPhoneFromConversation(
+                this.activeConversation || { chatId: '', telefono: phone },
+                matched
+            );
+            if (resolvedPhone) {
+                this.agendarLeadTelefono = resolvedPhone;
+            } else if (matched.telefono && !this.isLikelyLidPhone(matched.telefono)) {
+                this.agendarLeadTelefono = this.formatAgendarLeadTelefono(matched.telefono);
+            }
 
             if (this.agendarCvSelectWrap) this.agendarCvSelectWrap.style.display = 'none';
             if (this.agendarCvUploadWrap) this.agendarCvUploadWrap.style.display = 'none';
@@ -6721,11 +6846,32 @@ class CVAnalyzer {
 
         const active = this.activeConversation;
         if (active && !active.isGroup) {
-            preferredPhone = this.phoneFromChatId(active.chatId);
+            try {
+                await this.refreshActiveConversationBlockStatus();
+            } catch {
+                /* ignore */
+            }
+            if (active.matchedCv && active.matchedCv.cvId) {
+                matched =
+                    this.getReusableCvs().find((c) => c.cvId === active.matchedCv.cvId) ||
+                    active.matchedCv;
+                lockMatched = Boolean(matched);
+            }
+            leadTelefono = this.resolveAgendarPhoneFromConversation(active, matched);
+            preferredPhone = this.normalizePhoneDigits(leadTelefono);
             leadNombre = String(active.name || '').trim();
-            leadTelefono = preferredPhone ? `+${preferredPhone}` : '';
-            matched = this.findCvByPhone(preferredPhone);
-            lockMatched = Boolean(matched);
+            if (!matched && preferredPhone) {
+                matched = this.findCvByPhone(preferredPhone);
+                lockMatched = Boolean(matched);
+            }
+            if (!matched && !this.isLidChatId(active.chatId)) {
+                preferredPhone = preferredPhone || this.phoneFromChatId(active.chatId);
+                matched = preferredPhone ? this.findCvByPhone(preferredPhone) : null;
+                lockMatched = Boolean(matched);
+                if (!leadTelefono && preferredPhone) {
+                    leadTelefono = this.formatAgendarLeadTelefono(preferredPhone);
+                }
+            }
         }
 
         const openToken = `cal|${preferredPhone || ''}|${slot.fecha}|${slot.horaInicio}|${Date.now()}`;
@@ -6882,6 +7028,11 @@ class CVAnalyzer {
         }
 
         const range = this.agendarDisponibilidadRange || this.getCalendarWeekRange(0);
+        const days = [];
+        for (let i = 0; i < 7; i += 1) {
+            days.push(this.addDaysYmd(range.fechaInicio, i));
+        }
+        const slotsByDate = this.groupAgendarSlotsByDate(this.disponibilidadData, days);
         const daySlots = slotsByDate[fecha] || [];
 
         if (daySlots.length === 0) {
