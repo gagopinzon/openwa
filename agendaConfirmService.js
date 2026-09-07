@@ -9,6 +9,10 @@ const {
   sleep
 } = require('./panelMeetUtils');
 const { logAgenda, warnAgenda } = require('./agendaDebug');
+const {
+  indexPanelVendors,
+  rankVendorsForSlot
+} = require('./vendorRanking');
 
 function syncRetryAttempts() {
   const raw = Number(process.env.AGENDA_PANEL_SYNC_RETRIES || 2);
@@ -42,6 +46,102 @@ function listVendors(candidates) {
     });
   }
   return out;
+}
+
+/**
+ * Reconsulta disponibilidad y ordena por carga relativa / ponderación.
+ * Si el refresh falla por completo, conserva el orden original.
+ *
+ * @param {object} pending
+ * @param {Array<{ vendedorId: string, gerenteEmail?: string|null }>} vendors
+ * @param {{ getDisponibilidad?: Function }} [opts]
+ */
+async function resolveRankedVendors(pending, vendors, opts = {}) {
+  const base = Array.isArray(vendors) ? vendors : [];
+  if (!base.length) return base;
+
+  const fecha = String(pending && pending.fecha ? pending.fecha : '').trim();
+  const horaInicio = String(
+    pending && pending.horaInicio ? pending.horaInicio : ''
+  ).trim();
+  const horaFin = String(pending && pending.horaFin ? pending.horaFin : '').trim();
+  if (!fecha || !horaInicio || !horaFin) return base;
+
+  const gerentes = [
+    ...new Set(
+      base
+        .map((v) => String(v.gerenteEmail || '').trim().toLowerCase())
+        .filter(Boolean)
+    )
+  ];
+  if (!gerentes.length) return base;
+
+  const fetchFn =
+    typeof opts.getDisponibilidad === 'function'
+      ? opts.getDisponibilidad
+      : (params) => panelMsgClient.getDisponibilidad(params);
+
+  let responses;
+  try {
+    responses = await Promise.all(
+      gerentes.map(async (gerenteEmail) => {
+        try {
+          const data = await fetchFn({
+            gerenteEmail,
+            fechaInicio: fecha,
+            fechaFin: fecha
+          });
+          return { gerenteEmail, data };
+        } catch (error) {
+          warnAgenda('agenda-confirm.disponibilidad.error', {
+            pendingId: pending && pending.id,
+            gerenteEmail,
+            message: error.message,
+            status: error.status || null
+          });
+          return { gerenteEmail, error };
+        }
+      })
+    );
+  } catch (error) {
+    warnAgenda('agenda-confirm.disponibilidad.fatal', {
+      pendingId: pending && pending.id,
+      message: error.message
+    });
+    return base;
+  }
+
+  const okCount = responses.filter((r) => !r.error && r.data).length;
+  if (!okCount) {
+    warnAgenda('agenda-confirm.disponibilidad.fallbackOrden', {
+      pendingId: pending && pending.id,
+      gerentes: gerentes.length
+    });
+    return base;
+  }
+
+  const panelIndex = indexPanelVendors(responses);
+  const ranked = rankVendorsForSlot({
+    candidates: base,
+    panelIndex,
+    fecha,
+    horaInicio,
+    horaFin
+  });
+
+  logAgenda('agenda-confirm.vendorsRanked', {
+    pendingId: pending && pending.id,
+    fecha,
+    horaInicio,
+    before: base.map((v) => v.vendedorId),
+    after: ranked.map((v) => ({
+      vendedorId: v.vendedorId,
+      ponderacionReuniones: v.ponderacionReuniones,
+      totalCitas: v.totalCitas
+    }))
+  });
+
+  return ranked.length ? ranked : base;
 }
 
 /**
@@ -161,7 +261,14 @@ async function confirmPendingInPanel(pending, opts = {}) {
     publicBase: cvFileStore.publicBaseUrl() || null
   });
 
-  const vendors = listVendors(pending.candidateVendors);
+  const vendorsBase = listVendors(pending.candidateVendors);
+  if (!vendorsBase.length) {
+    const err = new Error('No hay vendedor disponible para ese horario');
+    err.status = 409;
+    throw err;
+  }
+
+  const vendors = await resolveRankedVendors(pending, vendorsBase, opts);
   if (!vendors.length) {
     const err = new Error('No hay vendedor disponible para ese horario');
     err.status = 409;
@@ -323,5 +430,6 @@ async function confirmPendingInPanel(pending, opts = {}) {
 module.exports = {
   autoConfirmEnabled,
   listVendors,
+  resolveRankedVendors,
   confirmPendingInPanel
 };
