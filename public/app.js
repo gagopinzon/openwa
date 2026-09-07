@@ -6441,6 +6441,13 @@ class CVAnalyzer {
         formData.append('cv', file);
         if (this.agendarLeadTelefono) formData.append('telefono', this.agendarLeadTelefono);
         if (this.agendarLeadNombre) formData.append('nombre', this.agendarLeadNombre);
+        const active = this.activeConversation;
+        if (active && active.chatId) formData.append('chatId', active.chatId);
+        if (active && active.chatId && /@lid$/i.test(active.chatId)) {
+            const lidDigits = String(active.chatId).replace(/@.*$/, '').replace(/\D/g, '');
+            if (lidDigits) formData.append('whatsappLid', lidDigits);
+        }
+        if (active && active.telefono) formData.append('contactKey', active.telefono);
 
         this.setAgendarStatus('Subiendo CV…', 'info');
         const response = await fetch('/api/panel/cv-upload', {

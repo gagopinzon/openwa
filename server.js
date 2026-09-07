@@ -37,6 +37,7 @@ const {
   deleteMessage,
   deleteChat,
   getContact,
+  extractPhoneFromOpenWaContact,
   blockContact,
   unblockContact
 } = require('./openwaClient');
@@ -2293,6 +2294,45 @@ app.post('/api/panel/cv-upload', upload.single('cv'), async (req, res) => {
     }
 
     persistCvsData();
+
+    const contactKey = String(req.body.contactKey || req.body.telefono || '').trim();
+    if (contactKey && entry.cvId) {
+      try {
+        await contactHistory.linkCvToContact(contactKey, {
+          cvId: entry.cvId,
+          archivoOriginal: entry.archivoOriginal,
+          name: entry.nombre
+        });
+      } catch (err) {
+        console.warn('[panel/cv-upload] linkCvToContact:', err.message);
+      }
+      const lid = String(req.body.whatsappLid || '').replace(/\D/g, '');
+      const chatId = String(req.body.chatId || '').trim();
+      const normPhone = contactHistory.normalizePhone(entry.telefono);
+      if (normPhone && (lid || chatId)) {
+        try {
+          await contactHistory.enrollInboundContact({
+            normalizedPhone: normPhone,
+            name: entry.nombre,
+            chatId: chatId || undefined,
+            whatsappLid: lid || undefined,
+            source: 'panel_cv_upload'
+          });
+        } catch (err) {
+          console.warn('[panel/cv-upload] enrollInboundContact:', err.message);
+        }
+      }
+    } else if (contactHistory.normalizePhone(entry.telefono) && entry.cvId) {
+      try {
+        await contactHistory.linkCvToContact(entry.telefono, {
+          cvId: entry.cvId,
+          archivoOriginal: entry.archivoOriginal,
+          name: entry.nombre
+        });
+      } catch (err) {
+        console.warn('[panel/cv-upload] linkCvToContact:', err.message);
+      }
+    }
 
     res.json({
       success: true,
@@ -4608,7 +4648,7 @@ app.get('/api/conversations/contact-status', async (req, res) => {
     let aiPaused = false;
     /** Cualquier chat 1:1 con teléfono o LID válido puede pausar/reactivar IA */
     let knownContact = Boolean(phone);
-    let linkedCvId = null;
+    let linkedCvId = (resolved && resolved.linkedCvId) || null;
     if (phone) {
       const contactSession = await contactHistory.getContactSession(phone, {
         whatsappLid: resolved && resolved.whatsappLid,
@@ -4616,31 +4656,69 @@ app.get('/api/conversations/contact-status', async (req, res) => {
       });
       if (contactSession) {
         aiPaused = Boolean(contactSession.aiPaused);
-        linkedCvId = contactSession.cvId || null;
+        linkedCvId = contactSession.cvId || linkedCvId || null;
         knownContact = true;
       }
     }
 
-    let contactName = '';
+    let contactName = (resolved && resolved.name) || '';
     let isBlocked = false;
     let contactWarning = null;
+    let phoneFromOpenWa = '';
     try {
       const contact = await getContact(session.openwaSessionId, chatId);
-      contactName = String(contact.name || '').trim();
+      contactName = String(contact.name || contactName || '').trim();
       isBlocked = Boolean(contact.isBlocked);
+      phoneFromOpenWa = extractPhoneFromOpenWaContact(contact) || '';
     } catch (err) {
       contactWarning = err.message;
     }
 
     // No buscar CV con claves lid_*: el archivo guarda el teléfono real del lead.
-    const phoneForCv =
-      phone && !String(phone).startsWith('lid_') ? phone : '';
-    const matchedCv = publicCvSummary(
+    // Si resolveConversationContact ya puenteó LID→teléfono, phone ya es real.
+    let phoneForCv =
+      (phone && !String(phone).startsWith('lid_') ? phone : '') || phoneFromOpenWa || '';
+    let matchedCv = publicCvSummary(
       findCvForPhone(phoneForCv, {
         cvId: linkedCvId,
         name: contactName
       })
     );
+
+    // Si encontramos CV por nombre/historial, casar LID↔teléfono↔cvId para la próxima vez.
+    if (
+      matchedCv &&
+      matchedCv.cvId &&
+      resolved &&
+      resolved.whatsappLid &&
+      contactHistory.mongoUriConfigured()
+    ) {
+      const bindPhone =
+        phoneForCv ||
+        contactHistory.normalizePhone(matchedCv.telefono) ||
+        '';
+      if (bindPhone && !String(bindPhone).startsWith('lid_')) {
+        linkedCvId = matchedCv.cvId;
+        setImmediate(() => {
+          contactHistory
+            .enrollInboundContact({
+              normalizedPhone: bindPhone,
+              name: contactName || matchedCv.nombre,
+              chatId,
+              whatsappLid: resolved.whatsappLid,
+              source: 'agendar_contact_status_bridge'
+            })
+            .then(() =>
+              contactHistory.linkCvToContact(bindPhone, {
+                cvId: matchedCv.cvId,
+                archivoOriginal: matchedCv.archivoOriginal,
+                name: contactName || matchedCv.nombre
+              })
+            )
+            .catch(() => {});
+        });
+      }
+    }
 
     return res.json({
       success: true,

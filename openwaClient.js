@@ -418,6 +418,97 @@ async function deleteChat(openwaSessionId, chatId) {
 }
 
 /**
+ * Extrae dígitos de teléfono real desde payloads OpenWA / WA (nunca IDs @lid).
+ * @param {unknown} data
+ * @returns {string} solo dígitos, o ''
+ */
+function extractPhoneFromOpenWaContact(data) {
+  if (!data || typeof data !== 'object') return '';
+
+  const normalizeCandidate = (raw) => {
+    if (raw == null) return '';
+    if (typeof raw === 'object') {
+      if (raw._serialized) return normalizeCandidate(raw._serialized);
+      if (raw.user && raw.server) {
+        return normalizeCandidate(`${raw.user}@${raw.server}`);
+      }
+      if (raw.number) return normalizeCandidate(raw.number);
+      if (raw.phoneNumber) return normalizeCandidate(raw.phoneNumber);
+      if (raw.phone) return normalizeCandidate(raw.phone);
+      return '';
+    }
+    const text = String(raw).trim();
+    if (!text) return '';
+    if (/@lid$/i.test(text)) return '';
+    if (/@g\.us$/i.test(text)) return '';
+    const withoutJid = text.replace(/@.*$/, '');
+    const digits = withoutJid.replace(/\D/g, '');
+    if (!digits || digits.length < 10) return '';
+    // LIDs internos típicos: 2000… o muy largos sin pinta E.164 MX/US
+    if (/^2000\d+$/.test(digits) && digits.length >= 13) return '';
+    if (digits.length >= 15 && !/^(52|521|1)\d{10,12}$/.test(digits)) return '';
+    return digits;
+  };
+
+  const queue = [data];
+  const seen = new Set();
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || typeof node !== 'object') continue;
+    if (seen.has(node)) continue;
+    seen.add(node);
+
+    const direct = [
+      node.number,
+      node.phoneNumber,
+      node.phone,
+      node.authorPhone,
+      node.senderPhone,
+      node.id,
+      node.contactId,
+      node.jid
+    ];
+    for (const cand of direct) {
+      const digits = normalizeCandidate(cand);
+      if (digits) return digits;
+    }
+
+    if (node.contact && typeof node.contact === 'object') queue.push(node.contact);
+    if (node.raw && typeof node.raw === 'object') queue.push(node.raw);
+    if (node.data && typeof node.data === 'object') queue.push(node.data);
+  }
+
+  return '';
+}
+
+/**
+ * Normaliza respuesta de GET contact para que el auto-reply lea number/phoneNumber.
+ * @param {object} data
+ * @param {string} contactId
+ */
+function normalizeOpenWaContact(data, contactId) {
+  const raw = data && typeof data === 'object' ? data : {};
+  const phone = extractPhoneFromOpenWaContact(raw);
+  const idRaw = raw.id;
+  const id =
+    (idRaw && typeof idRaw === 'object' && idRaw._serialized
+      ? String(idRaw._serialized)
+      : idRaw != null
+        ? String(idRaw)
+        : '') || String(contactId || '');
+
+  return {
+    id,
+    name: raw.name || raw.pushName || raw.formattedName || null,
+    isBlocked: Boolean(raw.isBlocked),
+    number: phone || null,
+    phoneNumber: phone || null,
+    phone: phone || null,
+    raw
+  };
+}
+
+/**
  * @param {string} openwaSessionId
  * @param {string} contactId - JID, ej. 521...@c.us
  */
@@ -428,12 +519,7 @@ async function getContact(openwaSessionId, contactId) {
     'GET',
     `/sessions/${openwaSessionId}/contacts/${encoded}`
   );
-  return {
-    id: String(data.id || contactId),
-    name: data.name || data.pushName || null,
-    isBlocked: Boolean(data.isBlocked),
-    raw: data
-  };
+  return normalizeOpenWaContact(data, contactId);
 }
 
 /**
@@ -856,6 +942,8 @@ module.exports = {
   deleteMessage,
   deleteChat,
   getContact,
+  extractPhoneFromOpenWaContact,
+  normalizeOpenWaContact,
   blockContact,
   unblockContact,
   listChats,

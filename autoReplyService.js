@@ -30,6 +30,7 @@ const {
   getSessionStatus,
   isConnectedStatus,
   getContact,
+  extractPhoneFromOpenWaContact,
   getChatHistory,
   downloadMessageMedia
 } = require('./openwaClient');
@@ -170,6 +171,17 @@ function cancelPendingForChat(openwaSessionId, chatId, extra = {}) {
  * @param {string} chatId
  * @returns {Promise<{ normalizedPhone: string, whatsappLid: string|null, chatId: string }|null>}
  */
+/**
+ * Prefiere teléfono real (no lid_*) entre candidatos de historial.
+ * @param {...(string|null|undefined)} phones
+ * @returns {string}
+ */
+function preferRealPhone(...phones) {
+  const list = phones.map((p) => String(p || '').trim()).filter(Boolean);
+  const real = list.find((p) => !p.startsWith('lid_') && !/^2000\d+$/.test(p));
+  return real || list[0] || '';
+}
+
 async function resolveConversationContact(openwaSessionId, chatId) {
   const cid = String(chatId || '').trim();
   if (!cid) return null;
@@ -182,17 +194,25 @@ async function resolveConversationContact(openwaSessionId, chatId) {
     (identity && identity.whatsappLid) ||
     (/@lid$/i.test(cid) ? extractPhoneFromChatId(cid) : '');
   let phone = (identity && identity.normalizedPhone) || extractPhoneFromChatId(cid);
+  let linkedCvId = null;
+  let resolvedName = (identity && identity.name) || null;
 
   if (lid) {
     const byLid = await contactHistory.findContactByLid(lid);
-    if (byLid && byLid.normalizedPhone) {
-      phone = byLid.normalizedPhone;
+    if (byLid) {
+      phone = preferRealPhone(byLid.normalizedPhone, phone);
+      if (byLid.cvId) linkedCvId = byLid.cvId;
+      if (!resolvedName && byLid.name) resolvedName = byLid.name;
+      if (!resolvedName && byLid.preferredName) resolvedName = byLid.preferredName;
     }
   }
   if (phone && !String(phone).startsWith('lid_') && phone !== lid) {
     const fuzzy = await contactHistory.findContactByPhoneFuzzy(phone);
     if (fuzzy && fuzzy.normalizedPhone) {
-      phone = fuzzy.normalizedPhone;
+      phone = preferRealPhone(fuzzy.normalizedPhone, phone);
+      if (!linkedCvId && fuzzy.cvId) linkedCvId = fuzzy.cvId;
+      if (!resolvedName && fuzzy.preferredName) resolvedName = fuzzy.preferredName;
+      if (!resolvedName && fuzzy.name) resolvedName = fuzzy.name;
     }
   }
   const byChat = await contactHistory.findContactByChatId(cid);
@@ -201,7 +221,50 @@ async function resolveConversationContact(openwaSessionId, chatId) {
     const chatIsLid = chatPhone.startsWith('lid_') || (lid && chatPhone === lid);
     const currentIsReal = Boolean(phone && !String(phone).startsWith('lid_') && phone !== lid);
     if (!currentIsReal || !chatIsLid) {
-      phone = chatPhone;
+      phone = preferRealPhone(chatPhone, phone);
+    }
+    if (!linkedCvId && byChat.cvId) linkedCvId = byChat.cvId;
+    if (!resolvedName && byChat.preferredName) resolvedName = byChat.preferredName;
+    if (!resolvedName && byChat.name) resolvedName = byChat.name;
+  }
+
+  // Si solo tenemos LID, intenta casar por nombre con un CV ya cargado (teléfono del manifesto).
+  if (
+    lid &&
+    (!phone || phone === lid || String(phone).startsWith('lid_') || isLikelyLidPhone(phone, cid)) &&
+    resolvedName
+  ) {
+    const cvIdFromName = lookupCvIdFromArchive('', { name: resolvedName });
+    if (cvIdFromName) {
+      const archiveHit = (cvFileStore.loadCvsManifest() || []).find(
+        (c) => c && c.cvId === cvIdFromName
+      );
+      const archivePhone = contactHistory.normalizePhone(archiveHit && archiveHit.telefono);
+      if (archivePhone && !archivePhone.startsWith('lid_')) {
+        phone = archivePhone;
+        linkedCvId = linkedCvId || cvIdFromName;
+        try {
+          await contactHistory.enrollInboundContact({
+            normalizedPhone: archivePhone,
+            name: resolvedName,
+            chatId: cid,
+            whatsappLid: lid,
+            source: 'lid_name_cv_bridge'
+          });
+          await contactHistory.linkCvToContact(archivePhone, {
+            cvId: cvIdFromName,
+            archivoOriginal: archiveHit && archiveHit.archivoOriginal,
+            name: resolvedName
+          });
+          console.log(
+            `[auto-reply] puente LID→teléfono por nombre lid=${lid} phone=${archivePhone} cvId=${cvIdFromName}`
+          );
+        } catch (err) {
+          console.warn('[auto-reply] puente LID→teléfono:', err.message);
+        }
+      } else if (!linkedCvId) {
+        linkedCvId = cvIdFromName;
+      }
     }
   }
 
@@ -213,7 +276,8 @@ async function resolveConversationContact(openwaSessionId, chatId) {
     normalizedPhone: phone || '',
     whatsappLid: lid || null,
     chatId: cid,
-    name: (identity && identity.name) || null
+    name: resolvedName || null,
+    linkedCvId: linkedCvId || null
   };
 }
 
@@ -656,10 +720,15 @@ async function resolveContactIdentity(openwaSessionId, chatId, msg) {
         contact.phoneNumber,
         contact.phone,
         contact.contact?.number,
-        contact.contact?.phoneNumber
+        contact.contact?.phoneNumber,
+        // getContact histórico solo exponía raw; no perder el teléfono ahí.
+        contact.raw
       ];
       for (const raw of candidates) {
-        const normalized = contactHistory.normalizePhone(raw);
+        const normalized =
+          raw && typeof raw === 'object'
+            ? extractPhoneFromOpenWaContact(raw)
+            : contactHistory.normalizePhone(raw);
         if (
           normalized &&
           normalized.length >= 10 &&
@@ -675,8 +744,12 @@ async function resolveContactIdentity(openwaSessionId, chatId, msg) {
           };
         }
       }
+      const rawKeys =
+        contact.raw && typeof contact.raw === 'object'
+          ? Object.keys(contact.raw).join(',')
+          : '';
       console.log(
-        `[auto-reply] getContact sin teléfono usable chatId=${chatId} keys=${Object.keys(contact || {}).join(',')}`
+        `[auto-reply] getContact sin teléfono usable chatId=${chatId} keys=${Object.keys(contact || {}).join(',')} rawKeys=${rawKeys || '—'}`
       );
     } catch (err) {
       console.warn(`[auto-reply] getContact falló chatId=${chatId}: ${err.message}`);
