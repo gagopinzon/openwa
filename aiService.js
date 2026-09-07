@@ -705,15 +705,17 @@ async function generateReplyMessage({
         String(raw).slice(0, 200)
       );
     }
-    if (cleaned) return cleaned;
-    console.warn(
-      '[auto-reply] reply completo era pedir CV; se sustituye por fallback sin CV. original=',
-      String(raw).slice(0, 200)
-    );
-    if (hasStoredCv) {
-      return `${phraseWithName('Perfecto', firstName)}. Ya tenemos tu CV en el sistema. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
+    let out = cleaned;
+    if (!out) {
+      console.warn(
+        '[auto-reply] reply completo era pedir CV; se sustituye por fallback sin CV. original=',
+        String(raw).slice(0, 200)
+      );
+      out = hasStoredCv
+        ? `${phraseWithName('Perfecto', firstName)}. Ya tenemos tu CV en el sistema. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`
+        : `${phraseWithName('Perfecto', firstName)}. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
     }
-    return `${phraseWithName('Perfecto', firstName)}. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
+    return agendaIntent.rewriteTimeOfDayGreetings(out);
   }
 
   if (!canUseDeepSeek && !canUseOllama) {
@@ -757,20 +759,26 @@ async function generateReplyMessage({
     : `
 - Si no hay lista de horarios reales inyectada, NO inventes horas concretas. Pregunta qué día y franja le acomodan para la orientación, o invita a agendar sin inventar slots.`;
 
+  const clockBlock = agendaIntent.formatClockContextForPrompt();
   const greetingInstructions = allowGreeting
-    ? `- Puedes abrir con un saludo breve (Hola / gusto saludarte) si encaja.`
-    : `- NO saludes de nuevo (nada de "Hola", "gusto saludarte", "buenos días/tardes/noches" al inicio). Esta conversación ya está activa; ve directo a la respuesta.`;
+    ? `- Puedes abrir con un saludo breve (Hola / gusto saludarte) si encaja.
+- Si usas saludo o deseo de periodo (días/tardes/noches), copia EXACTAMENTE el del bloque AHORA (CDMX). Nunca inventes el periodo.`
+    : `- NO saludes de nuevo (nada de "Hola", "gusto saludarte", "buenos días/tardes/noches" al inicio). Esta conversación ya está activa; ve directo a la respuesta.
+- Si deseas el día, usa SOLO el periodo del bloque AHORA (CDMX).`;
 
-  const clockBlock = `\n${agendaIntent.formatClockContextForPrompt()}\n`;
+  const prompt = `${clockBlock}
 
-  const prompt = `${cvPolicy}
+${cvPolicy}
 
 ${basePrompt || 'Eres Mónica, agendadora de Pro Talent.'}
 
 ${firstName ? `Nombre del contacto: ${firstName}` : 'Nombre del contacto: (desconocido — no uses nick de WhatsApp ni inventes nombre)'}
 Mensaje que te escribió:
 "${incomingBody}"
-${ruleHint}${contextBlock}${historyBlock}${clockBlock}${agendaBlock}
+${ruleHint}${contextBlock}${historyBlock}
+
+${clockBlock}
+${agendaBlock}
 
 ${systemBlock}
 
@@ -781,7 +789,7 @@ ${agendaInstructions}
 
 Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.`;
 
-  const systemRoleParts = [cvPolicy, personaBlock, systemBlock].filter(Boolean);
+  const systemRoleParts = [clockBlock, cvPolicy, personaBlock, systemBlock].filter(Boolean);
   const systemRole = systemRoleParts.join('\n\n');
 
   if (canUseOllama) {
@@ -789,7 +797,7 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
       const message = await ollamaService.chatReply(prompt, {
         basePrompt: basePrompt || undefined,
         personaSystem: personaBlock || undefined,
-        systemExtra: `${cvPolicy}\n${clockBlock}\n${agendaInstructions}`
+        systemExtra: `${clockBlock}\n${cvPolicy}\n${agendaInstructions}`
       });
       return sanitizeAgainstCvAsk(message);
     } catch (error) {

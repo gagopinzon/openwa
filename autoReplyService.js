@@ -37,6 +37,7 @@ const { buildConfirmedMeetingReply } = require('./agendaMeetMessages');
 const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
 const messageBatcher = require('./messageBatcher');
 const replyDraftService = require('./replyDraftService');
+const { logAgenda, warnAgenda } = require('./agendaDebug');
 const {
   resolveAiContactName,
   preferredFirstName,
@@ -293,6 +294,49 @@ function shouldAllowGreeting(lastAiGreetingAt, now = new Date()) {
   const last = new Date(lastAiGreetingAt).getTime();
   if (!Number.isFinite(last)) return true;
   return now.getTime() - last >= getGreetingCooldownMs();
+}
+
+function logSystemClock(phone) {
+  const parts = agendaIntent.mexicoNowParts();
+  const hh = String(Math.floor(parts.minutes / 60)).padStart(2, '0');
+  const mm = String(parts.minutes % 60).padStart(2, '0');
+  const periodo = agendaIntent.dayPeriodFromMinutes(parts.minutes);
+  logAgenda('auto-reply.reloj', {
+    phone: phone || null,
+    ymd: parts.ymd,
+    hora: `${hh}:${mm}`,
+    periodo
+  });
+  return { ...parts, hora: `${hh}:${mm}`, periodo };
+}
+
+function applySystemClockToReply(text, phone) {
+  const before = String(text || '');
+  const after = agendaIntent.rewriteTimeOfDayGreetings(before);
+  if (after !== before) {
+    logAgenda('auto-reply.reloj.reescrito', {
+      phone: phone || null,
+      before: before.slice(0, 180),
+      after: after.slice(0, 180)
+    });
+  }
+  return after;
+}
+
+function replyPromisesMeetLink(text) {
+  const t = String(text || '');
+  if (!/\bliga\b/i.test(t)) return false;
+  return /\b(env[ií]o|enviamos|mando|mandamos|te\s+paso|confirmar|anotad)/i.test(t);
+}
+
+function slotLog(slot) {
+  if (!slot || typeof slot !== 'object') return null;
+  return {
+    fecha: slot.fecha || null,
+    horaInicio: slot.horaInicio || null,
+    horaFin: slot.horaFin || null,
+    label: slot.label || null
+  };
 }
 
 function envFlag(name) {
@@ -931,6 +975,14 @@ async function processChosenSlot({
     );
   }
   const effectiveCvId = resolvedCvId;
+  logAgenda('auto-reply.booking.processChosenSlot', {
+    phone: normalizedPhone,
+    slot: slotLog(chosen),
+    cvIdIn: cvId || null,
+    cvIdResolved: effectiveCvId || null,
+    userWillSendCv: Boolean(userWillSendCv),
+    testMode: Boolean(testMode)
+  });
   if (!effectiveCvId) {
     agendaAwaitingCvStore.rememberAwaiting(normalizedPhone, {
       chosen,
@@ -939,6 +991,11 @@ async function processChosenSlot({
       chatId: identity.chatId || chatId,
       logicalSessionId,
       openwaSessionId
+    });
+    warnAgenda('auto-reply.booking.sinCv', {
+      phone: normalizedPhone,
+      slot: slotLog(chosen),
+      nota: 'no se agenda ni se manda liga; se pide CV'
     });
     return {
       replyText: buildAskCvReply(displayName, chosen, { userWillSendCv }),
@@ -1023,6 +1080,14 @@ async function finalizeAgendaBooking({
   testMode,
   skipLeadFieldGate = false
 }) {
+  logAgenda('auto-reply.booking.finalize.start', {
+    phone: normalizedPhone,
+    slot: slotLog(chosen),
+    cvId: cvId || null,
+    autoConfirm: agendaConfirmService.autoConfirmEnabled(),
+    testMode: Boolean(testMode),
+    skipLeadFieldGate: Boolean(skipLeadFieldGate)
+  });
   const gated = await gateLeadFieldsBeforeBooking({
     normalizedPhone,
     chosen,
@@ -1034,7 +1099,14 @@ async function finalizeAgendaBooking({
     openwaSessionId,
     skipLeadFieldGate
   });
-  if (gated) return gated;
+  if (gated) {
+    logAgenda('auto-reply.booking.finalize.gated', {
+      phone: normalizedPhone,
+      reason: gated.agendaMeta && gated.agendaMeta.reason,
+      missingFields: gated.agendaMeta && gated.agendaMeta.missingFields
+    });
+    return gated;
+  }
 
   const pending = agendaPendingStore.createPending({
     telefono: normalizedPhone,
@@ -1054,11 +1126,42 @@ async function finalizeAgendaBooking({
 
   let replyText = buildPendingCreatedReply(contactName, chosen);
   let agendaMeta = { reason: 'pending_created', pendingId: pending.id };
+  const notify = {
+    openwaSessionId,
+    chatId: (identity && identity.chatId) || chatId,
+    logicalSessionId
+  };
+
+  if (!agendaConfirmService.autoConfirmEnabled()) {
+    warnAgenda('auto-reply.booking.sinAutoConfirm', {
+      pendingId: pending.id,
+      phone: normalizedPhone,
+      nota: 'AUTO_AGENDA_CONFIRM off: se promete la liga pero no se confirma ni se envía Meet'
+    });
+  } else if (testMode) {
+    logAgenda('auto-reply.booking.testMode', {
+      pendingId: pending.id,
+      phone: normalizedPhone,
+      nota: 'testMode: no se confirma en panel ni se envía liga'
+    });
+  }
 
   if (agendaConfirmService.autoConfirmEnabled() && !testMode) {
     try {
+      logAgenda('auto-reply.booking.confirmandoPanel', {
+        pendingId: pending.id,
+        phone: normalizedPhone,
+        cvId: cvId || null,
+        slot: slotLog(chosen)
+      });
       const confirmed = await agendaConfirmService.confirmPendingInPanel(pending, {
         buildConfirmedMeetingReply
+      });
+      logAgenda('auto-reply.booking.confirmResultado', {
+        pendingId: pending.id,
+        confirmed: Boolean(confirmed && confirmed.confirmed),
+        hasUrl: Boolean(confirmed && confirmed.urlReunionLead),
+        url: (confirmed && confirmed.urlReunionLead) || null
       });
       if (confirmed.urlReunionLead) {
         replyText = buildConfirmedMeetingReply({
@@ -1089,6 +1192,12 @@ async function finalizeAgendaBooking({
           reason: 'meeting_confirmed_no_url',
           pendingId: pending.id
         };
+        warnAgenda('auto-reply.booking.confirmadoSinUrl', {
+          pendingId: pending.id,
+          phone: normalizedPhone,
+          nota: 'reunión confirmada sin Meet; se programa reintento de envío de liga'
+        });
+        agendaMeetDeliveryService.scheduleMeetLinkDelivery(pending, notify);
       }
       if (broadcastEvent) {
         broadcastEvent('agendaPendingConfirmed', confirmed.confirmed);
@@ -1099,6 +1208,13 @@ async function finalizeAgendaBooking({
         error.message,
         error.panelBody ? JSON.stringify(error.panelBody).slice(0, 300) : ''
       );
+      warnAgenda('auto-reply.booking.confirmError', {
+        pendingId: pending.id,
+        phone: normalizedPhone,
+        message: error.message,
+        status: error.status || null,
+        panelBody: error.panelBody || null
+      });
       const localCvOk = cvFileStore.getCvFileMeta(cvId);
 
       if (localCvOk && isPanelCvProcessingError(error)) {
@@ -1108,11 +1224,12 @@ async function finalizeAgendaBooking({
           pendingId: pending.id,
           error: error.message
         };
-        agendaMeetDeliveryService.scheduleMeetLinkDelivery(pending, {
-          openwaSessionId,
-          chatId: identity.chatId || chatId,
-          logicalSessionId
+        logAgenda('auto-reply.booking.cvProcesando', {
+          pendingId: pending.id,
+          phone: normalizedPhone,
+          nota: 'se programa reintento de liga'
         });
+        agendaMeetDeliveryService.scheduleMeetLinkDelivery(pending, notify);
       } else {
         try {
           agendaPendingStore.cancelPending(pending.id);
@@ -1130,12 +1247,23 @@ async function finalizeAgendaBooking({
           });
           replyText = buildAskCvReply(contactName, chosen);
           agendaMeta = { reason: 'awaiting_cv', error: error.message };
+          warnAgenda('auto-reply.booking.confirmaPideCv', {
+            pendingId: pending.id,
+            phone: normalizedPhone,
+            localCvOk: Boolean(localCvOk),
+            error: error.message
+          });
         } else {
           replyText = buildConfirmFailedReply(contactName, chosen, error.message);
           agendaMeta = {
             reason: 'confirm_failed',
             error: error.message
           };
+          warnAgenda('auto-reply.booking.confirmFailed', {
+            pendingId: pending.id,
+            phone: normalizedPhone,
+            error: error.message
+          });
         }
       }
     }
@@ -1569,6 +1697,23 @@ async function processBatchedAutoReply(items, opts = {}) {
       } leadCvId=${(leadCv && leadCv.cvId) || 'null'} usable=${cvId || 'null'} ` +
         `hasCvContext=${cvContext ? 'yes' : 'no'} preferredName=${contactDisplayName || 'null'}`
     );
+    const clock = logSystemClock(normalizedPhone);
+    const awaitingAtStart = agendaAwaitingCvStore.getAwaiting(normalizedPhone);
+    const offerAtStart = agendaOfferStore.getOffer(normalizedPhone);
+    logAgenda('auto-reply.turno.start', {
+      phone: normalizedPhone,
+      chatId,
+      body: String(body || '').slice(0, 180),
+      incomingDocument: Boolean(incomingDocument),
+      preparedReply: Boolean(preparedReply),
+      cvId: cvId || null,
+      awaitingStage: awaitingAtStart && awaitingAtStart.stage,
+      offerSlots: offerAtStart && Array.isArray(offerAtStart.slots) ? offerAtStart.slots.length : 0,
+      proposedSlot: offerAtStart && offerAtStart.proposedSlot
+        ? slotLog(offerAtStart.proposedSlot)
+        : null,
+      clock
+    });
 
     const receivedAt = Date.now();
     presenceRefresher = null;
@@ -1773,6 +1918,14 @@ async function processBatchedAutoReply(items, opts = {}) {
 
     if (!replyText && priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
       const confirmingYes = agendaIntent.looksLikeTimeConfirmYes(body);
+      logAgenda('auto-reply.booking.offerMatch', {
+        phone: normalizedPhone,
+        confirmingYes,
+        hasProposedSlot: Boolean(priorOffer.proposedSlot && priorOffer.proposedSlot.horaInicio),
+        proposedSlot: slotLog(priorOffer.proposedSlot),
+        slotCount: priorOffer.slots.length,
+        body: String(body || '').slice(0, 160)
+      });
       if (confirmingYes && priorOffer.proposedSlot && priorOffer.proposedSlot.horaInicio) {
         const booked = await processChosenSlot({
           chosen: priorOffer.proposedSlot,
@@ -1823,6 +1976,16 @@ async function processBatchedAutoReply(items, opts = {}) {
             replyText = applied.replyText;
             agendaMeta = applied.agendaMeta;
           }
+        } else {
+          logAgenda('auto-reply.booking.sinMatch', {
+            phone: normalizedPhone,
+            confirmingYes,
+            body: String(body || '').slice(0, 160),
+            lastBotProposal: String(lastBotProposal || '').slice(0, 160),
+            slotStarts: priorOffer.slots
+              .slice(0, 12)
+              .map((s) => `${s.fecha} ${s.horaInicio}`)
+          });
         }
       }
     }
@@ -1835,6 +1998,11 @@ async function processBatchedAutoReply(items, opts = {}) {
       console.log(
         `[auto-reply] confirmación de hora sin slot matcheado; no se reofrece la semana phone=${normalizedPhone}`
       );
+      warnAgenda('auto-reply.booking.siSinSlot', {
+        phone: normalizedPhone,
+        body: String(body || '').slice(0, 160),
+        nota: 'dijo sí pero no hubo slot; la IA puede prometar liga sin agendar'
+      });
     }
 
     // Fase 1: en el playbook casi siempre se cierran con horarios (XXXX → slots reales)
@@ -1945,6 +2113,14 @@ async function processBatchedAutoReply(items, opts = {}) {
         openwaSessionId,
         chatId
       );
+      logAgenda('auto-reply.ia.generando', {
+        phone: normalizedPhone,
+        allowGreeting,
+        hasAgendaContext: Boolean(agendaContext),
+        agendaContextHead: String(agendaContext || '').slice(0, 180),
+        agendaMeta: agendaMeta && agendaMeta.reason,
+        matchedRule: matchedRule && matchedRule.id
+      });
       replyText = await generateReplyMessage({
         contactName: contactDisplayName,
         incomingBody: body,
@@ -1960,6 +2136,11 @@ async function processBatchedAutoReply(items, opts = {}) {
         agendaContext,
         allowGreeting
       });
+      logAgenda('auto-reply.ia.generado', {
+        phone: normalizedPhone,
+        allowGreeting,
+        reply: String(replyText || '').slice(0, 240)
+      });
       if (allowGreeting) {
         await contactHistory.touchLastAiGreeting(normalizedPhone);
       }
@@ -1974,6 +2155,28 @@ async function processBatchedAutoReply(items, opts = {}) {
     if (!replyText) {
       turnResult = { handled: false, reason: 'empty_reply' };
       return turnResult;
+    }
+
+    replyText = applySystemClockToReply(replyText, normalizedPhone);
+    logAgenda('auto-reply.turno.reply', {
+      phone: normalizedPhone,
+      reason: agendaMeta && agendaMeta.reason,
+      pendingId: agendaPendingId,
+      hasUrl: Boolean(agendaMeta && agendaMeta.urlReunion),
+      reply: String(replyText).slice(0, 240)
+    });
+    if (
+      replyPromisesMeetLink(replyText) &&
+      !(agendaMeta && agendaMeta.reason === 'meeting_confirmed' && agendaMeta.urlReunion)
+    ) {
+      warnAgenda('auto-reply.ligaPrometidaSinEnvio', {
+        phone: normalizedPhone,
+        reason: agendaMeta && agendaMeta.reason,
+        pendingId: agendaPendingId,
+        url: (agendaMeta && agendaMeta.urlReunion) || null,
+        reply: String(replyText).slice(0, 240),
+        nota: 'el mensaje habla de la liga pero este turno no adjuntó un Meet'
+      });
     }
 
     if (draftOnly) {

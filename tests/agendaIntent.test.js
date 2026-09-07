@@ -98,6 +98,58 @@ describe('agendaIntent', () => {
     assert.match(clock, /En 3 días =/);
   });
 
+  it('a las 11:00 CDMX el reloj manda buenos días y prohíbe noches/tardes', () => {
+    const {
+      formatClockContextForPrompt,
+      mexicoNowParts,
+      dayPeriodFromMinutes
+    } = require('../agendaIntent');
+    // 11:00 CDMX = 17:00 UTC (CDMX UTC-6 todo el año)
+    const elevenAm = new Date('2026-09-07T17:00:00.000Z');
+    const parts = mexicoNowParts(elevenAm);
+    assert.equal(parts.ymd, '2026-09-07');
+    assert.equal(Math.floor(parts.minutes / 60), 11);
+    assert.equal(dayPeriodFromMinutes(parts.minutes), 'mañana');
+
+    const clock = formatClockContextForPrompt(elevenAm);
+    assert.match(clock, /11:00/);
+    assert.match(clock, /buenos d[ií]as/i);
+    assert.match(clock, /PROHIBIDO/i);
+    assert.match(clock, /buenas noches/i);
+  });
+
+  it('reescribe saludos de periodo a la hora del sistema', () => {
+    const { rewriteTimeOfDayGreetings } = require('../agendaIntent');
+    const elevenAm = new Date('2026-09-07T17:00:00.000Z');
+    const threePm = new Date('2026-09-07T21:00:00.000Z');
+    const eightPm = new Date('2026-09-08T02:00:00.000Z');
+
+    assert.equal(
+      rewriteTimeOfDayGreetings('Buenas noches Ana, ¿agendamos?', elevenAm),
+      'Buenos días Ana, ¿agendamos?'
+    );
+    assert.equal(
+      rewriteTimeOfDayGreetings('buenas tardes, te mando la liga', elevenAm),
+      'buenos días, te mando la liga'
+    );
+    assert.match(
+      rewriteTimeOfDayGreetings('Que pases buena noche', elevenAm),
+      /buen d[ií]a/i
+    );
+    assert.equal(
+      rewriteTimeOfDayGreetings('Buenos días, nos vemos', threePm),
+      'Buenas tardes, nos vemos'
+    );
+    assert.equal(
+      rewriteTimeOfDayGreetings('Buenos días, nos vemos', eightPm),
+      'Buenas noches, nos vemos'
+    );
+    assert.equal(
+      rewriteTimeOfDayGreetings('Que tengas buen fin de semana', elevenAm),
+      'Que tengas buen fin de semana'
+    );
+  });
+
   it('matchea slot por hora', () => {
     const slots = [
       { fecha: '2026-08-02', horaInicio: '10:00', horaFin: '10:30', label: 'a' },

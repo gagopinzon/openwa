@@ -108,6 +108,7 @@ function mexicoNowParts(now = new Date()) {
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
+      hour12: false,
       hourCycle: 'h23'
     })
       .formatToParts(now)
@@ -115,10 +116,15 @@ function mexicoNowParts(now = new Date()) {
       .map((p) => [p.type, p.value])
   );
   let hour = Number(parts.hour);
+  if (!Number.isFinite(hour)) {
+    hour = parseInt(String(parts.hour || '0'), 10);
+  }
   if (hour === 24) hour = 0;
+  if (!Number.isFinite(hour) || hour < 0) hour = 0;
+  const minute = Number(parts.minute);
   return {
     ymd: `${parts.year}-${parts.month}-${parts.day}`,
-    minutes: hour * 60 + Number(parts.minute)
+    minutes: hour * 60 + (Number.isFinite(minute) ? minute : 0)
   };
 }
 
@@ -131,6 +137,68 @@ function dayPeriodFromMinutes(minutes) {
   if (!Number.isFinite(m) || m < 12 * 60) return 'mañana';
   if (m < 19 * 60) return 'tarde';
   return 'noche';
+}
+
+/**
+ * Frases de saludo/deseo según el periodo civil CDMX.
+ * @param {'mañana'|'tarde'|'noche'} period
+ * @returns {{ greeting: string, wish: string, forbidden: string }}
+ */
+function periodPhrases(period) {
+  if (period === 'tarde') {
+    return {
+      greeting: 'buenas tardes',
+      wish: 'buena tarde',
+      forbidden: '"buenos días", "buenas noches", "buen día", "buena noche"'
+    };
+  }
+  if (period === 'noche') {
+    return {
+      greeting: 'buenas noches',
+      wish: 'buena noche',
+      forbidden: '"buenos días", "buenas tardes", "buen día", "buena tarde"'
+    };
+  }
+  return {
+    greeting: 'buenos días',
+    wish: 'buen día',
+    forbidden: '"buenas tardes", "buenas noches", "buena tarde", "buena noche"'
+  };
+}
+
+/**
+ * @param {string} match
+ * @param {string} replacement
+ */
+function applyMatchCase(match, replacement) {
+  const first = String(match || '').charAt(0);
+  const repl = String(replacement || '');
+  if (!repl) return repl;
+  if (first && first !== first.toLowerCase()) {
+    return repl.charAt(0).toLocaleUpperCase('es') + repl.slice(1);
+  }
+  return repl;
+}
+
+/**
+ * Reescribe saludos/deseos de periodo (buenos días/tardes/noches) a la hora CDMX del sistema.
+ * No toca "buen fin de semana".
+ * @param {string} text
+ * @param {Date} [now]
+ */
+function rewriteTimeOfDayGreetings(text, now = new Date()) {
+  const raw = String(text || '');
+  if (!raw) return raw;
+  const { minutes } = mexicoNowParts(now);
+  const { greeting, wish } = periodPhrases(dayPeriodFromMinutes(minutes));
+
+  let out = raw.replace(/\bbuenos\s+d[ií]as\b/gi, (m) => applyMatchCase(m, greeting));
+  out = out.replace(/\bbuenas\s+tardes\b/gi, (m) => applyMatchCase(m, greeting));
+  out = out.replace(/\bbuenas\s+noches\b/gi, (m) => applyMatchCase(m, greeting));
+  out = out.replace(/\bbuen\s+d[ií]a\b/gi, (m) => applyMatchCase(m, wish));
+  out = out.replace(/\bbuena\s+tarde\b/gi, (m) => applyMatchCase(m, wish));
+  out = out.replace(/\bbuena\s+noche\b/gi, (m) => applyMatchCase(m, wish));
+  return out;
 }
 
 /**
@@ -169,6 +237,7 @@ function absoluteDayLabel(ymd) {
 function formatClockContextForPrompt(now = new Date()) {
   const { ymd, minutes } = mexicoNowParts(now);
   const period = dayPeriodFromMinutes(minutes);
+  const { greeting, wish, forbidden } = periodPhrases(period);
   const hh = String(Math.floor(minutes / 60)).padStart(2, '0');
   const mm = String(minutes % 60).padStart(2, '0');
   const todayAbs = absoluteDayLabel(ymd);
@@ -176,6 +245,9 @@ function formatClockContextForPrompt(now = new Date()) {
 
   const lines = [
     `AHORA (CDMX): ${todayAbs} ${year}, ${hh}:${mm} — ${period}`,
+    'RELOJ DEL SISTEMA: esta es la ÚNICA hora válida. Ignora UTC, la hora de entrenamiento del modelo y cualquier otra zona.',
+    `Si saludas por periodo del día, usa EXACTAMENTE: "${greeting}". Deseo: "${wish}".`,
+    `PROHIBIDO ahora: ${forbidden}.`,
     `Hoy = ${todayAbs} (${ymd})`,
     `Mañana = ${absoluteDayLabel(addDaysYmd(ymd, 1))} (${addDaysYmd(ymd, 1)})`,
     `Pasado mañana = ${absoluteDayLabel(addDaysYmd(ymd, 2))} (${addDaysYmd(ymd, 2)})`
@@ -631,6 +703,8 @@ module.exports = {
   weekdayOfYmd,
   mexicoNowParts,
   dayPeriodFromMinutes,
+  periodPhrases,
+  rewriteTimeOfDayGreetings,
   relativeDayLabel,
   formatClockContextForPrompt,
   looksLikeScheduleIntent,

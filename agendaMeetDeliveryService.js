@@ -73,6 +73,11 @@ function scheduleMeetLinkDelivery(pending, notify = {}) {
             : 'Pro Talent'
         });
         await sendTextMessage(openwaSessionId, chatId, text);
+        logAgenda('agenda-meet.ligaEnviada', {
+          pendingId: fresh.id,
+          chatId,
+          url: fresh.urlReunion
+        });
         console.log(`[agenda-meet] liga enviada pending=${fresh.id}`);
         scheduled.delete(pending.id);
         return;
@@ -111,6 +116,11 @@ function scheduleMeetLinkDelivery(pending, notify = {}) {
             : 'Pro Talent'
         });
         await sendTextMessage(openwaSessionId, chatId, text);
+        logAgenda('agenda-meet.ligaEnviadaReintento', {
+          pendingId: fresh.id,
+          chatId,
+          url
+        });
         console.log(`[agenda-meet] liga enviada tras reintento pending=${fresh.id}`);
         scheduled.delete(pending.id);
         return;
