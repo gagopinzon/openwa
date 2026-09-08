@@ -207,9 +207,80 @@ async function crearReunion(body = {}) {
   }
 }
 
+/**
+ * Reagenda una reunión ya creada en Panel.
+ * @param {{
+ *   reunionId: string,
+ *   gerenteEmail?: string,
+ *   fecha: string,
+ *   horaInicio: string,
+ *   horaFin: string,
+ *   vendedorId: string
+ * }} body
+ */
+async function actualizarReunion(body = {}) {
+  const reunionId = String(body.reunionId || '').trim();
+  if (!reunionId) {
+    const err = new Error('reunionId es obligatorio para reagendar');
+    err.status = 400;
+    throw err;
+  }
+  const gerenteEmail = body.gerenteEmail || defaultGerenteEmail();
+  const headers = buildHeaders(gerenteEmail);
+  const vendedorId = String(body.vendedorId || '').trim();
+  const fecha = String(body.fecha || '').trim();
+  const horaInicio = String(body.horaInicio || '').trim();
+  const horaFin = String(body.horaFin || '').trim();
+  if (!vendedorId || !fecha || !horaInicio || !horaFin) {
+    const err = new Error(
+      'fecha, horaInicio, horaFin y vendedorId son obligatorios para reagendar'
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const payload = { fecha, horaInicio, horaFin, vendedorId };
+  const endpoint = `${panelBaseUrl()}/api/external/msg/reuniones/${encodeURIComponent(reunionId)}`;
+  logAgenda('panel.actualizarReunion.request', {
+    endpoint,
+    reunionId,
+    gerenteEmail,
+    vendedorId,
+    fecha,
+    horaInicio,
+    horaFin
+  });
+
+  const started = Date.now();
+  try {
+    const { data, status } = await axios.patch(endpoint, payload, {
+      headers,
+      timeout: POST_TIMEOUT_MS
+    });
+    logAgenda('panel.actualizarReunion.ok', {
+      status,
+      ms: Date.now() - started,
+      reunionId,
+      keys: data && typeof data === 'object' ? Object.keys(data) : []
+    });
+    return data;
+  } catch (error) {
+    const normalized = normalizePanelError(error);
+    warnAgenda('panel.actualizarReunion.error', {
+      ms: Date.now() - started,
+      reunionId,
+      status: normalized.status,
+      message: normalized.message,
+      panelBody: normalized.panelBody || null
+    });
+    throw normalized;
+  }
+}
+
 module.exports = {
   getDisponibilidad,
   crearReunion,
+  actualizarReunion,
   isConfigured,
   defaultGerenteEmail,
   panelBaseUrl

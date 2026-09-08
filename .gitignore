@@ -16,6 +16,7 @@ data/.deploy-backups/
 data/send-settings.json
 data/conversation-previews.json
 data/send-queue.json
+data/occ-session/
 logs/
 *.log
 *.zip

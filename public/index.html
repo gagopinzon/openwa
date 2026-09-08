@@ -193,6 +193,25 @@
                 </div>
             </section>
 
+            <section class="agenda-pending-panel" id="agendaConfirmedPanel" style="display: none;">
+                <div class="agenda-pending-header">
+                    <div>
+                        <h2 style="font-size: 1.1rem; margin-bottom: 4px;">
+                            Citas confirmadas
+                            <span id="agendaConfirmedCount" class="agenda-pending-count">0</span>
+                        </h2>
+                        <p style="font-size: 13px; color: #64748b; margin: 0;">
+                            Reuniones ya creadas en Panel. Si el lead pide otro horario por WhatsApp, Msg intenta moverla (mismo vendedor si está libre).
+                        </p>
+                    </div>
+                    <button type="button" id="agendaConfirmedRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                </div>
+                <p id="agendaConfirmedStatus" class="disponibilidad-status"></p>
+                <div id="agendaConfirmedList" class="agenda-pending-list">
+                    <p class="auto-reply-empty">No hay citas confirmadas.</p>
+                </div>
+            </section>
+
             <section class="disponibilidad-panel" id="disponibilidadPanel">
                 <div class="disponibilidad-header">
                     <div>

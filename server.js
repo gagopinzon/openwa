@@ -4720,6 +4720,25 @@ app.get('/api/conversations/contact-status', async (req, res) => {
       }
     }
 
+    let confirmedMeeting = null;
+    const phoneForMeeting = phoneForCv || phone || '';
+    if (phoneForMeeting && !String(phoneForMeeting).startsWith('lid_')) {
+      const meeting = agendaPendingStore.findConfirmedByPhone(phoneForMeeting);
+      if (meeting) {
+        confirmedMeeting = {
+          id: meeting.id,
+          fecha: meeting.fecha,
+          horaInicio: meeting.horaInicio,
+          horaFin: meeting.horaFin,
+          label: meeting.label || null,
+          urlReunion: meeting.urlReunion || null,
+          panelReunionId: meeting.panelReunionId || null,
+          vendedorId: meeting.vendedorId || null,
+          confirmedAt: meeting.confirmedAt || null
+        };
+      }
+    }
+
     return res.json({
       success: true,
       sessionId: session.id,
@@ -4733,6 +4752,7 @@ app.get('/api/conversations/contact-status', async (req, res) => {
       aiPaused,
       linkedCvId,
       matchedCv,
+      confirmedMeeting,
       sessionAiEnabled: autoReplyStore.isSessionEnabled(session.id),
       autoReplyEnabled: Boolean(autoReplyStore.getConfig().enabled),
       ...(contactWarning ? { warning: contactWarning } : {})

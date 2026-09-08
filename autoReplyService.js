@@ -13,6 +13,7 @@ const agendaPendingStore = require('./agendaPendingStore');
 const agendaAwaitingCvStore = require('./agendaAwaitingCvStore');
 const agendaCvConfirm = require('./agendaCvConfirm');
 const agendaConfirmService = require('./agendaConfirmService');
+const agendaRescheduleService = require('./agendaRescheduleService');
 const agendaMeetDeliveryService = require('./agendaMeetDeliveryService');
 const agendaLeadFields = require('./agendaLeadFields');
 const cvIngestService = require('./cvIngestService');
@@ -2053,9 +2054,48 @@ async function processBatchedAutoReply(items, opts = {}) {
       proposedTimes: priorOffer && priorOffer.proposedTimes
     };
 
+    const confirmedMeeting = agendaPendingStore.findConfirmedByPhone(normalizedPhone);
+
+    if (!replyText && confirmedMeeting) {
+      const reschedule = await agendaRescheduleService.handleReschedule({
+        confirmed: confirmedMeeting,
+        body,
+        contactName: contactDisplayName,
+        broadcastEvent,
+        testMode,
+        priorOffer,
+        slotMatchOpts
+      });
+      if (reschedule.handled) {
+        replyText = reschedule.replyText || null;
+        agendaMeta = reschedule.agendaMeta || agendaMeta;
+        if (reschedule.agendaContext) {
+          deferredAgendaContext =
+            (deferredAgendaContext ? `${deferredAgendaContext}\n` : '') +
+            reschedule.agendaContext;
+        }
+      } else {
+        const when =
+          confirmedMeeting.label ||
+          `${confirmedMeeting.fecha} ${confirmedMeeting.horaInicio}`;
+        deferredAgendaContext =
+          (deferredAgendaContext ? `${deferredAgendaContext}\n` : '') +
+          `CITA YA CONFIRMADA: ${when}` +
+          (confirmedMeeting.urlReunion ? ` Meet: ${confirmedMeeting.urlReunion}` : '') +
+          `. Si el lead quiere OTRO horario, muévela (no crees una cita nueva). ` +
+          `Si solo pregunta algo más, responde sin volver a agendar.`;
+        agendaMeta = agendaMeta || {
+          reason: 'confirmed_exists_defer_to_ai',
+          pendingId: confirmedMeeting.id,
+          panelReunionId: confirmedMeeting.panelReunionId || null
+        };
+      }
+    }
+
     if (!replyText && priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length) {
       const confirmingYes = agendaIntent.looksLikeTimeConfirmYes(body);
       const alreadyPending = agendaPendingStore.findPendingByPhone(normalizedPhone);
+      const alreadyConfirmed = agendaPendingStore.findConfirmedByPhone(normalizedPhone);
       logAgenda('auto-reply.booking.offerMatch', {
         phone: normalizedPhone,
         confirmingYes,
@@ -2063,9 +2103,15 @@ async function processBatchedAutoReply(items, opts = {}) {
         proposedSlot: slotLog(priorOffer.proposedSlot),
         slotCount: priorOffer.slots.length,
         alreadyPending: Boolean(alreadyPending),
+        alreadyConfirmed: Boolean(alreadyConfirmed),
         body: String(body || '').slice(0, 160)
       });
-      if (alreadyPending) {
+      if (alreadyConfirmed) {
+        deferredAgendaContext =
+          (deferredAgendaContext ? `${deferredAgendaContext}\n` : '') +
+          `CITA YA CONFIRMADA: ${alreadyConfirmed.label || `${alreadyConfirmed.fecha} ${alreadyConfirmed.horaInicio}`}. ` +
+          `No crees otra; si eligió horario nuevo, debió reagendarse arriba.`;
+      } else if (alreadyPending) {
         // Cita ya creada: no re-agendar por cada mensaje.
         deferredAgendaContext =
           (deferredAgendaContext ? `${deferredAgendaContext}\n` : '') +
@@ -2146,6 +2192,7 @@ async function processBatchedAutoReply(items, opts = {}) {
     // Fase 1: en el playbook casi siempre se cierran con horarios (XXXX → slots reales)
     let agendaContext = deferredAgendaContext || null;
     const existingPending = agendaPendingStore.findPendingByPhone(normalizedPhone);
+    const existingConfirmed = agendaPendingStore.findConfirmedByPhone(normalizedPhone);
     if (existingPending && !replyText) {
       const when =
         existingPending.label ||
@@ -2155,7 +2202,25 @@ async function processBatchedAutoReply(items, opts = {}) {
         `CITA YA PENDIENTE: ${when}. No vuelvas a agendar ni digas "quedó anotado". Responde la duda o mensaje actual del lead.`;
       agendaMeta = agendaMeta || { reason: 'pending_exists_defer_to_ai', pendingId: existingPending.id };
     }
-    if (!replyText && agendaIntent.shouldOfferSlots(body) && !skipReslotOnYes && !existingPending) {
+    if (existingConfirmed && !replyText) {
+      const when =
+        existingConfirmed.label ||
+        `${existingConfirmed.fecha} ${existingConfirmed.horaInicio}`;
+      agendaContext =
+        (agendaContext ? `${agendaContext}\n` : '') +
+        `CITA YA CONFIRMADA: ${when}. No crees una cita nueva; si pide otro horario, confirma el cambio.`;
+      agendaMeta = agendaMeta || {
+        reason: 'confirmed_exists_defer_to_ai',
+        pendingId: existingConfirmed.id
+      };
+    }
+    if (
+      !replyText &&
+      agendaIntent.shouldOfferSlots(body) &&
+      !skipReslotOnYes &&
+      !existingPending &&
+      !existingConfirmed
+    ) {
       try {
         const today = agendaIntent.todayYmd();
         const tomorrow = agendaIntent.addDaysYmd(today, 1);

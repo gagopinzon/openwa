@@ -47,7 +47,16 @@ PANEL_BASE_URL=https://panel.protalentconnections.com
 MSG_INTEGRATION_API_KEY=clave_compartida_con_panel
 # Opcional: fallback. Lo normal es que cada usuario guarde su correo en la UI ("Tu correo en Panel")
 MSG_GERENTE_EMAIL=gerente@protalentconnections.com
+
+# OCC — al subir PDFs con “Liga de currículo”, descarga el CV autenticado (Playwright)
+# OCC_USER=
+# OCC_PASSWORD=
+# Luego: npx playwright install chromium
 ```
+
+### Descarga de CV desde OCC
+
+Al **agendar** una cita (no al subir el PDF), si el archivo tiene una URL `occ.com.mx/.../cv/...` y tienes `OCC_USER` / `OCC_PASSWORD`, el servidor inicia sesión en OCC (cookies en `data/occ-session/`), descarga el CV vía `#download-cv`, reemplaza el PDF en disco y **ese** es el que viaja a Panel. Si falla, se usa el PDF original y se marca `occFetchFailed`.
 
 ### Agendar reuniones desde CVs
 
@@ -78,6 +87,7 @@ Si `data/sessions.json` está vacío al arrancar, el servidor importa automátic
 ```bash
 cd whatsapp-bulk-openwa
 npm install
+npx playwright install chromium   # solo si usas OCC_USER/OCC_PASSWORD
 npm start
 ```
 

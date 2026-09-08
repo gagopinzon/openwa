@@ -1,5 +1,6 @@
 const cvFileStore = require('./cvFileStore');
 const { probeCvPublicUrl } = require('./agendaDebug');
+const occCvFetchService = require('./occCvFetchService');
 
 /**
  * Lee el CV local y arma payload base64 para el panel.
@@ -17,8 +18,9 @@ function readPanelCvBase64Payload(cvId) {
 
 /**
  * CV para POST /api/external/msg/reuniones: base64 (local) o cvUrl (fallback).
+ * Antes de armar el payload, descarga desde OCC si el PDF trae liga (solo al agendar).
  * @param {string} cvId
- * @param {{ probeCvUrl?: (url: string) => Promise<object> }} [opts]
+ * @param {{ probeCvUrl?: (url: string) => Promise<object>, skipOccFetch?: boolean }} [opts]
  */
 async function resolvePanelCvDelivery(cvId, opts = {}) {
   const id = String(cvId || '').trim();
@@ -26,6 +28,17 @@ async function resolvePanelCvDelivery(cvId, opts = {}) {
     const err = new Error('cvId es obligatorio');
     err.status = 400;
     throw err;
+  }
+
+  if (!opts.skipOccFetch) {
+    try {
+      await occCvFetchService.ensureOccCvFetched(id);
+    } catch (err) {
+      console.warn(
+        '[occ-cv] ensureOccCvFetched en delivery:',
+        err && err.message ? err.message : err
+      );
+    }
   }
 
   const base64Payload = readPanelCvBase64Payload(id);

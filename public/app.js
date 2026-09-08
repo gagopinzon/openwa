@@ -28,6 +28,7 @@ class CVAnalyzer {
         this.initAgendarModal();
         this.initDisponibilidadCalendar();
         this.initAgendaPendingPanel();
+        this.initAgendaConfirmedPanel();
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
@@ -1054,6 +1055,10 @@ class CVAnalyzer {
         if (this.agendaPendingPanel) {
             this.agendaPendingPanel.style.display = hasControl ? '' : 'none';
             if (hasControl) this.loadAgendaPending();
+        }
+        if (this.agendaConfirmedPanel) {
+            this.agendaConfirmedPanel.style.display = hasControl ? '' : 'none';
+            if (hasControl) this.loadAgendaConfirmed();
         }
         this.applyAutoReplyRoleUI();
 
@@ -2871,10 +2876,21 @@ class CVAnalyzer {
                 aiBadge = '<span class="thread-ai-active">IA activa</span>';
             }
         }
+        let meetingBadge = '';
+        const meeting = this.activeConversationConfirmedMeeting;
+        if (meeting && (meeting.fecha || meeting.horaInicio || meeting.label)) {
+            const when =
+                meeting.label ||
+                `${meeting.fecha || ''} ${meeting.horaInicio || ''}`.trim();
+            const meetLink = meeting.urlReunion
+                ? ` · <a href="${this.escapeHtml(meeting.urlReunion)}" target="_blank" rel="noopener">Meet</a>`
+                : '';
+            meetingBadge = `<span class="thread-meeting">Cita: ${this.escapeHtml(when)}${meetLink}</span>`;
+        }
         this.conversationsThreadHeader.innerHTML = `
             ${this.escapeHtml(this.activeConversation.name)}
             <span class="thread-session">Desde: ${this.escapeHtml(this.activeConversation.sessionLabel)}</span>
-            ${blockedBadge}${aiBadge}
+            ${blockedBadge}${aiBadge}${meetingBadge}
         `;
     }
 
@@ -2884,6 +2900,7 @@ class CVAnalyzer {
             this.activeConversationBlocked = false;
             this.activeConversationAiPaused = false;
             this.activeConversationKnownContact = false;
+            this.activeConversationConfirmedMeeting = null;
             this.updateConversationThreadActions();
             return;
         }
@@ -2900,6 +2917,7 @@ class CVAnalyzer {
             this.activeConversationSessionAiEnabled =
                 data.sessionAiEnabled !== undefined ? Boolean(data.sessionAiEnabled) : true;
             this.activeConversationAutoReplyEnabled = Boolean(data.autoReplyEnabled);
+            this.activeConversationConfirmedMeeting = data.confirmedMeeting || null;
             if (this.activeConversation) {
                 this.activeConversation.telefono = data.telefono || null;
                 this.activeConversation.telefonoRaw = data.telefonoRaw || null;
@@ -2910,6 +2928,7 @@ class CVAnalyzer {
             this.updateActiveConversationHeaderBadges();
         } catch (error) {
             console.warn('contact-status:', error.message);
+            this.activeConversationConfirmedMeeting = null;
         }
         this.updateConversationThreadActions();
     }
@@ -6562,6 +6581,83 @@ class CVAnalyzer {
         }
     }
 
+    initAgendaConfirmedPanel() {
+        this.agendaConfirmedPanel = document.getElementById('agendaConfirmedPanel');
+        this.agendaConfirmedList = document.getElementById('agendaConfirmedList');
+        this.agendaConfirmedStatus = document.getElementById('agendaConfirmedStatus');
+        this.agendaConfirmedCount = document.getElementById('agendaConfirmedCount');
+        this.agendaConfirmedItems = [];
+        const refresh = document.getElementById('agendaConfirmedRefreshBtn');
+        if (refresh) {
+            refresh.addEventListener('click', () => this.loadAgendaConfirmed());
+        }
+    }
+
+    setAgendaConfirmedStatus(msg) {
+        if (this.agendaConfirmedStatus) this.agendaConfirmedStatus.textContent = msg || '';
+    }
+
+    async loadAgendaConfirmed() {
+        if (!this.agendaConfirmedList) return;
+        if (!(this.isSuperUser() || this.getControllableSessions().length > 0)) return;
+        this.setAgendaConfirmedStatus('Cargando…');
+        try {
+            const response = await fetch('/api/agenda/pending?status=confirmed');
+            const data = await response.json();
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || `Error ${response.status}`);
+            }
+            this.agendaConfirmedItems = Array.isArray(data.items) ? data.items : [];
+            this.renderAgendaConfirmed();
+            this.setAgendaConfirmedStatus(
+                this.agendaConfirmedItems.length
+                    ? `${this.agendaConfirmedItems.length} confirmada(s)`
+                    : 'Sin confirmadas'
+            );
+        } catch (error) {
+            this.setAgendaConfirmedStatus(error.message);
+            if (this.agendaConfirmedList) {
+                this.agendaConfirmedList.innerHTML = `<p class="auto-reply-empty">Error: ${this.escapeHtml(error.message)}</p>`;
+            }
+        }
+    }
+
+    renderAgendaConfirmed() {
+        if (!this.agendaConfirmedList) return;
+        if (this.agendaConfirmedCount) {
+            this.agendaConfirmedCount.textContent = String(this.agendaConfirmedItems.length);
+        }
+        if (!this.agendaConfirmedItems.length) {
+            this.agendaConfirmedList.innerHTML =
+                '<p class="auto-reply-empty">No hay citas confirmadas.</p>';
+            return;
+        }
+
+        this.agendaConfirmedList.innerHTML = this.agendaConfirmedItems
+            .map((item) => {
+                const when =
+                    item.label ||
+                    `${item.fecha || ''} ${item.horaInicio || ''}–${item.horaFin || ''}`.trim();
+                const name = item.contactName || item.telefono || 'Lead';
+                const meet = item.urlReunion
+                    ? `<a href="${this.escapeHtml(item.urlReunion)}" target="_blank" rel="noopener">Meet</a>`
+                    : '—';
+                const panelId = item.panelReunionId
+                    ? `<code>${this.escapeHtml(String(item.panelReunionId))}</code>`
+                    : '<span class="muted">sin id Panel</span>';
+                return `
+                <div class="agenda-pending-card" data-confirmed-id="${this.escapeHtml(item.id)}">
+                    <div class="agenda-pending-card-main">
+                        <strong>${this.escapeHtml(name)}</strong>
+                        <span>${this.escapeHtml(when)}</span>
+                        <span class="agenda-pending-meta">Panel: ${panelId} · ${meet}</span>
+                        <span class="agenda-pending-meta">Tel: ${this.escapeHtml(item.telefono || '—')} · Vendedor: ${this.escapeHtml(item.vendedorId || '—')}</span>
+                    </div>
+                </div>`;
+            })
+            .join('');
+    }
+
     setAgendaPendingStatus(msg) {
         if (this.agendaPendingStatus) this.agendaPendingStatus.textContent = msg || '';
     }
@@ -9219,13 +9315,19 @@ class CVAnalyzer {
 
         this.eventSource.addEventListener('agendaPending', () => {
             this.loadAgendaPending();
+            this.loadAgendaConfirmed();
             this.playNotificationSound();
         });
         this.eventSource.addEventListener('agendaPendingConfirmed', () => {
             this.loadAgendaPending();
+            this.loadAgendaConfirmed();
+            if (this.activeConversation) {
+                this.refreshActiveConversationBlockStatus();
+            }
         });
         this.eventSource.addEventListener('agendaPendingCancelled', () => {
             this.loadAgendaPending();
+            this.loadAgendaConfirmed();
         });
 
         this.eventSource.addEventListener('incomingMessage', (event) => {

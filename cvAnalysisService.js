@@ -551,6 +551,28 @@ function buildPanelLeadExtraido(lead = {}) {
  */
 async function buildPanelAgendaExtras(cvId, opts = {}) {
   logAgenda('cv.buildPanelExtras.start', { cvId, provider: getProvider() });
+  // Descargar CV completo desde OCC (si aplica) antes de analizar y mandar a Panel
+  try {
+    const occCvFetchService = require('./occCvFetchService');
+    const occ = await occCvFetchService.ensureOccCvFetched(cvId);
+    if (occ && occ.occFetched && !occ.skipped) {
+      logAgenda('cv.buildPanelExtras.occFetched', {
+        cvId,
+        occUrl: occ.occUrl || null,
+        replaced: Boolean(occ.replaced)
+      });
+    } else if (occ && occ.occFetchFailed) {
+      warnAgenda('cv.buildPanelExtras.occFetchFailed', {
+        cvId,
+        error: occ.occFetchError || null
+      });
+    }
+  } catch (err) {
+    warnAgenda('cv.buildPanelExtras.occError', {
+      cvId,
+      message: err && err.message ? err.message : String(err)
+    });
+  }
   const enriched =
     (await ensureCvAnalyzed(cvId, { ...opts, force: true })) || null;
   const leadExtraido = buildPanelLeadExtraido(enriched || {});

@@ -279,6 +279,19 @@ function saveCvFile(buffer, originalName) {
   return { cvId, cvFileName };
 }
 
+/**
+ * Sobrescribe el PDF de un cvId existente (mismo path en disco).
+ * @param {string} cvId
+ * @param {Buffer} buffer
+ * @returns {boolean}
+ */
+function replaceCvFileBuffer(cvId, buffer) {
+  const meta = getCvFileMeta(cvId);
+  if (!meta || !Buffer.isBuffer(buffer) || buffer.length === 0) return false;
+  fs.writeFileSync(meta.filePath, buffer);
+  return true;
+}
+
 function resolveFilePath(cvId) {
   const id = String(cvId || '').trim();
   if (!/^[a-f0-9]{16,64}$/i.test(id)) return null;
@@ -408,7 +421,12 @@ function sanitizeCvForPersist(cv) {
     estado: cv.estado || cv.leadEstado || undefined,
     analysisProvider: cv.analysisProvider || undefined,
     inWorkspace: cv.inWorkspace !== false,
-    savedAt: cv.savedAt || new Date().toISOString()
+    savedAt: cv.savedAt || new Date().toISOString(),
+    occUrl: cv.occUrl || undefined,
+    occFetched: Boolean(cv.occFetched) || undefined,
+    occFetchFailed: Boolean(cv.occFetchFailed) || undefined,
+    occFetchError: cv.occFetchError || undefined,
+    occChecked: Boolean(cv.occChecked) || undefined
   };
 }
 
@@ -440,7 +458,12 @@ function hydrateStoredCv(cv) {
     estado: cv.estado || cv.leadEstado || undefined,
     analysisProvider: cv.analysisProvider || undefined,
     inWorkspace: cv.inWorkspace !== false,
-    savedAt: cv.savedAt || null
+    savedAt: cv.savedAt || null,
+    occUrl: cv.occUrl || undefined,
+    occFetched: Boolean(cv.occFetched) || undefined,
+    occFetchFailed: Boolean(cv.occFetchFailed) || undefined,
+    occFetchError: cv.occFetchError || undefined,
+    occChecked: Boolean(cv.occChecked) || undefined
   };
 }
 
@@ -608,6 +631,7 @@ module.exports = {
   archiveSentByPhones,
   mergeIncomingBatch,
   saveCvFile,
+  replaceCvFileBuffer,
   getCvFileMeta,
   readCvFileBuffer,
   getCvDisplayFilename,

@@ -47,8 +47,56 @@ function buildConfirmedMeetingReply(params = {}) {
   );
 }
 
+/**
+ * Confirmación tras mover una cita ya existente.
+ * @param {{ contactName?: string, fecha?: string, horaInicio?: string, urlReunion?: string|null, slotLabel?: string }} params
+ */
+function buildRescheduledMeetingReply(params = {}) {
+  const name = meetingFirstName(params.contactName);
+  const when = formatMeetingWhen(params);
+  const url = String(params.urlReunion || '').trim();
+  const lead = phraseWithName('Listo', name);
+
+  if (!url) {
+    return (
+      `${lead}. Movimos tu sesión a ${when}. ` +
+      `Si cambia la liga de Meet, te la envío por aquí en cuanto esté lista. ☺️`
+    );
+  }
+
+  return (
+    `${lead}. Movimos tu sesión a ${when}.\n` +
+    `Liga para unirte: ${url}\n\n` +
+    `Te recomiendo conectarte unos 5 minutos antes. ¡Nos vemos! ☺️`
+  );
+}
+
+/**
+ * No había cupo a la hora pedida; se ofrecen alternativas.
+ * @param {{ contactName?: string, requestedHint?: string, slotsText?: string }} params
+ */
+function buildNoSlotAtTimeReply(params = {}) {
+  const name = meetingFirstName(params.contactName);
+  const lead = phraseWithName('Entiendo', name);
+  const hint = String(params.requestedHint || '').trim();
+  const slotsText = String(params.slotsText || '').trim();
+  const whenPart = hint ? ` a las ${hint}` : ' a esa hora';
+  if (slotsText) {
+    return (
+      `${lead}. No tenemos disponibilidad${whenPart}. ` +
+      `¿Te acomoda alguno de estos horarios?\n${slotsText}`
+    );
+  }
+  return (
+    `${lead}. No tenemos disponibilidad${whenPart} por ahora. ` +
+    `¿Qué otro día o franja te funcionaría?`
+  );
+}
+
 module.exports = {
   meetingFirstName,
   formatMeetingWhen,
-  buildConfirmedMeetingReply
+  buildConfirmedMeetingReply,
+  buildRescheduledMeetingReply,
+  buildNoSlotAtTimeReply
 };

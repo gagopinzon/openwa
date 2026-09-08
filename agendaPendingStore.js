@@ -190,6 +190,80 @@ function findPendingByPhone(telefono) {
   );
 }
 
+/**
+ * Cita confirmada del lead (CONFIRMED), la más reciente si hay varias.
+ * @param {string} telefono
+ * @returns {object|null}
+ */
+function findConfirmedByPhone(telefono) {
+  const key = String(telefono || '').replace(/\D/g, '');
+  if (!key) return null;
+  const items = listPending({ status: STATUS.CONFIRMED }).filter(
+    (item) => String(item.telefono || '').replace(/\D/g, '') === key
+  );
+  if (!items.length) return null;
+  items.sort((a, b) => {
+    const ta = Date.parse(a.confirmedAt || a.createdAt || 0) || 0;
+    const tb = Date.parse(b.confirmedAt || b.createdAt || 0) || 0;
+    return tb - ta;
+  });
+  return items[0];
+}
+
+/**
+ * Actualiza horario/vendedor de una cita ya confirmada (reagendar).
+ * @param {string} id
+ * @param {{
+ *   fecha: string,
+ *   horaInicio: string,
+ *   horaFin: string,
+ *   label?: string|null,
+ *   vendedorId?: string|null,
+ *   gerenteEmail?: string|null,
+ *   urlReunion?: string|null,
+ *   candidateVendors?: object[]
+ * }} patch
+ */
+function rescheduleConfirmed(id, patch = {}) {
+  const current = getById(id);
+  if (!current) {
+    const err = new Error('Cita confirmada no encontrada');
+    err.status = 404;
+    throw err;
+  }
+  if (current.status !== STATUS.CONFIRMED) {
+    const err = new Error('La cita no está confirmada');
+    err.status = 409;
+    throw err;
+  }
+  const next = {
+    fecha: String(patch.fecha || current.fecha || '').trim(),
+    horaInicio: String(patch.horaInicio || current.horaInicio || '').trim(),
+    horaFin: String(patch.horaFin || current.horaFin || '').trim(),
+    label:
+      patch.label != null
+        ? String(patch.label || '').trim() || null
+        : current.label,
+    vendedorId:
+      patch.vendedorId != null
+        ? String(patch.vendedorId || '').trim() || null
+        : current.vendedorId,
+    gerenteEmail:
+      patch.gerenteEmail != null
+        ? String(patch.gerenteEmail || '').trim().toLowerCase() || null
+        : current.gerenteEmail,
+    urlReunion:
+      patch.urlReunion != null
+        ? String(patch.urlReunion || '').trim()
+        : current.urlReunion,
+    rescheduledAt: new Date().toISOString()
+  };
+  if (Array.isArray(patch.candidateVendors)) {
+    next.candidateVendors = patch.candidateVendors;
+  }
+  return updatePending(id, next);
+}
+
 function getById(id) {
   const sid = String(id || '').trim();
   if (!sid) return null;
@@ -238,8 +312,10 @@ module.exports = {
   listPending,
   getById,
   findPendingByPhone,
+  findConfirmedByPhone,
   updatePending,
   confirmPending,
+  rescheduleConfirmed,
   cancelPending,
   getHeldSlotKeys,
   findHoldOnSlot,

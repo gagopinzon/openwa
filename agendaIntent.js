@@ -58,6 +58,10 @@ const REJECT_RE =
 const BOOKING_INTEREST_RE =
   /\b(me interesa|si me interesa|sí me interesa|claro que si|claro que sí|quiero agendar|me gustaria agendar|me gustaría agendar|agendemos|cuando pueden|cuando podemos|cuándo pueden|cuándo podemos|quiero la sesion|quiero la sesión|me gustaria la sesion|me gustaría la sesión)\b/i;
 
+/** Quiere mover / cambiar una cita ya agendada. */
+const RESCHEDULE_INTENT_RE =
+  /\b(mover|reagendar|re[- ]?agendar|reprogram|cambiar|posponer|aplazar|otro\s+horario|otra\s+hora|otro\s+d[ií]a|cambiar\s+(la\s+)?(cita|reuni[oó]n|sesi[oó]n)|mover\s+(la\s+)?(cita|reuni[oó]n|sesi[oó]n)|no\s+(me\s+)?(puedo|puedo\s+a|queda)|ya\s+no\s+(puedo|me\s+queda))\b/i;
+
 /**
  * @param {Date} [now]
  * @returns {string} YYYY-MM-DD en CDMX
@@ -278,6 +282,17 @@ function looksLikeBookingInterest(text) {
 }
 
 /**
+ * El lead quiere mover / cambiar una cita ya agendada.
+ * @param {string} text
+ */
+function wantsRescheduleMeeting(text) {
+  const raw = foldAgendaText(text);
+  if (!raw.trim()) return false;
+  if (REJECT_RE.test(String(text || ''))) return false;
+  return RESCHEDULE_INTENT_RE.test(raw);
+}
+
+/**
  * ¿Debemos inyectar horarios reales en el prompt?
  * Solo cuando el lead pide agenda, confirma hora o dice explícitamente que le interesa agendar.
  * @param {string} text
@@ -286,6 +301,7 @@ function shouldOfferSlots(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
   if (REJECT_RE.test(raw)) return false;
+  if (wantsRescheduleMeeting(raw)) return true;
   if (looksLikeScheduleIntent(raw)) return true;
   if (hasExplicitTimeChoice(raw)) return true;
   if (looksLikeBookingInterest(raw)) return true;
@@ -715,6 +731,7 @@ module.exports = {
   formatClockContextForPrompt,
   looksLikeScheduleIntent,
   looksLikeBookingInterest,
+  wantsRescheduleMeeting,
   shouldOfferSlots,
   resolveDateRangeFromMessage,
   extractTimesFromMessage,
