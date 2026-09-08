@@ -80,10 +80,22 @@ function withOccLock(fn) {
 async function getBrowser() {
   if (!browserPromise) {
     const { chromium } = require('playwright');
-    browserPromise = chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage']
-    });
+    browserPromise = chromium
+      .launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-dev-shm-usage']
+      })
+      .catch((err) => {
+        browserPromise = null;
+        const msg = err && err.message ? String(err.message) : String(err);
+        if (/libnspr4|shared libraries|cannot open shared object/i.test(msg)) {
+          console.error(
+            '[occ-cv] Chromium no puede arrancar: faltan dependencias del sistema. ' +
+              'En el servidor ejecuta (con sudo): npx playwright install-deps chromium'
+          );
+        }
+        throw err;
+      });
   }
   return browserPromise;
 }
