@@ -77,7 +77,16 @@
     }
   ],
   "enabledSessionIds": null,
-  "webhookIdsBySession": {},
+  "webhookIdsBySession": {
+    "session1": "f6ff3969-0c1f-4dab-a524-0a08153ef92b",
+    "session3": "061571d0-c3e0-430e-9bc5-f387a29f66b2",
+    "session4": "bdf00d31-76dd-40c1-ac7e-ef3664af6dec",
+    "session5": "8cd7770a-75a6-41c6-8d10-63cdfb61b2e3",
+    "session6": "fe372139-415a-436c-a7b9-323a5c137545",
+    "session7": "7e5ff9fe-625d-4d3a-b5e3-0d0cda9e5be8",
+    "session8": "f1d0f66c-e8de-4ec0-9cfa-a382766b98bc",
+    "session9": "c229b84d-10a2-4b5c-af7a-95a35f5a3c06"
+  },
   "minDelayMs": null,
   "maxDelayMs": null
 }

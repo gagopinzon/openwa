@@ -31,6 +31,7 @@ const {
   getSessionStatus,
   isConnectedStatus,
   getContact,
+  getContactPhone,
   extractPhoneFromOpenWaContact,
   getChatHistory,
   downloadMessageMedia
@@ -697,8 +698,14 @@ function isLikelyLidPhone(phone, chatId) {
 
 /**
  * Intenta obtener teléfono real vía OpenWA; si solo hay LID, usa clave lid_*.
+ * @param {string} openwaSessionId
+ * @param {string} chatId
+ * @param {object} [msg]
+ * @param {{ getContact?: Function, getContactPhone?: Function }} [deps] - solo tests
  */
-async function resolveContactIdentity(openwaSessionId, chatId, msg) {
+async function resolveContactIdentity(openwaSessionId, chatId, msg, deps = {}) {
+  const getContactFn = deps.getContact || getContact;
+  const getContactPhoneFn = deps.getContactPhone || getContactPhone;
   const lidDigits = /@lid$/i.test(String(chatId || ''))
     ? extractPhoneFromChatId(chatId)
     : '';
@@ -713,9 +720,11 @@ async function resolveContactIdentity(openwaSessionId, chatId, msg) {
     };
   }
 
+  let contactName = null;
   if (openwaSessionId && chatId) {
     try {
-      const contact = await getContact(openwaSessionId, chatId);
+      const contact = await getContactFn(openwaSessionId, chatId);
+      contactName = contact.name || contact.pushName || null;
       const candidates = [
         contact.number,
         contact.phoneNumber,
@@ -734,14 +743,15 @@ async function resolveContactIdentity(openwaSessionId, chatId, msg) {
           normalized &&
           normalized.length >= 10 &&
           normalized !== lidDigits &&
-          !normalized.startsWith('2000')
+          !normalized.startsWith('2000') &&
+          !(normalized.length >= 14 && !/^(52|521|1)\d+$/.test(normalized))
         ) {
           return {
             normalizedPhone: normalized,
             chatId: String(chatId || ''),
             whatsappLid: lidDigits || null,
             resolvedFrom: 'openwa_contact',
-            name: contact.name || contact.pushName || null
+            name: contactName
           };
         }
       }
@@ -755,6 +765,36 @@ async function resolveContactIdentity(openwaSessionId, chatId, msg) {
     } catch (err) {
       console.warn(`[auto-reply] getContact falló chatId=${chatId}: ${err.message}`);
     }
+
+    // OpenWA: GET .../contacts/{@lid}/phone — convierte LID → E.164 cuando WhatsApp lo conoce.
+    if (lidDigits) {
+      try {
+        const resolved = contactHistory.normalizePhone(
+          await getContactPhoneFn(openwaSessionId, chatId)
+        );
+        if (
+          resolved &&
+          resolved.length >= 10 &&
+          resolved !== lidDigits &&
+          !resolved.startsWith('2000') &&
+          !(resolved.length >= 14 && !/^(52|521|1)\d+$/.test(resolved))
+        ) {
+          console.log(
+            `[auto-reply] LID→phone via /phone chatId=${chatId} phone=${resolved}`
+          );
+          return {
+            normalizedPhone: resolved,
+            chatId: String(chatId || ''),
+            whatsappLid: lidDigits,
+            resolvedFrom: 'openwa_lid_phone',
+            name: contactName
+          };
+        }
+        console.log(`[auto-reply] /phone sin resolución chatId=${chatId}`);
+      } catch (err) {
+        console.warn(`[auto-reply] /phone falló chatId=${chatId}: ${err.message}`);
+      }
+    }
   }
 
   if (lidDigits) {
@@ -762,7 +802,8 @@ async function resolveContactIdentity(openwaSessionId, chatId, msg) {
       normalizedPhone: `lid_${lidDigits}`,
       chatId: String(chatId || ''),
       whatsappLid: lidDigits,
-      resolvedFrom: 'lid_key'
+      resolvedFrom: 'lid_key',
+      name: contactName
     };
   }
 

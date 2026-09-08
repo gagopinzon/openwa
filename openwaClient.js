@@ -446,6 +446,8 @@ function extractPhoneFromOpenWaContact(data) {
     if (!digits || digits.length < 10) return '';
     // LIDs internos típicos: 2000… o muy largos sin pinta E.164 MX/US
     if (/^2000\d+$/.test(digits) && digits.length >= 13) return '';
+    // LID suele ser 14+ dígitos sin prefijo país; MX/US reales: 52… / 521… / 1…
+    if (digits.length >= 14 && !/^(52|521|1)\d+$/.test(digits)) return '';
     if (digits.length >= 15 && !/^(52|521|1)\d{10,12}$/.test(digits)) return '';
     return digits;
   };
@@ -458,15 +460,17 @@ function extractPhoneFromOpenWaContact(data) {
     if (seen.has(node)) continue;
     seen.add(node);
 
+    // Preferir JID @c.us: OpenWA a veces pone dígitos del LID en `number`
+    // aunque `id` ya sea el teléfono real @c.us.
     const direct = [
-      node.number,
+      node.id,
+      node.jid,
+      node.contactId,
       node.phoneNumber,
       node.phone,
       node.authorPhone,
       node.senderPhone,
-      node.id,
-      node.contactId,
-      node.jid
+      node.number
     ];
     for (const cand of direct) {
       const digits = normalizeCandidate(cand);
@@ -479,6 +483,35 @@ function extractPhoneFromOpenWaContact(data) {
   }
 
   return '';
+}
+
+/**
+ * Parsea GET /sessions/:id/contacts/:contactId/phone
+ * @param {unknown} data
+ * @param {string} [contactId] - para descartar phone === dígitos del @lid
+ * @returns {string} solo dígitos, o ''
+ */
+function parseOpenWaResolvedPhone(data, contactId = '') {
+  if (!data || typeof data !== 'object') return '';
+  const raw =
+    data.phone != null
+      ? data.phone
+      : data.phoneNumber != null
+        ? data.phoneNumber
+        : data.number != null
+          ? data.number
+          : '';
+  if (raw == null || raw === '') return '';
+  const digits = String(raw).replace(/\D/g, '');
+  if (!digits || digits.length < 10) return '';
+  if (/^2000\d+$/.test(digits) && digits.length >= 13) return '';
+  if (digits.length >= 14 && !/^(52|521|1)\d+$/.test(digits)) return '';
+
+  const lidHint = String(contactId || data.contactId || '')
+    .replace(/@.*$/, '')
+    .replace(/\D/g, '');
+  if (lidHint && digits === lidHint) return '';
+  return digits;
 }
 
 /**
@@ -520,6 +553,24 @@ async function getContact(openwaSessionId, contactId) {
     `/sessions/${openwaSessionId}/contacts/${encoded}`
   );
   return normalizeOpenWaContact(data, contactId);
+}
+
+/**
+ * Resuelve LID → teléfono real vía OpenWA.
+ * GET /sessions/:id/contacts/:contactId/phone
+ * @param {string} openwaSessionId
+ * @param {string} contactId - p.ej. 888…@lid
+ * @returns {Promise<string>} solo dígitos, o ''
+ */
+async function getContactPhone(openwaSessionId, contactId) {
+  const id = String(contactId || '').trim();
+  const encoded = encodeURIComponent(id);
+  if (!encoded) throw new Error('contactId es obligatorio');
+  const data = await openwaRequest(
+    'GET',
+    `/sessions/${openwaSessionId}/contacts/${encoded}/phone`
+  );
+  return parseOpenWaResolvedPhone(data, id);
 }
 
 /**
@@ -942,7 +993,9 @@ module.exports = {
   deleteMessage,
   deleteChat,
   getContact,
+  getContactPhone,
   extractPhoneFromOpenWaContact,
+  parseOpenWaResolvedPhone,
   normalizeOpenWaContact,
   blockContact,
   unblockContact,

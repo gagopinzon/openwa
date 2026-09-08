@@ -1,8 +1,9 @@
-const { describe, it } = require('node:test');
+const { describe, it, mock } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   extractPhoneFromOpenWaContact,
-  normalizeOpenWaContact
+  normalizeOpenWaContact,
+  parseOpenWaResolvedPhone
 } = require('../openwaClient');
 
 describe('extractPhoneFromOpenWaContact', () => {
@@ -46,6 +47,20 @@ describe('extractPhoneFromOpenWaContact', () => {
     );
   });
 
+  it('prefiere id @c.us cuando number trae dígitos del LID', () => {
+    // Respuesta real OpenWA: getContact(…@lid) a veces deja number=LID e id=@c.us
+    assert.equal(
+      extractPhoneFromOpenWaContact({
+        id: '5214424077709@c.us',
+        pushName: 'Abogada',
+        number: '88854568689898',
+        isMyContact: false,
+        isBlocked: false
+      }),
+      '5214424077709'
+    );
+  });
+
   it('normalizeOpenWaContact expone number en el objeto plano', () => {
     const normalized = normalizeOpenWaContact(
       { name: 'Luis', isBlocked: false, number: '5215511122233' },
@@ -56,5 +71,31 @@ describe('extractPhoneFromOpenWaContact', () => {
     assert.equal(normalized.name, 'Luis');
     assert.equal(normalized.id, '44508779647131@lid');
     assert.ok(normalized.raw);
+  });
+});
+
+describe('parseOpenWaResolvedPhone', () => {
+  it('lee phone string del endpoint /contacts/.../phone', () => {
+    assert.equal(
+      parseOpenWaResolvedPhone({ contactId: '88854568689898@lid', phone: '5214424077709' }),
+      '5214424077709'
+    );
+  });
+
+  it('devuelve vacío si phone es null', () => {
+    assert.equal(
+      parseOpenWaResolvedPhone({ contactId: '88854568689898@lid', phone: null }),
+      ''
+    );
+  });
+
+  it('ignora phone igual a dígitos del @lid', () => {
+    assert.equal(
+      parseOpenWaResolvedPhone({
+        contactId: '88854568689898@lid',
+        phone: '88854568689898'
+      }),
+      ''
+    );
   });
 });
