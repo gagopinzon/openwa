@@ -28,6 +28,11 @@ function readPanelCvBase64Payload(cvId) {
   };
 }
 
+function isFatalCvProbeStatus(status) {
+  const n = Number(status);
+  return n === 401 || n === 403 || n === 404;
+}
+
 /**
  * @param {string} cvId
  * @param {{ probeCvUrl?: (url: string) => Promise<object> }} [opts]
@@ -42,8 +47,26 @@ async function tryPublicUrlDelivery(cvId, opts = {}) {
 
   const probeFn = opts.probeCvUrl || probeCvPublicUrl;
   const probe = await probeFn(cvUrl);
-  if (!probe.ok) return null;
+  if (probe && probe.ok) {
+    return { delivery: 'url', cvUrl };
+  }
 
+  if (isFatalCvProbeStatus(probe && probe.status)) {
+    console.warn(
+      '[panel-cv] probe cvUrl fatal, no se envía URL:',
+      (probe && probe.status) || '',
+      (probe && probe.reason) || ''
+    );
+    return null;
+  }
+
+  // Hairpin NAT / timeout: este host no alcanza su propio dominio público;
+  // el panel en internet sí puede descargar.
+  console.warn(
+    '[panel-cv] probe local de cvUrl falló; se envía URL igual:',
+    (probe && probe.status) || '',
+    (probe && probe.reason) || 'sin respuesta'
+  );
   return { delivery: 'url', cvUrl };
 }
 

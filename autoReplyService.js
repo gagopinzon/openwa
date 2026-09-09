@@ -38,7 +38,7 @@ const {
   getChatHistory,
   downloadMessageMedia
 } = require('./openwaClient');
-const { buildConfirmedMeetingReply } = require('./agendaMeetMessages');
+const { buildConfirmedMeetingReply, buildConfirmFailedReply } = require('./agendaMeetMessages');
 const { isInboxPollEnabled, getInboxPollStatus } = require('./openwaInboxPoller');
 const messageBatcher = require('./messageBatcher');
 const replyDraftService = require('./replyDraftService');
@@ -1395,7 +1395,12 @@ async function finalizeAgendaBooking({
             error: error.message
           });
         } else {
-          replyText = buildConfirmFailedReply(contactName, chosen, error.message);
+          replyText = buildConfirmFailedReply({
+            contactName,
+            slotLabel: chosen.label,
+            fecha: chosen.fecha,
+            horaInicio: chosen.horaInicio
+          });
           agendaMeta = {
             reason: 'confirm_failed',
             error: error.message
@@ -2715,18 +2720,6 @@ function buildCvReceivedPendingReply(contactName, slot) {
   return (
     `${phraseWithName('Listo', contactName)}. Recibí tu CV y quedó anotada tu sesión para ${when}. ` +
     `En unos momentos te envío la liga de Meet por aquí. ☺️`
-  );
-}
-
-function buildConfirmFailedReply(contactName, slot, errorMessage) {
-  const when = slot.label || `${slot.fecha} ${slot.horaInicio}`;
-  const detail = String(errorMessage || '').trim();
-  const hint = detail
-    ? ` (${detail.slice(0, 120)})`
-    : '';
-  return (
-    `${phraseWithName('Gracias', contactName)}. Tu horario ${when} quedó registrado, pero hubo un problema al generar la liga${hint}. ` +
-    `Un asesor te contactará en breve para confirmar. 💙`
   );
 }
 

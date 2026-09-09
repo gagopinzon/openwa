@@ -84,4 +84,22 @@ describe('agendaMeetMessages', () => {
     });
     assert.match(nudge, /todavía no veo horarios/i);
   });
+
+  it('fallo de liga no filtra errores internos al lead', () => {
+    const { buildConfirmFailedReply } = require('../agendaMeetMessages');
+    const text = buildConfirmFailedReply({
+      contactName: 'Juan',
+      fecha: '2026-09-09',
+      horaInicio: '19:00',
+      slotLabel: 'mié 9 sep, 19:00',
+      errorMessage:
+        'El CV es demasiado grande para enviarlo en base64 al panel. Configura CV_PUBLIC_URL pública para que el panel descargue'
+    });
+    assert.match(text, /Gracias, Juan/);
+    assert.match(text, /mié 9 sep, 19:00/);
+    assert.match(text, /problema al generar la liga/);
+    assert.doesNotMatch(text, /CV_PUBLIC_URL/);
+    assert.doesNotMatch(text, /base64/);
+    assert.doesNotMatch(text, /413/);
+  });
 });

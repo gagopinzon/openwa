@@ -145,6 +145,19 @@ function buildWaitlistEmptyNudgeReply(params = {}) {
   );
 }
 
+/**
+ * Falló crear/confirmar la liga. Sin detalles técnicos (base64, CV_PUBLIC_URL, HTTP).
+ */
+function buildConfirmFailedReply(params = {}) {
+  const name = meetingFirstName(params.contactName);
+  const lead = phraseWithName('Gracias', name);
+  const when = formatMeetingWhen(params);
+  return (
+    `${lead}. Tu horario ${when} quedó registrado, pero hubo un problema al generar la liga. ` +
+    `Un asesor te contactará en breve para confirmar. 💙`
+  );
+}
+
 module.exports = {
   meetingFirstName,
   formatMeetingWhen,
@@ -153,5 +166,6 @@ module.exports = {
   buildNoSlotAtTimeReply,
   buildWaitlistSavedReply,
   buildWaitlistSlotsReply,
-  buildWaitlistEmptyNudgeReply
+  buildWaitlistEmptyNudgeReply,
+  buildConfirmFailedReply
 };

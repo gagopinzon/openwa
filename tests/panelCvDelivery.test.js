@@ -64,6 +64,26 @@ describe('panelCvDelivery', () => {
     );
   });
 
+  it('si el probe local falla por red, igual usa cvUrl pública', async () => {
+    process.env.CV_PUBLIC_URL = 'https://msg.protalentconnections.com';
+    process.env.PANEL_CV_MAX_BASE64_CHARS = '10';
+    const delivery = await resolvePanelCvDelivery(savedCvId, {
+      skipOccFetch: true,
+      probeCvUrl: async () => ({ ok: false, status: 0, reason: 'ECONNRESET' })
+    });
+    assert.equal(delivery.delivery, 'url');
+    assert.match(delivery.cvUrl, /^https:\/\/msg\.protalentconnections\.com\/api\/public\/cv\//);
+  });
+
+  it('si el probe da 401 no usa cvUrl', async () => {
+    process.env.CV_PUBLIC_URL = 'https://msg.protalentconnections.com';
+    const delivery = await resolvePanelCvDelivery(savedCvId, {
+      skipOccFetch: true,
+      probeCvUrl: async () => ({ ok: false, status: 401 })
+    });
+    assert.equal(delivery.delivery, 'base64');
+  });
+
   it('usa cvUrl solo si no se puede leer el archivo local', async () => {
     const originalRead = cvFileStore.readCvFileBuffer;
     cvFileStore.readCvFileBuffer = () => null;
