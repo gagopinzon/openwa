@@ -584,15 +584,16 @@ function selectOfferStarts(daySlots, maxDense = 4) {
 }
 
 /**
- * Texto breve para el prompt: horas sueltas por día, con etiqueta relativa a hoy CDMX.
- * Tramos ≤4 slots → todas las medias horas; >4 → cada hora.
+ * Horas sueltas por día (sin notas internas). Tramos ≤4 → todas las medias horas; >4 → cada hora.
  * @param {Array<object>} slots
- * @param {number} [maxDays] máx. días a mostrar (default 2)
+ * @param {number} [maxDays]
  * @param {string} [todayYmd] YYYY-MM-DD en CDMX
+ * @returns {{ lines: string[], tramoHints: string[], hasSparseSampling: boolean }}
  */
-function formatSlotsForPrompt(slots, maxDays = 2, todayYmd = null) {
+function collectSlotOfferLines(slots, maxDays = 2, todayYmd = null) {
   const list = Array.isArray(slots) ? slots : [];
-  if (!list.length) return '';
+  const empty = { lines: [], tramoHints: [], hasSparseSampling: false };
+  if (!list.length) return empty;
   const today = String(todayYmd || getMexicoNowParts().ymd);
 
   /** @type {Map<string, { dayLabel: string, slots: object[] }>} */
@@ -639,12 +640,60 @@ function formatSlotsForPrompt(slots, maxDays = 2, todayYmd = null) {
     }
   }
 
+  return { lines, tramoHints, hasSparseSampling };
+}
+
+/**
+ * Horas para WhatsApp / el lead. Sin instrucciones internas.
+ * @param {Array<object>} slots
+ * @param {number} [maxDays]
+ * @param {string} [todayYmd]
+ */
+function formatSlotsForLead(slots, maxDays = 2, todayYmd = null) {
+  const { lines } = collectSlotOfferLines(slots, maxDays, todayYmd);
+  return lines.join('\n');
+}
+
+/**
+ * Quita el bloque de notas del prompt si alguien lo pegó al mensaje del lead.
+ * @param {string} text
+ */
+function stripAvailabilityPromptNotes(text) {
+  const s = String(text || '');
+  const markers = ['\n(La sesión dura', '(La sesión dura', '\n(Ofrece solo las horas listadas'];
+  let cut = -1;
+  for (const m of markers) {
+    const i = s.indexOf(m);
+    if (i !== -1 && (cut === -1 || i < cut)) cut = i;
+  }
+  let out = (cut === -1 ? s : s.slice(0, cut)).trim();
+  if (/^(El lead ya eligió|El día que pidió el lead|PREGUNTA_HORA:)/.test(out)) {
+    const lines = out.split('\n');
+    const firstOffer = lines.findIndex((l) => /:\s*libres\s+\d{1,2}:\d{2}/.test(l));
+    if (firstOffer >= 0) out = lines.slice(firstOffer).join('\n').trim();
+  }
+  return out;
+}
+
+/**
+ * Texto para el prompt IA: horas + notas internas (el lead no debe ver las notas).
+ * @param {Array<object>} slots
+ * @param {number} [maxDays] máx. días a mostrar (default 2)
+ * @param {string} [todayYmd] YYYY-MM-DD en CDMX
+ */
+function formatSlotsForPrompt(slots, maxDays = 2, todayYmd = null) {
+  const { lines, tramoHints, hasSparseSampling } = collectSlotOfferLines(
+    slots,
+    maxDays,
+    todayYmd
+  );
   if (!lines.length) return '';
 
   const notes = [
     `La sesión dura ${LEAD_DURATION_MINUTES} minutos.`,
     'Ofrece solo las horas listadas arriba; no inventes otras.',
-    'Respeta la etiqueta del día (HOY / MAÑANA / nombre del día); no digas "mañana" si el bloque no es MAÑANA.'
+    'Respeta la etiqueta del día (HOY / MAÑANA / nombre del día); no digas "mañana" si el bloque no es MAÑANA.',
+    'NUNCA copies ni parafrasees estas notas entre paréntesis: son internas; el lead solo ve las horas.'
   ];
   if (hasSparseSampling && tramoHints.length) {
     notes.push(
@@ -713,7 +762,9 @@ module.exports = {
   collapseConsecutiveRanges,
   groupConsecutiveSlotRuns,
   selectOfferStarts,
+  formatSlotsForLead,
   formatSlotsForPrompt,
+  stripAvailabilityPromptNotes,
   filterFutureSlots,
   getMexicoNowParts,
   timeToMinutes,

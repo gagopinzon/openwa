@@ -78,6 +78,36 @@ describe('agendaIntent', () => {
     assert.equal(lun.fechaInicio, addDaysYmd(today, 2)); // sábado → lunes
   });
 
+  it('jueves 17 es el día 17, no las 17:00 del próximo jueves', () => {
+    const wed = new Date('2026-09-09T18:00:00Z'); // miércoles 9 sep CDMX
+    const jue17 = resolveDateRangeFromMessage('Jueves 17', wed);
+    assert.deepEqual(jue17, { fechaInicio: '2026-09-17', fechaFin: '2026-09-17' });
+    assert.deepEqual(resolveDateRangeFromMessage('el jueves 17 me sirve', wed), {
+      fechaInicio: '2026-09-17',
+      fechaFin: '2026-09-17'
+    });
+    assert.equal(extractTimesFromMessage('Jueves 17').length, 0);
+    assert.equal(hasExplicitTimeChoice('Jueves 17'), false);
+
+    const withTime = resolveDateRangeFromMessage('jueves 17:00', wed);
+    assert.deepEqual(withTime, { fechaInicio: '2026-09-10', fechaFin: '2026-09-10' });
+    assert.deepEqual(extractTimesFromMessage('jueves 17:00'), ['17:00']);
+  });
+
+  it('resuelve el 17 y 17 de septiembre', () => {
+    const wed = new Date('2026-09-09T18:00:00Z');
+    assert.deepEqual(resolveDateRangeFromMessage('el 17', wed), {
+      fechaInicio: '2026-09-17',
+      fechaFin: '2026-09-17'
+    });
+    assert.deepEqual(resolveDateRangeFromMessage('el 17 de septiembre', wed), {
+      fechaInicio: '2026-09-17',
+      fechaFin: '2026-09-17'
+    });
+    assert.equal(shouldOfferSlots('Jueves 17'), true);
+    assert.equal(shouldOfferSlots('el 17'), true);
+  });
+
   it('relativeDayLabel y reloj CDMX', () => {
     const {
       relativeDayLabel,

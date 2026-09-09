@@ -11,6 +11,8 @@ data/cvs-manifest.json
 data/super-profile.json
 data/agenda-offers.json
 data/agenda-pending.json
+data/agenda-waitlist.json
+data/agenda-waitlist.service.test.json
 data/auto-reply-config.json
 data/.deploy-backups/
 data/send-settings.json

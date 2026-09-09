@@ -1,4 +1,6 @@
 const { preferredFirstName, phraseWithName } = require('./preferredContactName');
+const { stripAvailabilityPromptNotes } = require('./agendaAvailability');
+const agendaIntent = require('./agendaIntent');
 
 /**
  * Mensajes de confirmación y entrega de liga Meet (WhatsApp).
@@ -80,7 +82,7 @@ function buildNoSlotAtTimeReply(params = {}) {
   const name = meetingFirstName(params.contactName);
   const lead = phraseWithName('Entiendo', name);
   const hint = String(params.requestedHint || '').trim();
-  const slotsText = String(params.slotsText || '').trim();
+  const slotsText = stripAvailabilityPromptNotes(params.slotsText);
   const whenPart = hint ? ` a las ${hint}` : ' a esa hora';
   if (slotsText) {
     return (
@@ -94,10 +96,62 @@ function buildNoSlotAtTimeReply(params = {}) {
   );
 }
 
+function waitlistDayPhrase(params = {}) {
+  const label = String(params.label || '').trim();
+  if (label) return label;
+  const fecha = String(params.fecha || '').trim();
+  const today = String(params.today || agendaIntent.todayYmd()).trim();
+  const rel = agendaIntent.relativeDayLabel(fecha, today);
+  return rel || fecha || 'ese día';
+}
+
+/**
+ * El día pedido no tiene horarios; se guarda espera.
+ */
+function buildWaitlistSavedReply(params = {}) {
+  const name = meetingFirstName(params.contactName);
+  const lead = phraseWithName('Entiendo', name);
+  const when = waitlistDayPhrase(params);
+  return (
+    `${lead}. ${when.charAt(0).toUpperCase()}${when.slice(1)} todavía no tenemos horarios cargados. ` +
+    `Te escribo por aquí en cuanto se abran. 💙`
+  );
+}
+
+/**
+ * Ya hay huecos para el día en espera.
+ */
+function buildWaitlistSlotsReply(params = {}) {
+  const name = meetingFirstName(params.contactName);
+  const lead = phraseWithName('Hola', name);
+  const when = waitlistDayPhrase(params);
+  const slotsText = stripAvailabilityPromptNotes(params.slotsText);
+  const hours = slotsText || 'ya hay espacios';
+  return (
+    `${lead}. Ya tenemos horarios para ${when}:\n${hours}\n¿Cuál te queda mejor? 💙`
+  );
+}
+
+/**
+ * Faltan ≤2 días y sigue sin huecos.
+ */
+function buildWaitlistEmptyNudgeReply(params = {}) {
+  const name = meetingFirstName(params.contactName);
+  const lead = phraseWithName('Hola', name);
+  const when = waitlistDayPhrase(params);
+  return (
+    `${lead}. Nos estamos acercando a ${when} y todavía no veo horarios cargados. ` +
+    `En cuanto existan te escribo por aquí. 💙`
+  );
+}
+
 module.exports = {
   meetingFirstName,
   formatMeetingWhen,
   buildConfirmedMeetingReply,
   buildRescheduledMeetingReply,
-  buildNoSlotAtTimeReply
+  buildNoSlotAtTimeReply,
+  buildWaitlistSavedReply,
+  buildWaitlistSlotsReply,
+  buildWaitlistEmptyNudgeReply
 };

@@ -50,6 +50,7 @@ const {
 const contactHistory = require('./contactHistoryStore');
 const autoReplyService = require('./autoReplyService');
 const autoReplyStore = require('./autoReplyStore');
+const agendaWaitlistService = require('./agendaWaitlistService');
 const incomingMessagesStore = require('./incomingMessagesStore');
 const openwaInboxPoller = require('./openwaInboxPoller');
 const hermesBridge = require('./hermesBridge');
@@ -5745,6 +5746,7 @@ app.listen(PORT, () => {
     listChats,
     getChatHistory
   });
+  agendaWaitlistService.startWaitlistPoller();
 });
 
 module.exports = app;

@@ -4,6 +4,7 @@ const { SENDER_PLACEHOLDER } = require('./messageSignature');
 const ollamaService = require('./ollamaService');
 const { preferredFirstName, phraseWithName } = require('./preferredContactName');
 const agendaIntent = require('./agendaIntent');
+const { stripAvailabilityPromptNotes } = require('./agendaAvailability');
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const API_KEY = process.env.DEEPSEEK_API_KEY;
@@ -32,7 +33,9 @@ function cleanReplyText(message) {
       break;
     }
   }
-  return text.replace(/\n*\s*Atte:\s*\n?[\s\S]*$/i, '').trim();
+  return stripAvailabilityPromptNotes(
+    text.replace(/\n*\s*Atte:\s*\n?[\s\S]*$/i, '').trim()
+  );
 }
 
 const GREETING_TEMPLATES = [
@@ -724,7 +727,9 @@ async function generateReplyMessage({
       if (String(agendaContext).startsWith('PREGUNTA_HORA:')) {
         return `${hi}¿Qué horario te acomoda mejor?`;
       }
-      return `${hi}te comparto los espacios disponibles:\n${agendaContext}\n¿Cuál de estos horarios te acomoda mejor? ☺️`;
+      return `${hi}te comparto los espacios disponibles:\n${stripAvailabilityPromptNotes(
+        agendaContext
+      )}\n¿Cuál de estos horarios te acomoda mejor? ☺️`;
     }
     return sanitizeAgainstCvAsk(
       generateBasicReply({
@@ -752,6 +757,7 @@ async function generateReplyMessage({
 - "mañana" = día siguiente; "en la mañana"/"de la mañana" = periodo AM, no el día.
 - Si el sistema ya envió un PDF de CV para confirmar, no vuelvas a pedir el horario; espera que diga sí o envíe otro PDF.
 - Ofrece las horas listadas en HORARIOS REALES tal cual (lista de horas libres, no rangos "de X a Y").
+- NUNCA copies ni parafrasees las notas entre paréntesis de HORARIOS REALES (son instrucciones internas; el lead solo ve las horas).
 - Si el lead pide algo ENTRE dos horas ofrecidas (ej. "¿tienes entre las 10 y las 11?") y en las notas hay un tramo real que lo cubre, sugiere la media hora (ej. "¿te queda a las 10:30?").
 - La sesión es de 15 minutos.
 - NUNCA inventes horas ni digas nombres de vendedores.

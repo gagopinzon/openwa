@@ -48,14 +48,18 @@ function buildHeaders(gerenteEmail) {
 function normalizePanelError(error) {
   const status = error.response?.status || error.status || 502;
   const data = error.response?.data;
-  const message =
+  const rawMessage =
     (data && typeof data === 'object' && data.message) ||
     error.message ||
     'Error al llamar al panel';
+  const message =
+    Number(status) === 413
+      ? 'El CV es demasiado grande para crearlo en el panel'
+      : rawMessage;
 
   const out = new Error(message);
   out.status = status;
-  out.panelBody = data && typeof data === 'object' ? data : { message };
+  out.panelBody = data && typeof data === 'object' ? data : { message: rawMessage };
   if (data && typeof data === 'object' && data.leadExtraido) {
     out.leadExtraido = data.leadExtraido;
   }

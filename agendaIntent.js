@@ -48,6 +48,40 @@ const WEEKDAY_NAMES = {
   sáb: 6
 };
 
+const MONTH_NUM = {
+  enero: 1,
+  ene: 1,
+  febrero: 2,
+  feb: 2,
+  marzo: 3,
+  mar: 3,
+  abril: 4,
+  abr: 4,
+  mayo: 5,
+  junio: 6,
+  jun: 6,
+  julio: 7,
+  jul: 7,
+  agosto: 8,
+  ago: 8,
+  septiembre: 9,
+  setiembre: 9,
+  sep: 9,
+  sept: 9,
+  octubre: 10,
+  oct: 10,
+  noviembre: 11,
+  nov: 11,
+  diciembre: 12,
+  dic: 12
+};
+
+const MONTH_NAME_RE =
+  'enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|abr|jun|jul|ago|sep|sept|oct|nov|dic|mar';
+
+const WEEKDAY_FULL_RE =
+  'domingo|lunes|martes|miercoles|jueves|viernes|sabado';
+
 const SCHEDULE_RE =
   /\b(agendar|agenda|cita|disponib|horario|horarios|mañana|manana|hoy|esta\s+semana|próxim|proxim|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo|\d{1,2}:\d{2}|\d{1,2}\s*(am|pm)|a\s+las)\b/i;
 
@@ -305,7 +339,113 @@ function shouldOfferSlots(text) {
   if (looksLikeScheduleIntent(raw)) return true;
   if (hasExplicitTimeChoice(raw)) return true;
   if (looksLikeBookingInterest(raw)) return true;
+  if (resolveCalendarDateFromMessage(raw)) return true;
   return false;
+}
+
+function daysBetweenYmd(fromYmd, toYmd) {
+  const [y1, m1, d1] = String(fromYmd).split('-').map(Number);
+  const [y2, m2, d2] = String(toYmd).split('-').map(Number);
+  const a = Date.UTC(y1, m1 - 1, d1);
+  const b = Date.UTC(y2, m2 - 1, d2);
+  return Math.round((b - a) / 86400000);
+}
+
+function dayNumOfYmd(ymd) {
+  return Number(String(ymd).slice(8, 10));
+}
+
+function nextYmdMatching(today, pred, maxDays = 62) {
+  for (let i = 0; i <= maxDays; i += 1) {
+    const d = addDaysYmd(today, i);
+    if (pred(d)) return d;
+  }
+  return null;
+}
+
+function civilYmd(year, month, day) {
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (
+    dt.getUTCFullYear() !== year ||
+    dt.getUTCMonth() !== month - 1 ||
+    dt.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  return `${year}-${mm}-${dd}`;
+}
+
+/**
+ * "17 de septiembre" / "17 de sep"
+ * @param {string} raw folded
+ * @param {string} today
+ */
+function resolveDayMonthFromMessage(raw, today) {
+  const re = new RegExp(`\\b(\\d{1,2})\\s+de\\s+(${MONTH_NAME_RE})\\b`);
+  const m = re.exec(raw);
+  if (!m) return null;
+  const day = Number(m[1]);
+  const month = MONTH_NUM[m[2]];
+  if (!Number.isFinite(day) || day < 1 || day > 31 || !month) return null;
+  const year = Number(String(today).slice(0, 4));
+  let ymd = civilYmd(year, month, day);
+  if (!ymd) return null;
+  if (ymd < today) {
+    ymd = civilYmd(year + 1, month, day);
+  }
+  if (!ymd) return null;
+  return { fechaInicio: ymd, fechaFin: ymd };
+}
+
+/**
+ * "jueves 17" (no "jueves 17:00")
+ * @param {string} raw folded
+ * @param {string} today
+ */
+function resolveWeekdayDayOfMonth(raw, today) {
+  const re = new RegExp(`\\b(${WEEKDAY_FULL_RE})\\s+(\\d{1,2})\\b(?!\\s*:)`);
+  const m = re.exec(raw);
+  if (!m) return null;
+  const wantDow = WEEKDAY_NAMES[m[1]];
+  const wantDay = Number(m[2]);
+  if (!Number.isFinite(wantDow) || !Number.isFinite(wantDay) || wantDay < 1 || wantDay > 31) {
+    return null;
+  }
+  const withBoth = nextYmdMatching(
+    today,
+    (d) => dayNumOfYmd(d) === wantDay && weekdayOfYmd(d) === wantDow
+  );
+  const ymd =
+    withBoth || nextYmdMatching(today, (d) => dayNumOfYmd(d) === wantDay);
+  if (!ymd) return null;
+  return { fechaInicio: ymd, fechaFin: ymd };
+}
+
+/**
+ * "el 17" (días 8–31 para no pelear con "opción 2")
+ * @param {string} raw folded
+ * @param {string} today
+ */
+function resolveElDayOfMonth(raw, today) {
+  const m = /\bel\s+([89]|[12]\d|3[01])\b(?!\s*:)/.exec(raw);
+  if (!m) return null;
+  const wantDay = Number(m[1]);
+  const ymd = nextYmdMatching(today, (d) => dayNumOfYmd(d) === wantDay);
+  if (!ymd) return null;
+  return { fechaInicio: ymd, fechaFin: ymd };
+}
+
+function resolveCalendarDateFromMessage(text, now = new Date()) {
+  const raw = foldAgendaText(text);
+  if (!raw.trim()) return null;
+  const today = todayYmd(now);
+  return (
+    resolveDayMonthFromMessage(raw, today) ||
+    resolveWeekdayDayOfMonth(raw, today) ||
+    resolveElDayOfMonth(raw, today)
+  );
 }
 
 /**
@@ -350,6 +490,15 @@ function resolveDateRangeFromMessage(text, now = new Date()) {
   if (/\besta\s+semana\b/.test(raw) || /\bproxim[oa]s?\s+dias?\b/.test(raw)) {
     return { fechaInicio: today, fechaFin: addDaysYmd(today, 6) };
   }
+
+  const monthHit = resolveDayMonthFromMessage(raw, today);
+  if (monthHit) return monthHit;
+
+  const weekdayDom = resolveWeekdayDayOfMonth(raw, today);
+  if (weekdayDom) return weekdayDom;
+
+  const elDay = resolveElDayOfMonth(raw, today);
+  if (elDay) return elDay;
 
   for (const [name, targetDow] of Object.entries(WEEKDAY_NAMES)) {
     const nameNorm = name
@@ -742,5 +891,7 @@ module.exports = {
   lastBotProposalText,
   userMentionsSendingCv,
   matchSlotFromMessage,
-  slotIdentity
+  slotIdentity,
+  daysBetweenYmd,
+  resolveCalendarDateFromMessage
 };

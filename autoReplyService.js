@@ -15,6 +15,8 @@ const agendaCvConfirm = require('./agendaCvConfirm');
 const agendaConfirmService = require('./agendaConfirmService');
 const agendaRescheduleService = require('./agendaRescheduleService');
 const agendaMeetDeliveryService = require('./agendaMeetDeliveryService');
+const agendaWaitlistService = require('./agendaWaitlistService');
+const agendaWaitlistStore = require('./agendaWaitlistStore');
 const agendaLeadFields = require('./agendaLeadFields');
 const cvIngestService = require('./cvIngestService');
 const cvFileStore = require('./cvFileStore');
@@ -1261,6 +1263,7 @@ async function finalizeAgendaBooking({
   });
   agendaOfferStore.clearOffer(normalizedPhone);
   agendaAwaitingCvStore.clearAwaiting(normalizedPhone);
+  agendaWaitlistStore.cancelByPhone(normalizedPhone, 'booked');
 
   let replyText = buildPendingCreatedReply(contactName, chosen);
   let agendaMeta = { reason: 'pending_created', pendingId: pending.id };
@@ -2258,6 +2261,49 @@ async function processBatchedAutoReply(items, opts = {}) {
     if (
       !replyText &&
       agendaIntent.shouldOfferSlots(body) &&
+      !skipReslotOnYes
+    ) {
+      try {
+        const todayWl = agendaIntent.todayYmd();
+        const rangeWl = agendaIntent.resolveDateRangeFromMessage(body);
+        if (
+          rangeWl &&
+          rangeWl.fechaInicio === rangeWl.fechaFin &&
+          rangeWl.fechaInicio >= todayWl
+        ) {
+          const sameDayBooked =
+            (existingPending && String(existingPending.fecha) === rangeWl.fechaInicio) ||
+            (existingConfirmed && String(existingConfirmed.fecha) === rangeWl.fechaInicio);
+          if (!sameDayBooked) {
+            const aggregatedWl = await agendaAvailability.getAggregatedSlotsCached({
+              fechaInicio: rangeWl.fechaInicio,
+              fechaFin: rangeWl.fechaFin
+            });
+            const wait = agendaWaitlistService.enqueuePinnedDayIfEmpty({
+              range: rangeWl,
+              today: todayWl,
+              slots: aggregatedWl.slots || [],
+              telefono: normalizedPhone,
+              chatId: (identity && identity.chatId) || chatId,
+              openwaSessionId,
+              logicalSessionId,
+              contactName: contactDisplayName,
+              cvId
+            });
+            if (wait) {
+              replyText = wait.replyText;
+              agendaMeta = wait.agendaMeta;
+              console.log(`[auto-reply] agenda waitlist ${rangeWl.fechaInicio}`);
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('[auto-reply] agenda waitlist error:', error.message);
+      }
+    }
+    if (
+      !replyText &&
+      agendaIntent.shouldOfferSlots(body) &&
       !skipReslotOnYes &&
       !existingPending &&
       !existingConfirmed
@@ -2277,23 +2323,25 @@ async function processBatchedAutoReply(items, opts = {}) {
         });
         let slots = aggregated.slots || [];
         let noSlotsThatDay = false;
-        // Si pidió un día/rango y ya no hay huecos futuros, pasar a próximos días
+        // Día concreto futuro vacío: ya se encoló waitlist; no ofrecer esta semana.
         if (!slots.length) {
           noSlotsThatDay = pinnedOneDay;
-          const from =
-            range.fechaInicio <= today
-              ? agendaIntent.addDaysYmd(today, 1)
-              : range.fechaInicio;
-          aggregated = await agendaAvailability.getAggregatedSlotsCached({
-            fechaInicio: from,
-            fechaFin: agendaIntent.addDaysYmd(from, 6)
-          });
-          slots = aggregated.slots || [];
-          agendaMeta = {
-            reason: 'slots_wider_range',
-            gerentesConsultados: aggregated.gerentesConsultados,
-            erroresGerente: aggregated.erroresGerente
-          };
+          if (!(pinnedOneDay && range.fechaInicio >= today)) {
+            const from =
+              range.fechaInicio <= today
+                ? agendaIntent.addDaysYmd(today, 1)
+                : range.fechaInicio;
+            aggregated = await agendaAvailability.getAggregatedSlotsCached({
+              fechaInicio: from,
+              fechaFin: agendaIntent.addDaysYmd(from, 6)
+            });
+            slots = aggregated.slots || [];
+            agendaMeta = {
+              reason: 'slots_wider_range',
+              gerentesConsultados: aggregated.gerentesConsultados,
+              erroresGerente: aggregated.erroresGerente
+            };
+          }
         } else {
           agendaMeta = {
             reason: 'slots_offered',

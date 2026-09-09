@@ -2,7 +2,10 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildConfirmedMeetingReply,
-  buildNoSlotAtTimeReply
+  buildNoSlotAtTimeReply,
+  buildWaitlistSavedReply,
+  buildWaitlistSlotsReply,
+  buildWaitlistEmptyNudgeReply
 } = require('../agendaMeetMessages');
 
 describe('agendaMeetMessages', () => {
@@ -48,5 +51,37 @@ describe('agendaMeetMessages', () => {
     assert.doesNotMatch(text, /no inventes otras/);
     assert.doesNotMatch(text, /Tramos reales/);
     assert.doesNotMatch(text, /para si el lead pide/);
+  });
+
+  it('waitlist: avisa sin listar horas de esta semana', () => {
+    const text = buildWaitlistSavedReply({
+      contactName: 'Jhonatan',
+      fecha: '2026-09-17',
+      today: '2026-09-09'
+    });
+    assert.match(text, /Entiendo, Jhonatan/);
+    assert.match(text, /jueves 17/i);
+    assert.match(text, /todavía no tenemos horarios/i);
+    assert.doesNotMatch(text, /08:00/);
+    assert.doesNotMatch(text, /jueves 10/i);
+  });
+
+  it('waitlist: oferta de huecos y nudge vacío', () => {
+    const slots = buildWaitlistSlotsReply({
+      contactName: 'Jhonatan',
+      fecha: '2026-09-17',
+      today: '2026-09-09',
+      slotsText: 'JUEVES 17 sep: libres 10:00, 17:00\n(La sesión dura 15 minutos. no inventes otras.)'
+    });
+    assert.match(slots, /Ya tenemos horarios/);
+    assert.match(slots, /10:00/);
+    assert.doesNotMatch(slots, /no inventes otras/);
+
+    const nudge = buildWaitlistEmptyNudgeReply({
+      contactName: 'Jhonatan',
+      fecha: '2026-09-17',
+      today: '2026-09-15'
+    });
+    assert.match(nudge, /todavía no veo horarios/i);
   });
 });

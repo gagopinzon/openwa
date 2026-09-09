@@ -237,7 +237,7 @@ async function handleReschedule({
         agendaOfferStore.rememberOffer(phone, slots);
       }
       const publicList = agendaAvailability.publicSlots(slots, 6);
-      const slotsText = agendaAvailability.formatSlotsForPrompt(publicList, 3);
+      const slotsText = agendaAvailability.formatSlotsForLead(publicList, 3);
       const times = agendaIntent.extractTimesFromMessage(body);
       const requestedHint = times && times.length ? times[0] : '';
 

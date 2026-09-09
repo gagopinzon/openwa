@@ -27,6 +27,7 @@ describe('panelMeetUtils', () => {
   it('detecta errores reintentables del panel', () => {
     assert.equal(isRetryablePanelError(new Error('timeout al procesar el cv')), true);
     assert.equal(isRetryablePanelError({ status: 409, message: 'ocupado' }), false);
+    assert.equal(isRetryablePanelError({ status: 413, message: 'Request failed with status code 413' }), false);
   });
 
   it('no reintenta 400 por 401 al descargar el CV', () => {
