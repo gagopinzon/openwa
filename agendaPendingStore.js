@@ -1,7 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { slotKey } = require('./agendaAvailability');
+const {
+  slotKey,
+  intervalsOverlap,
+  timeToMinutes
+} = require('./agendaAvailability');
 
 const DATA_DIR = path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'agenda-pending.json');
@@ -68,13 +72,34 @@ function getHeldSlotKeys() {
 }
 
 /**
+ * Intervalos apartados (pending_link) para filtrar por solape.
+ * @returns {Array<{ fecha: string, horaInicio: string, horaFin: string, id: string }>}
+ */
+function getHeldIntervals() {
+  return listPending({ status: STATUS.PENDING_LINK })
+    .map((item) => ({
+      id: item.id,
+      fecha: String(item.fecha || '').trim(),
+      horaInicio: String(item.horaInicio || '').trim(),
+      horaFin: String(item.horaFin || '').trim()
+    }))
+    .filter(
+      (h) =>
+        h.fecha &&
+        h.horaInicio &&
+        h.horaFin &&
+        Number.isFinite(timeToMinutes(h.horaInicio)) &&
+        Number.isFinite(timeToMinutes(h.horaFin))
+    );
+}
+
+/**
  * @param {string} fecha
  * @param {string} horaInicio
  * @param {string} horaFin
  * @param {{ exceptId?: string, exceptTelefono?: string }} [opts]
  */
 function findHoldOnSlot(fecha, horaInicio, horaFin, opts = {}) {
-  const key = slotKey(fecha, horaInicio, horaFin);
   return (
     listPending({ status: STATUS.PENDING_LINK }).find((item) => {
       if (opts.exceptId && item.id === opts.exceptId) return false;
@@ -85,7 +110,14 @@ function findHoldOnSlot(fecha, horaInicio, horaFin, opts = {}) {
       ) {
         return false;
       }
-      return slotKey(item.fecha, item.horaInicio, item.horaFin) === key;
+      return intervalsOverlap(
+        fecha,
+        horaInicio,
+        horaFin,
+        item.fecha,
+        item.horaInicio,
+        item.horaFin
+      );
     }) || null
   );
 }
@@ -318,6 +350,7 @@ module.exports = {
   rescheduleConfirmed,
   cancelPending,
   getHeldSlotKeys,
+  getHeldIntervals,
   findHoldOnSlot,
   isSlotHeld
 };

@@ -32,14 +32,15 @@ function buildConfirmedMeetingReply(params = {}) {
   if (!url) {
     return (
       `${lead}. Tu sesión con uno de nuestros asesores quedó para ${when}. ` +
-      `En un momento te envío la liga por aquí.\n\n` +
+      `Dura unos 15 minutos. En un momento te envío la liga por aquí.\n\n` +
       `Cuando la recibas, te sugiero conectarte unos 5 minutos antes para revisar audio y video sin prisa. ` +
       `Será un espacio cercano: siéntete en confianza para preguntar todo lo que necesites sobre tu carrera. ☺️`
     );
   }
 
   return (
-    `${lead}. Tu sesión con uno de nuestros asesores quedó para ${when}.\n` +
+    `${lead}. Tu sesión con uno de nuestros asesores quedó para ${when}. ` +
+    `Dura unos 15 minutos.\n` +
     `Liga para unirte: ${url}\n\n` +
     `Te recomiendo conectarte unos 5 minutos antes para revisar audio y video sin prisa. ` +
     `Es un espacio tranquilo: siéntete en total confianza para preguntar lo que necesites; estamos para ayudarte.\n\n` +

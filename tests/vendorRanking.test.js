@@ -49,6 +49,17 @@ describe('vendorRanking', () => {
     assert.equal(vendorHasSlot(v, '2026-09-08', '11:00', '11:30'), false);
   });
 
+  it('vendorHasSlot cubre bloque de 45 min con dos medias horas', () => {
+    const v = {
+      disponibilidad: [
+        { fecha: '2026-09-08', horaInicio: '10:00', horaFin: '10:30' },
+        { fecha: '2026-09-08', horaInicio: '10:30', horaFin: '11:00' }
+      ]
+    };
+    assert.equal(vendorHasSlot(v, '2026-09-08', '10:00', '10:45'), true);
+    assert.equal(vendorHasSlot(v, '2026-09-08', '10:30', '11:15'), false);
+  });
+
   it('rankVendorsForSlot: orden por ratio y excluye sin slot', () => {
     const panelIndex = indexPanelVendors([
       {

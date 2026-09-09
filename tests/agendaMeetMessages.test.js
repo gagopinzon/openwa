@@ -11,6 +11,7 @@ describe('agendaMeetMessages', () => {
       urlReunion: 'https://meet.google.com/abc-defg-hij'
     });
     assert.match(text, /5 minutos antes/i);
+    assert.match(text, /15 minutos/i);
     assert.match(text, /confianza/i);
     assert.match(text, /meet\.google\.com/);
     assert.match(text, /asesor/i);
@@ -23,6 +24,7 @@ describe('agendaMeetMessages', () => {
       horaInicio: '10:00'
     });
     assert.match(text, /en un momento te envío la liga/i);
+    assert.match(text, /15 minutos/i);
     assert.match(text, /5 minutos antes/i);
     assert.doesNotMatch(text, /¡Nos vemos!$/);
   });

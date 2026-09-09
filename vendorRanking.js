@@ -80,15 +80,49 @@ function vendorHasSlot(vendor, fecha, horaInicio, horaFin) {
   const f = String(fecha || '').trim();
   const hi = String(horaInicio || '').trim();
   const hf = String(horaFin || '').trim();
+  const startMin = timeToMinutes(hi);
+  const endMin = timeToMinutes(hf);
+  if (!f || !Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+    return false;
+  }
   const slots = Array.isArray(vendor && vendor.disponibilidad)
     ? vendor.disponibilidad
     : [];
-  return slots.some(
-    (s) =>
-      String(s.fecha || '').trim() === f &&
-      String(s.horaInicio || '').trim() === hi &&
-      String(s.horaFin || '').trim() === hf
-  );
+  /** @type {Array<[number, number]>} */
+  const intervals = [];
+  for (const s of slots) {
+    if (String(s.fecha || '').trim() !== f) continue;
+    const a = timeToMinutes(s.horaInicio);
+    const b = timeToMinutes(s.horaFin);
+    if (Number.isFinite(a) && Number.isFinite(b) && b > a) {
+      intervals.push([a, b]);
+    }
+  }
+  return coversInterval(intervals, startMin, endMin);
+}
+
+function timeToMinutes(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
+  if (!m) return NaN;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+/**
+ * @param {Array<[number, number]>} intervals
+ * @param {number} startMin
+ * @param {number} endMin
+ */
+function coversInterval(intervals, startMin, endMin) {
+  const sorted = [...(intervals || [])]
+    .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a)
+    .sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  let coveredUntil = startMin;
+  for (const [a, b] of sorted) {
+    if (a > coveredUntil) break;
+    if (b > coveredUntil) coveredUntil = b;
+    if (coveredUntil >= endMin) return true;
+  }
+  return coveredUntil >= endMin;
 }
 
 /**

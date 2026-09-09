@@ -10,7 +10,10 @@ const {
   selectOfferStarts,
   formatSlotsForPrompt,
   filterFutureSlots,
-  getMexicoNowParts
+  getMexicoNowParts,
+  buildBookableVendorBlockSlots,
+  intervalsOverlap,
+  LEAD_DURATION_MINUTES
 } = require('../agendaAvailability');
 
 describe('agendaAvailability', () => {
@@ -147,9 +150,107 @@ describe('agendaAvailability', () => {
     assert.match(text, /libres 09:00, 09:30/);
     assert.doesNotMatch(text, /disponible de /);
     assert.doesNotMatch(text, /11:00/);
-    assert.match(text, /15 minutos/);
+    assert.match(text, new RegExp(`${LEAD_DURATION_MINUTES} minutos`));
     assert.match(text, /Tramos reales/);
     assert.match(text, /10:30/);
+  });
+
+  it('buildBookableVendorBlockSlots: solo starts con 45 min libres del mismo vendedor', () => {
+    const atomic = [
+      {
+        fecha: '2026-09-09',
+        horaInicio: '10:00',
+        horaFin: '10:30',
+        candidates: [
+          { vendedorId: 'v1', gerenteEmail: 'g@x.com' },
+          { vendedorId: 'v2', gerenteEmail: 'g@x.com' }
+        ]
+      },
+      {
+        fecha: '2026-09-09',
+        horaInicio: '10:30',
+        horaFin: '11:00',
+        candidates: [{ vendedorId: 'v1', gerenteEmail: 'g@x.com' }]
+      },
+      {
+        fecha: '2026-09-09',
+        horaInicio: '11:00',
+        horaFin: '11:30',
+        candidates: [{ vendedorId: 'v2', gerenteEmail: 'g@x.com' }]
+      }
+    ];
+    const bookable = buildBookableVendorBlockSlots(atomic, 45);
+    assert.equal(bookable.length, 1);
+    assert.equal(bookable[0].horaInicio, '10:00');
+    assert.equal(bookable[0].horaFin, '10:45');
+    assert.deepEqual(
+      bookable[0].candidates.map((c) => c.vendedorId),
+      ['v1']
+    );
+    assert.equal(bookable[0].leadDurationMinutes, 15);
+  });
+
+  it('buildBookableVendorBlockSlots: ofrece medias horas si hay bloque de 45 min', () => {
+    const atomic = [
+      {
+        fecha: '2026-09-09',
+        horaInicio: '10:00',
+        horaFin: '10:30',
+        candidates: [{ vendedorId: 'v1', gerenteEmail: 'g@x.com' }]
+      },
+      {
+        fecha: '2026-09-09',
+        horaInicio: '10:30',
+        horaFin: '11:00',
+        candidates: [{ vendedorId: 'v1', gerenteEmail: 'g@x.com' }]
+      },
+      {
+        fecha: '2026-09-09',
+        horaInicio: '11:00',
+        horaFin: '11:30',
+        candidates: [{ vendedorId: 'v1', gerenteEmail: 'g@x.com' }]
+      },
+      {
+        fecha: '2026-09-09',
+        horaInicio: '11:30',
+        horaFin: '12:00',
+        candidates: [{ vendedorId: 'v1', gerenteEmail: 'g@x.com' }]
+      }
+    ];
+    const bookable = buildBookableVendorBlockSlots(atomic, 45);
+    assert.deepEqual(
+      bookable.map((s) => s.horaInicio),
+      ['10:00', '10:30', '11:00']
+    );
+    assert.deepEqual(
+      bookable.map((s) => s.horaFin),
+      ['10:45', '11:15', '11:45']
+    );
+  });
+
+  it('intervalsOverlap detecta cruce de 30 y 60 min', () => {
+    assert.equal(
+      intervalsOverlap(
+        '2026-09-09',
+        '10:00',
+        '11:00',
+        '2026-09-09',
+        '10:30',
+        '11:00'
+      ),
+      true
+    );
+    assert.equal(
+      intervalsOverlap(
+        '2026-09-09',
+        '10:00',
+        '11:00',
+        '2026-09-09',
+        '11:00',
+        '12:00'
+      ),
+      false
+    );
   });
 
   it('filterFutureSlots quita horas ya pasadas el mismo día', () => {

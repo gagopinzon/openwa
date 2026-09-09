@@ -1,6 +1,11 @@
 const panelMsgClient = require('./panelMsgClient');
 const usersStore = require('./usersStore');
 
+/** Minutos que se bloquean al vendedor / Panel al apartar. */
+const VENDOR_BLOCK_MINUTES = 45;
+/** Duración comunicada al lead (WhatsApp / prompt IA). */
+const LEAD_DURATION_MINUTES = 15;
+
 const WEEKDAY_SHORT = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 const MONTH_SHORT = [
   'ene',
@@ -205,10 +210,23 @@ async function getAggregatedSlots(opts = {}) {
 
   try {
     const agendaPendingStore = require('./agendaPendingStore');
-    const held = agendaPendingStore.getHeldSlotKeys();
-    if (held && held.size) {
+    const heldIntervals =
+      typeof agendaPendingStore.getHeldIntervals === 'function'
+        ? agendaPendingStore.getHeldIntervals()
+        : [];
+    if (heldIntervals && heldIntervals.length) {
       slots = slots.filter(
-        (s) => !held.has(slotKey(s.fecha, s.horaInicio, s.horaFin))
+        (s) =>
+          !heldIntervals.some((h) =>
+            intervalsOverlap(
+              s.fecha,
+              s.horaInicio,
+              s.horaFin,
+              h.fecha,
+              h.horaInicio,
+              h.horaFin
+            )
+          )
       );
     }
   } catch {
@@ -216,6 +234,7 @@ async function getAggregatedSlots(opts = {}) {
   }
 
   slots = filterFutureSlots(slots);
+  slots = buildBookableVendorBlockSlots(slots, VENDOR_BLOCK_MINUTES);
 
   return {
     slots,
@@ -322,6 +341,155 @@ function minutesToTime(mins) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/**
+ * Solape de intervalos en el mismo día civil (fin exclusivo vía comparación <).
+ * @param {string} fechaA
+ * @param {string} horaInicioA
+ * @param {string} horaFinA
+ * @param {string} fechaB
+ * @param {string} horaInicioB
+ * @param {string} horaFinB
+ */
+function intervalsOverlap(
+  fechaA,
+  horaInicioA,
+  horaFinA,
+  fechaB,
+  horaInicioB,
+  horaFinB
+) {
+  if (String(fechaA || '').trim() !== String(fechaB || '').trim()) return false;
+  const a1 = timeToMinutes(horaInicioA);
+  const a2 = timeToMinutes(horaFinA);
+  const b1 = timeToMinutes(horaInicioB);
+  const b2 = timeToMinutes(horaFinB);
+  if (
+    !Number.isFinite(a1) ||
+    !Number.isFinite(a2) ||
+    !Number.isFinite(b1) ||
+    !Number.isFinite(b2)
+  ) {
+    return false;
+  }
+  return a1 < b2 && b1 < a2;
+}
+
+/**
+ * ¿Los intervalos del vendedor cubren [startMin, endMin] sin huecos?
+ * @param {Array<[number, number]>} intervals
+ * @param {number} startMin
+ * @param {number} endMin
+ */
+function coversInterval(intervals, startMin, endMin) {
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+    return false;
+  }
+  const sorted = [...(intervals || [])]
+    .filter(
+      ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a
+    )
+    .sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  let coveredUntil = startMin;
+  for (const [a, b] of sorted) {
+    if (a > coveredUntil) break;
+    if (b > coveredUntil) coveredUntil = b;
+    if (coveredUntil >= endMin) return true;
+  }
+  return coveredUntil >= endMin;
+}
+
+/**
+ * Cobertura continua de un candidato sobre slots ya mergeados del día.
+ * @param {Array<object>} daySlots
+ * @param {{ vendedorId: string, gerenteEmail?: string|null }} candidate
+ * @param {number} startMin
+ * @param {number} endMin
+ */
+function candidateCoversRange(daySlots, candidate, startMin, endMin) {
+  const vid = String(candidate && candidate.vendedorId ? candidate.vendedorId : '').trim();
+  const g =
+    String(candidate && candidate.gerenteEmail ? candidate.gerenteEmail : '')
+      .trim()
+      .toLowerCase();
+  if (!vid) return false;
+  /** @type {Array<[number, number]>} */
+  const intervals = [];
+  for (const s of daySlots || []) {
+    const has = (s.candidates || []).some((c) => {
+      if (String(c.vendedorId || '').trim() !== vid) return false;
+      const cg = String(c.gerenteEmail || '')
+        .trim()
+        .toLowerCase();
+      return !g || !cg || cg === g;
+    });
+    if (!has) continue;
+    const a = timeToMinutes(s.horaInicio);
+    const b = timeToMinutes(s.horaFin);
+    if (Number.isFinite(a) && Number.isFinite(b)) intervals.push([a, b]);
+  }
+  return coversInterval(intervals, startMin, endMin);
+}
+
+/**
+ * Convierte slots atómicos del Panel en starts ofrecibles que bloquean
+ * `blockMinutes` al vendedor (p. ej. 45), conservando starts cada media hora.
+ * @param {Array<object>} slots
+ * @param {number} [blockMinutes]
+ * @returns {Array<object>}
+ */
+function buildBookableVendorBlockSlots(slots, blockMinutes = VENDOR_BLOCK_MINUTES) {
+  const block = Number(blockMinutes);
+  const minutes =
+    Number.isFinite(block) && block > 0 ? Math.floor(block) : VENDOR_BLOCK_MINUTES;
+  const list = Array.isArray(slots) ? slots : [];
+  /** @type {Map<string, object[]>} */
+  const byFecha = new Map();
+  for (const s of list) {
+    const fecha = String(s.fecha || '').trim();
+    if (!fecha) continue;
+    if (!byFecha.has(fecha)) byFecha.set(fecha, []);
+    byFecha.get(fecha).push(s);
+  }
+
+  /** @type {object[]} */
+  const out = [];
+  for (const [fecha, daySlots] of byFecha) {
+    const starts = new Map();
+    for (const s of daySlots) {
+      const startMin = timeToMinutes(s.horaInicio);
+      if (!Number.isFinite(startMin)) continue;
+      if (!starts.has(startMin)) starts.set(startMin, s);
+    }
+    const sortedStarts = [...starts.keys()].sort((a, b) => a - b);
+    for (const startMin of sortedStarts) {
+      const endMin = startMin + minutes;
+      if (endMin > 24 * 60) continue;
+      const seed = starts.get(startMin);
+      const candidates = (seed.candidates || []).filter((c) =>
+        candidateCoversRange(daySlots, c, startMin, endMin)
+      );
+      if (!candidates.length) continue;
+      const horaInicio = minutesToTime(startMin);
+      const horaFin = minutesToTime(endMin);
+      out.push({
+        fecha,
+        horaInicio,
+        horaFin,
+        label: formatSlotLabel({ fecha, horaInicio, horaFin }),
+        candidates,
+        leadDurationMinutes: LEAD_DURATION_MINUTES,
+        vendorBlockMinutes: minutes
+      });
+    }
+  }
+
+  return out.sort((a, b) => {
+    const fa = `${a.fecha} ${a.horaInicio}`;
+    const fb = `${b.fecha} ${b.horaInicio}`;
+    return fa.localeCompare(fb);
+  });
 }
 
 /**
@@ -474,7 +642,7 @@ function formatSlotsForPrompt(slots, maxDays = 2, todayYmd = null) {
   if (!lines.length) return '';
 
   const notes = [
-    'La sesión dura 15 minutos.',
+    `La sesión dura ${LEAD_DURATION_MINUTES} minutos.`,
     'Ofrece solo las horas listadas arriba; no inventes otras.',
     'Respeta la etiqueta del día (HOY / MAÑANA / nombre del día); no digas "mañana" si el bloque no es MAÑANA.'
   ];
@@ -532,6 +700,8 @@ function clearSlotsCache() {
 }
 
 module.exports = {
+  VENDOR_BLOCK_MINUTES,
+  LEAD_DURATION_MINUTES,
   slotKey,
   formatSlotLabel,
   collectGerenteEmails,
@@ -545,5 +715,10 @@ module.exports = {
   selectOfferStarts,
   formatSlotsForPrompt,
   filterFutureSlots,
-  getMexicoNowParts
+  getMexicoNowParts,
+  timeToMinutes,
+  minutesToTime,
+  intervalsOverlap,
+  coversInterval,
+  buildBookableVendorBlockSlots
 };

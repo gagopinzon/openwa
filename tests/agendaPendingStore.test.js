@@ -71,4 +71,23 @@ describe('agendaPendingStore confirmed + reschedule', () => {
     assert.equal(updated.urlReunion, 'https://meet.example/2');
     assert.ok(updated.rescheduledAt);
   });
+
+  it('isSlotHeld detecta solape parcial (bloqueo 45 min vs media hora)', () => {
+    store.createPending({
+      telefono: '5215550003333',
+      fecha: '2026-09-09',
+      horaInicio: '10:00',
+      horaFin: '10:45',
+      cvId: 'cv3'
+    });
+    assert.equal(store.isSlotHeld('2026-09-09', '10:00', '10:45'), true);
+    assert.equal(store.isSlotHeld('2026-09-09', '10:30', '11:00'), true);
+    assert.equal(store.isSlotHeld('2026-09-09', '10:45', '11:30'), false);
+    assert.equal(
+      store.isSlotHeld('2026-09-09', '10:30', '11:00', {
+        exceptTelefono: '5215550003333'
+      }),
+      false
+    );
+  });
 });
