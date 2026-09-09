@@ -1,6 +1,9 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildConfirmedMeetingReply } = require('../agendaMeetMessages');
+const {
+  buildConfirmedMeetingReply,
+  buildNoSlotAtTimeReply
+} = require('../agendaMeetMessages');
 
 describe('agendaMeetMessages', () => {
   it('con liga incluye recomendación de conectarse 5 min antes', () => {
@@ -27,5 +30,23 @@ describe('agendaMeetMessages', () => {
     assert.match(text, /15 minutos/i);
     assert.match(text, /5 minutos antes/i);
     assert.doesNotMatch(text, /¡Nos vemos!$/);
+  });
+
+  it('no envía al lead las notas internas de horarios', () => {
+    const text = buildNoSlotAtTimeReply({
+      contactName: 'Jeisler',
+      slotsText:
+        'HOY (MIÉRCOLES 9 sep): libres 11:30, 12:30, 13:30\n' +
+        '(La sesión dura 15 minutos. Ofrece solo las horas listadas arriba; no inventes otras. ' +
+        'Respeta la etiqueta del día (HOY / MAÑANA / nombre del día); no digas "mañana" si el bloque no es MAÑANA. ' +
+        'Tramos reales (para si el lead pide algo entre dos horas): HOY (MIÉRCOLES 9 sep): de 11:30 a 14:15. ' +
+        'Si pregunta p.ej. "¿tienes entre las 10 y las 11?", sugiere la media hora libre dentro del tramo (ej. "¿te queda a las 10:30?").)'
+    });
+    assert.match(text, /Entiendo, Jeisler/);
+    assert.match(text, /libres 11:30, 12:30, 13:30/);
+    assert.doesNotMatch(text, /Ofrece solo las horas/);
+    assert.doesNotMatch(text, /no inventes otras/);
+    assert.doesNotMatch(text, /Tramos reales/);
+    assert.doesNotMatch(text, /para si el lead pide/);
   });
 });

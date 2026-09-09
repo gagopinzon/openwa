@@ -9,6 +9,8 @@ const {
   collapseConsecutiveRanges,
   selectOfferStarts,
   formatSlotsForPrompt,
+  formatSlotsForLead,
+  stripAvailabilityPromptNotes,
   filterFutureSlots,
   getMexicoNowParts,
   buildBookableVendorBlockSlots,
@@ -153,6 +155,41 @@ describe('agendaAvailability', () => {
     assert.match(text, new RegExp(`${LEAD_DURATION_MINUTES} minutos`));
     assert.match(text, /Tramos reales/);
     assert.match(text, /10:30/);
+  });
+
+  it('formatSlotsForLead lista horas sin notas internas del prompt', () => {
+    const text = formatSlotsForLead(
+      [
+        { fecha: '2026-08-08', horaInicio: '08:30', horaFin: '09:00' },
+        { fecha: '2026-08-08', horaInicio: '09:00', horaFin: '09:30' },
+        { fecha: '2026-08-08', horaInicio: '09:30', horaFin: '10:00' },
+        { fecha: '2026-08-08', horaInicio: '10:00', horaFin: '10:30' },
+        { fecha: '2026-08-08', horaInicio: '10:30', horaFin: '11:00' },
+        { fecha: '2026-08-08', horaInicio: '11:00', horaFin: '11:30' },
+        { fecha: '2026-08-08', horaInicio: '11:30', horaFin: '12:00' },
+        { fecha: '2026-08-08', horaInicio: '12:00', horaFin: '12:30' },
+        { fecha: '2026-08-09', horaInicio: '09:00', horaFin: '09:30' },
+        { fecha: '2026-08-09', horaInicio: '09:30', horaFin: '10:00' }
+      ],
+      2,
+      '2026-08-08'
+    );
+    assert.match(text, /libres 08:30, 09:30, 10:30, 11:30/);
+    assert.match(text, /libres 09:00, 09:30/);
+    assert.doesNotMatch(text, /Ofrece solo las horas/);
+    assert.doesNotMatch(text, /Tramos reales/);
+    assert.doesNotMatch(text, /no inventes otras/);
+    assert.doesNotMatch(text, new RegExp(`${LEAD_DURATION_MINUTES} minutos`));
+  });
+
+  it('stripAvailabilityPromptNotes recorta el bloque de instrucciones', () => {
+    const raw =
+      'HOY (MIÉRCOLES 9 sep): libres 11:30, 12:30, 13:30\n' +
+      '(La sesión dura 15 minutos. Ofrece solo las horas listadas arriba; no inventes otras. ' +
+      'Respeta la etiqueta del día (HOY / MAÑANA / nombre del día).)';
+    const cleaned = stripAvailabilityPromptNotes(raw);
+    assert.equal(cleaned, 'HOY (MIÉRCOLES 9 sep): libres 11:30, 12:30, 13:30');
+    assert.doesNotMatch(cleaned, /Ofrece solo/);
   });
 
   it('buildBookableVendorBlockSlots: solo starts con 45 min libres del mismo vendedor', () => {
