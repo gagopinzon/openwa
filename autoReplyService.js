@@ -1041,7 +1041,8 @@ function applyPreferredTimeDecision(decision, { today, normalizedPhone, slotsPro
       replyText: agendaPreferredTime.formatNearestReply(
         decision.nearby,
         decision.preferredTime,
-        today
+        today,
+        decision.timezone || null
       ),
       agendaMeta: {
         reason: 'slots_nearest',
@@ -1080,7 +1081,8 @@ async function processChosenSlot({
   openwaSessionId,
   broadcastEvent,
   testMode,
-  userWillSendCv = false
+  userWillSendCv = false,
+  timezone = null
 }) {
   const displayName = contactName || null;
   // Siempre priorizar CV ya ligado (Mongo / archivo permanente por teléfono o nombre).
@@ -1138,7 +1140,10 @@ async function processChosenSlot({
       };
     }
     return {
-      replyText: buildAskCvReply(displayName, chosen, { userWillSendCv }),
+      replyText: buildAskCvReply(displayName, chosen, {
+        userWillSendCv,
+        timezone
+      }),
       agendaMeta: { reason: 'awaiting_cv', slot: chosen.label || chosen.horaInicio },
       agendaPendingId: null
     };
@@ -1176,7 +1181,8 @@ async function processChosenSlot({
     logicalSessionId,
     openwaSessionId,
     broadcastEvent,
-    testMode
+    testMode,
+    timezone
   });
 }
 
@@ -1218,7 +1224,8 @@ async function finalizeAgendaBooking({
   openwaSessionId,
   broadcastEvent,
   testMode,
-  skipLeadFieldGate = false
+  skipLeadFieldGate = false,
+  timezone = null
 }) {
   logAgenda('auto-reply.booking.finalize.start', {
     phone: normalizedPhone,
@@ -1265,7 +1272,7 @@ async function finalizeAgendaBooking({
   agendaAwaitingCvStore.clearAwaiting(normalizedPhone);
   agendaWaitlistStore.cancelByPhone(normalizedPhone, 'booked');
 
-  let replyText = buildPendingCreatedReply(contactName, chosen);
+  let replyText = buildPendingCreatedReply(contactName, chosen, null, timezone);
   let agendaMeta = { reason: 'pending_created', pendingId: pending.id };
   const notify = {
     openwaSessionId,
@@ -1312,7 +1319,8 @@ async function finalizeAgendaBooking({
           urlReunion: confirmed.urlReunionLead,
           senderName: logicalSessionId
             ? sessionsStore.getSessionSenderName(logicalSessionId)
-            : 'Pro Talent'
+            : 'Pro Talent',
+          timezone
         });
         agendaMeta = {
           reason: 'meeting_confirmed',
@@ -1327,7 +1335,8 @@ async function finalizeAgendaBooking({
           urlReunion: null,
           senderName: logicalSessionId
             ? sessionsStore.getSessionSenderName(logicalSessionId)
-            : 'Pro Talent'
+            : 'Pro Talent',
+          timezone
         });
         agendaMeta = {
           reason: 'meeting_confirmed_no_url',
@@ -2192,6 +2201,9 @@ async function processBatchedAutoReply(items, opts = {}) {
         );
         if (chosen) {
           // Ya eligió horario concreto (o confirmó): agendar de una, sin segundo "¿te queda?"
+          const tzReq = require('./agendaTimezone').resolveLeadTimeRequest(body, {
+            ymd: chosen.fecha
+          });
           const booked = await processChosenSlot({
             chosen,
             cvId,
@@ -2203,7 +2215,8 @@ async function processBatchedAutoReply(items, opts = {}) {
             openwaSessionId,
             broadcastEvent,
             testMode,
-            userWillSendCv: agendaIntent.userMentionsSendingCv(body)
+            userWillSendCv: agendaIntent.userMentionsSendingCv(body),
+            timezone: tzReq || null
           });
           replyText = booked.replyText;
           agendaMeta = booked.agendaMeta;
@@ -2376,13 +2389,22 @@ async function processBatchedAutoReply(items, opts = {}) {
               openwaSessionId,
               broadcastEvent,
               testMode,
-              userWillSendCv: agendaIntent.userMentionsSendingCv(body)
+              userWillSendCv: agendaIntent.userMentionsSendingCv(body),
+              timezone: decision.timezone || null
             });
             replyText = booked.replyText;
             agendaMeta = { ...agendaMeta, ...booked.agendaMeta };
             agendaPendingId = booked.agendaPendingId;
             if (!replyText && booked.agendaContext) {
               agendaContext = (agendaContext ? `${agendaContext}\n` : '') + booked.agendaContext;
+            }
+            if (decision.timezone) {
+              const tzBlock = require('./agendaTimezone').formatTimezonePromptBlock(
+                decision.timezone
+              );
+              if (tzBlock) {
+                agendaContext = (agendaContext ? `${agendaContext}\n` : '') + tzBlock;
+              }
             }
             console.log(
               `[auto-reply] agenda book-direct (${range.fechaInicio}…${range.fechaFin}) ${decision.slot.horaInicio}`
@@ -2664,13 +2686,38 @@ async function processBatchedAutoReply(items, opts = {}) {
   }
 }
 
-function buildPendingCreatedReply(contactName, slot, senderName) {
-  const when = slot.label || `${slot.fecha} ${slot.horaInicio}`;
+function buildPendingCreatedReply(contactName, slot, senderName, timezone = null) {
+  const when = formatBookingWhen(slot, timezone);
   return `${phraseWithName('Perfecto', contactName)}. Quedó anotado el ${when}. En breve te enviamos la liga de la sesión. ☺️`;
 }
 
+function formatBookingWhen(slot, timezone = null) {
+  const agendaTimezone = require('./agendaTimezone');
+  const hora = String((slot && slot.horaInicio) || '').trim();
+  const label = String((slot && slot.label) || '').trim();
+  const fecha = String((slot && slot.fecha) || '').trim();
+  const tz = timezone && typeof timezone === 'object' ? timezone : null;
+  if (tz && tz.differs) {
+    const phrase = agendaTimezone.formatDualTimePhrase({
+      localHhmm: tz.localHhmm || hora,
+      centroHhmm: tz.centroHhmm || hora,
+      label: tz.label,
+      differs: true
+    });
+    if (label) return `${label} (${phrase})`;
+    if (fecha) return `${fecha} a ${phrase}`;
+    return phrase;
+  }
+  if (label) {
+    if (/hora del centro/i.test(label)) return label;
+    return `${label} (hora del centro)`;
+  }
+  if (fecha && hora) return `${fecha} a las ${hora} hora del centro`;
+  return hora ? `${hora} hora del centro` : fecha || 'el horario acordado';
+}
+
 function buildAskCvReply(contactName, slot, opts = {}) {
-  const when = slot.label || `${slot.fecha} a las ${slot.horaInicio}`;
+  const when = formatBookingWhen(slot, opts.timezone || null);
   return `${phraseWithName('Perfecto', contactName)}. Quedó anotado ${when}. En breve te confirmamos la liga. ☺️`;
 }
 

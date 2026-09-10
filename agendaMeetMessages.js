@@ -1,6 +1,7 @@
 const { preferredFirstName, phraseWithName } = require('./preferredContactName');
 const { stripAvailabilityPromptNotes } = require('./agendaAvailability');
 const agendaIntent = require('./agendaIntent');
+const agendaTimezone = require('./agendaTimezone');
 
 /**
  * Mensajes de confirmación y entrega de liga Meet (WhatsApp).
@@ -11,15 +12,33 @@ function meetingFirstName(contactName) {
 }
 
 /**
- * @param {{ fecha?: string, horaInicio?: string, slotLabel?: string }} params
+ * @param {{ fecha?: string, horaInicio?: string, slotLabel?: string, timezone?: object|null }} params
  */
 function formatMeetingWhen(params = {}) {
   const slotLabel = String(params.slotLabel || '').trim();
-  if (slotLabel) return slotLabel;
   const fecha = String(params.fecha || '').trim();
   const horaInicio = String(params.horaInicio || '').trim();
-  if (fecha && horaInicio) return `${fecha} a las ${horaInicio}`;
-  return fecha || horaInicio || 'la fecha acordada';
+  const tz = params.timezone && typeof params.timezone === 'object' ? params.timezone : null;
+
+  if (tz && tz.differs && (tz.localHhmm || horaInicio)) {
+    const phrase = agendaTimezone.formatDualTimePhrase({
+      localHhmm: tz.localHhmm || horaInicio,
+      centroHhmm: tz.centroHhmm || horaInicio,
+      label: tz.label,
+      differs: true
+    });
+    if (slotLabel) return `${slotLabel} (${phrase})`;
+    if (fecha) return `${fecha} a ${phrase}`;
+    return phrase;
+  }
+
+  if (slotLabel) {
+    if (/hora del centro/i.test(slotLabel)) return slotLabel;
+    return `${slotLabel} (hora del centro)`;
+  }
+  if (fecha && horaInicio) return `${fecha} a las ${horaInicio} hora del centro`;
+  if (horaInicio) return `${horaInicio} hora del centro`;
+  return fecha || 'la fecha acordada';
 }
 
 /**

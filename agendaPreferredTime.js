@@ -1,4 +1,5 @@
 const agendaIntent = require('./agendaIntent');
+const agendaTimezone = require('./agendaTimezone');
 
 const ASK_PREFERRED_CONTEXT =
   'PREGUNTA_HORA: El lead quiere agendar pero aún no dijo día ni hora concreta. ' +
@@ -18,43 +19,17 @@ function timeToMinutes(hhmm) {
   return Number(m[1]) * 60 + Number(m[2]);
 }
 
-function formatHhMm(hour, minute) {
-  const h = Number(hour);
-  const min = minute == null || minute === '' ? '00' : String(minute).padStart(2, '0');
-  if (!Number.isFinite(h) || h < 0 || h > 23) return null;
-  return `${String(h).padStart(2, '0')}:${min}`;
-}
-
 /**
- * Hora que el lead pidió. "a las 5" / "5:30" sin am/pm → tarde (17:00 / 17:30).
- * Conserva minutos. Solo aplica sesgo 1–7 → +12h si no dijeron mañana/am.
+ * Hora que el lead pidió, en hora del centro.
+ * "a las 5" / "5:30" sin am/pm → tarde (17:00 / 17:30).
+ * Si menciona ciudad/zona (p. ej. "12 de Hermosillo"), convierte a centro.
  * @param {string} text
- * @returns {string|null} HH:MM
+ * @param {{ ymd?: string, now?: Date }} [opts]
+ * @returns {string|null} HH:MM (centro)
  */
-function agendaPreferredHhmm(text) {
-  const times = agendaIntent.extractTimesFromMessage(text);
-  if (!times.length) return null;
-
-  const raw = String(text || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
-  const hasPeriod = /(?:de\s+la|en\s+la|por\s+la)\s+(tarde|manana|noche)|\b(?:a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b/.test(
-    raw
-  );
-  if (hasPeriod) return times[0];
-
-  // Preferir la hora "completa" si extractTimes dejó varias (legado); tomar la primera.
-  const primary = times[0];
-  const m = /^(\d{1,2}):(\d{2})$/.exec(String(primary || '').trim());
-  if (!m) return primary;
-  const h = Number(m[1]);
-  const min = m[2];
-  // En citas MX, "las 5" / "5:30" casi nunca es madrugada.
-  if (h >= 1 && h <= 7) {
-    return formatHhMm(h + 12, min) || primary;
-  }
-  return primary;
+function agendaPreferredHhmm(text, opts = {}) {
+  const req = agendaTimezone.resolveLeadTimeRequest(text, opts);
+  return req ? req.centroHhmm : null;
 }
 
 /**
@@ -144,19 +119,39 @@ function selectNearestInWindow(slots, preferredHhmm, opts = {}) {
 /**
  * @param {{ fecha: string, horaInicio: string }} slot
  * @param {string} today
+ * @param {{ localHhmm?: string, centroHhmm?: string, label?: string, differs?: boolean, assumedCentro?: boolean }|null} [tz]
  */
-function formatConfirmReply(slot, today) {
+function formatConfirmReply(slot, today, tz = null) {
   const hora = String((slot && slot.horaInicio) || '').trim();
   const when = agendaIntent.relativeDayLabel(slot && slot.fecha, today);
-  return `Perfecto, te agendo a las ${hora} ${when}.`;
+  const info = tz && typeof tz === 'object'
+    ? {
+        localHhmm: tz.localHhmm || hora,
+        centroHhmm: tz.centroHhmm || hora,
+        label: tz.label,
+        differs: Boolean(tz.differs),
+        assumedCentro: Boolean(tz.assumedCentro)
+      }
+    : {
+        localHhmm: hora,
+        centroHhmm: hora,
+        differs: false,
+        assumedCentro: true
+      };
+  const phrase = agendaTimezone.formatDualTimePhrase(info);
+  if (info.differs) {
+    return `Perfecto, te agendo a ${phrase} ${when}.`;
+  }
+  return `Perfecto, te agendo a las ${phrase} ${when}.`;
 }
 
 /**
  * @param {Array<object>} nearby
  * @param {string} preferredHhmm
  * @param {string} [today]
+ * @param {{ localHhmm?: string, centroHhmm?: string, label?: string, differs?: boolean }|null} [tz]
  */
-function formatNearestReply(nearby, preferredHhmm, today) {
+function formatNearestReply(nearby, preferredHhmm, today, tz = null) {
   const list = Array.isArray(nearby) ? nearby : [];
   const byFecha = new Map();
   for (const s of list) {
@@ -169,14 +164,18 @@ function formatNearestReply(nearby, preferredHhmm, today) {
   const lines = fechas.map((fecha) => {
     const label = agendaIntent.relativeDayLabel(fecha, todayYmd);
     const pretty = label.charAt(0).toUpperCase() + label.slice(1);
-    return `${pretty}: ${byFecha.get(fecha).join(', ')}`;
+    return `${pretty}: ${byFecha.get(fecha).join(', ')} (hora del centro)`;
   });
-  const hora = String(preferredHhmm || '').trim() || 'esa hora';
+  const centro = String((tz && tz.centroHhmm) || preferredHhmm || '').trim() || 'esa hora';
+  let asked = `A las ${centro} hora del centro`;
+  if (tz && tz.differs && tz.localHhmm) {
+    asked = `A tus ${tz.localHhmm} (${tz.label || 'tu zona'} = ${centro} hora del centro)`;
+  }
   if (!lines.length) {
-    return `A las ${hora} no hay hueco. ¿Te late otra hora u otro día?`;
+    return `${asked} no hay hueco. ¿Te late otra hora u otro día?`;
   }
   return (
-    `A las ${hora} no hay hueco. Las más cercanas son:\n` +
+    `${asked} no hay hueco. Las más cercanas (hora del centro) son:\n` +
     `${lines.join('\n')}\n¿Cuál te queda?`
   );
 }
@@ -192,19 +191,25 @@ function dayOptsFromRange(range, today, tomorrow) {
  * @param {string} body
  * @param {Array<object>} slots
  * @param {{ today: string, tomorrow: string, now?: Date }} opts
- * @returns {{ action: 'ask'|'list'|'confirm'|'nearest', slot?: object, nearby?: object[], preferredTime?: string }}
+ * @returns {{ action: 'ask'|'list'|'confirm'|'nearest', slot?: object, nearby?: object[], preferredTime?: string, timezone?: object|null }}
  */
 function resolvePreferredTimeOffer(body, slots, opts = {}) {
   const today = String(opts.today || agendaIntent.todayYmd(opts.now));
   const tomorrow =
     String(opts.tomorrow || '') || agendaIntent.addDaysYmd(today, 1);
-  const hhmm = agendaPreferredHhmm(body);
   const range = agendaIntent.resolveDateRangeFromMessage(body, opts.now);
+  const ymdForTz =
+    range && range.fechaInicio === range.fechaFin ? range.fechaInicio : today;
+  const tzReq = agendaTimezone.resolveLeadTimeRequest(body, {
+    ymd: ymdForTz,
+    now: opts.now
+  });
+  const hhmm = tzReq ? tzReq.centroHhmm : null;
   if (!hhmm) {
     if (range && range.fechaInicio === range.fechaFin) {
-      return { action: 'list' };
+      return { action: 'list', timezone: null };
     }
-    return { action: 'ask' };
+    return { action: 'ask', timezone: null };
   }
 
   const days = dayOptsFromRange(range, today, tomorrow);
@@ -215,13 +220,13 @@ function resolvePreferredTimeOffer(body, slots, opts = {}) {
 
   const exact = pickExactSlotTodayOrTomorrow(searchDays, hhmm, days);
   if (exact) {
-    return { action: 'confirm', slot: exact, preferredTime: hhmm };
+    return { action: 'confirm', slot: exact, preferredTime: hhmm, timezone: tzReq };
   }
   const nearby = selectNearestInWindow(searchDays, hhmm, {
     today: days.today,
     tomorrow: days.tomorrow
   });
-  return { action: 'nearest', nearby, preferredTime: hhmm };
+  return { action: 'nearest', nearby, preferredTime: hhmm, timezone: tzReq };
 }
 
 function isAskPreferredContext(agendaContext) {

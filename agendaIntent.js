@@ -1,4 +1,5 @@
 const { slotKey } = require('./agendaAvailability');
+const agendaTimezone = require('./agendaTimezone');
 
 const TZ = 'America/Mexico_City';
 
@@ -296,6 +297,9 @@ function formatClockContextForPrompt(now = new Date()) {
   }
   lines.push(
     'Usa SOLO estas fechas. "mañana" = el día siguiente; "en la mañana"/"de la mañana" = periodo AM, no el día.'
+  );
+  lines.push(
+    'HORA CANÓNICA = hora del centro (CDMX). Si el lead nombra otra ciudad/zona, el sistema convierte; confirma ambas horas cuando haya desfase.'
   );
   return lines.join('\n');
 }
@@ -842,6 +846,16 @@ function matchSlotFromMessage(text, slots, opts = {}) {
     const daySlots = list.filter((s) => s.fecha === range.fechaInicio);
     if (daySlots.length) candidates = daySlots;
   }
+
+  const ymdForTz =
+    range && range.fechaInicio === range.fechaFin
+      ? range.fechaInicio
+      : todayYmd(now);
+  const converted = agendaTimezone.convertExtractedTimesToCentro(text, times, {
+    ymd: ymdForTz,
+    now
+  });
+  times = converted.times;
 
   const slotStarts = new Set(
     candidates.map((s) => String(s.horaInicio || '').trim())
