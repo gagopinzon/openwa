@@ -217,8 +217,13 @@ chmod +x deploy.sh
 ./deploy.sh
 ```
 
-El script `deploy.sh` hace: backup de `data/auto-reply-config.json` → `git stash` si hace falta → `git pull` → restaura tus prompts locales sobre la config nueva → `npm install` → `pm2 startOrReload` → `pm2 save`.
-Los backups quedan en `data/.deploy-backups/`.
+El script `deploy.sh` hace: backup de `data/auto-reply-config.json` (prompts + reglas por palabra clave) → `git stash` solo de archivos **trackeados** → `git pull` → restaura tu config local → `npm install` → `pm2 startOrReload` → `pm2 save`.
+
+Los backups quedan en:
+- `~/.local/state/msg-openwa-backups/` (fuera del repo; no los borra un stash)
+- `data/.deploy-backups/` (copia local)
+
+Así un deploy **no** debería volver a resetear las keywords del panel.
 
 ### Actualizaciones
 

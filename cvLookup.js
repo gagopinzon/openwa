@@ -85,7 +85,7 @@ function resolveUsableCvId({ leadCv, contactSession, phone, name } = {}) {
   }
 
   const resolvedName =
-    String(name || (contactSession && contactSession.name) || (leadCv && leadCv.nombre) || '').trim();
+    String(name || (leadCv && leadCv.nombre) || '').trim();
   const fromArchive = lookupCvIdFromArchive(phone, { name: resolvedName });
   if (fromArchive) return fromArchive;
 

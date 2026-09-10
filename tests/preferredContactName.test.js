@@ -4,7 +4,9 @@ const {
   normalizePreferredName,
   preferredFirstName,
   resolveAiContactName,
-  phraseWithName
+  phraseWithName,
+  buildWhatsAppNameGuard,
+  sanitizeReplyWhatsAppName
 } = require('../preferredContactName');
 
 describe('preferredContactName', () => {
@@ -82,5 +84,41 @@ describe('preferredContactName', () => {
     assert.equal(phraseWithName('Perfecto', 'Ana'), 'Perfecto, Ana');
     assert.equal(phraseWithName('Perfecto', null), 'Perfecto');
     assert.equal(phraseWithName('¡Qué bien', 'Luis') + '!', '¡Qué bien, Luis!');
+  });
+
+  it('buildWhatsAppNameGuard prohíbe el nick si difiere del CV', () => {
+    const block = buildWhatsAppNameGuard({
+      whatsappName: 'jymmy',
+      preferredName: 'Jaime López'
+    });
+    assert.match(block, /jymmy/i);
+    assert.match(block, /Jaime/i);
+    assert.match(block, /PROHIBIDO|NUNCA/i);
+  });
+
+  it('sanitizeReplyWhatsAppName reemplaza nick WA por nombre del CV', () => {
+    const out = sanitizeReplyWhatsAppName('Hola jymmy, ¿cómo estás?', {
+      whatsappName: 'jymmy',
+      preferredName: 'Jaime López'
+    });
+    assert.match(out, /Jaime/i);
+    assert.doesNotMatch(out, /jymmy/i);
+  });
+
+  it('sanitizeReplyWhatsAppName quita nick WA si no hay nombre de CV', () => {
+    const out = sanitizeReplyWhatsAppName('Hola Abogada, gusto saludarte', {
+      whatsappName: 'Abogada',
+      preferredName: null
+    });
+    assert.doesNotMatch(out, /Abogada/i);
+    assert.match(out, /Hola/i);
+  });
+
+  it('sanitizeReplyWhatsAppName no toca si el nick es el mismo que el CV', () => {
+    const out = sanitizeReplyWhatsAppName('Hola Ana, todo bien', {
+      whatsappName: 'Ana',
+      preferredName: 'Ana García'
+    });
+    assert.match(out, /Ana/);
   });
 });

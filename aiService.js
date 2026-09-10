@@ -2,7 +2,7 @@ const axios = require('axios');
 require('dotenv').config();
 const { SENDER_PLACEHOLDER } = require('./messageSignature');
 const ollamaService = require('./ollamaService');
-const { preferredFirstName, phraseWithName } = require('./preferredContactName');
+const { preferredFirstName, phraseWithName, buildWhatsAppNameGuard, sanitizeReplyWhatsAppName } = require('./preferredContactName');
 const agendaIntent = require('./agendaIntent');
 const { stripAvailabilityPromptNotes } = require('./agendaAvailability');
 
@@ -646,6 +646,7 @@ function formatConversationHistoryForPrompt(messages, maxLines = 6) {
  */
 async function generateReplyMessage({
   contactName,
+  whatsappName,
   incomingBody,
   basePrompt,
   personaSystem,
@@ -679,7 +680,8 @@ async function generateReplyMessage({
 - Si el lead pregunta, responde primero; luego lleva a agendar.
 - No digas que es entrevista laboral ni oferta de trabajo.
 - Sé breve. Emojis solo 💙 y ☺️. No firmes con "Atte:".
-- Si hay historial: no repitas lo que ya enviaste ("Tú").`;
+- Si hay historial: no repitas lo que ya enviaste ("Tú").
+- Usa SOLO el nombre del CV/pitch. NUNCA el alias de WhatsApp.`;
   const personaBlock = String(personaSystem || '').trim();
 
   const agendaBlock = agendaContext
@@ -695,8 +697,12 @@ async function generateReplyMessage({
   const canUseOllama = provider === 'ollama' && ollamaService.isConfigured();
 
   const firstName = preferredFirstName(contactName);
+  const nameGuard = buildWhatsAppNameGuard({
+    whatsappName,
+    preferredName: contactName
+  });
   const nameInstruction = firstName
-    ? `- Usa solo el primer nombre "${firstName}" si aplica.`
+    ? `- Usa solo el primer nombre del CV "${firstName}" si aplica. NUNCA uses el alias de WhatsApp.`
     : `- NO uses nombre de WhatsApp ni inventes un nombre; habla de forma genérica (sin "Hola [nombre]").`;
 
   function sanitizeAgainstCvAsk(raw) {
@@ -718,6 +724,10 @@ async function generateReplyMessage({
         ? `${phraseWithName('Perfecto', firstName)}. Ya tenemos tu CV en el sistema. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`
         : `${phraseWithName('Perfecto', firstName)}. ¿Qué horario te acomoda mejor, hoy o mañana? ☺️`;
     }
+    out = sanitizeReplyWhatsAppName(out, {
+      whatsappName,
+      preferredName: contactName
+    });
     return agendaIntent.rewriteTimeOfDayGreetings(out);
   }
 
@@ -778,7 +788,8 @@ ${cvPolicy}
 
 ${basePrompt || 'Eres Mónica, agendadora de Pro Talent.'}
 
-${firstName ? `Nombre del contacto: ${firstName}` : 'Nombre del contacto: (desconocido — no uses nick de WhatsApp ni inventes nombre)'}
+${firstName ? `Nombre del contacto (CV/pitch): ${firstName}` : 'Nombre del contacto: (desconocido — no uses nick de WhatsApp ni inventes nombre)'}
+${nameGuard ? `\n${nameGuard}\n` : ''}
 Mensaje que te escribió:
 "${incomingBody}"
 ${ruleHint}${contextBlock}${historyBlock}
@@ -789,13 +800,13 @@ ${agendaBlock}
 ${systemBlock}
 
 ${cvPolicy}
-${nameInstruction}
+${nameGuard ? `${nameGuard}\n` : ''}${nameInstruction}
 ${greetingInstructions}
 ${agendaInstructions}
 
 Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.`;
 
-  const systemRoleParts = [clockBlock, cvPolicy, personaBlock, systemBlock].filter(Boolean);
+  const systemRoleParts = [clockBlock, cvPolicy, personaBlock, systemBlock, nameGuard].filter(Boolean);
   const systemRole = systemRoleParts.join('\n\n');
 
   if (canUseOllama) {

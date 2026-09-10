@@ -46,7 +46,8 @@ const { logAgenda, warnAgenda } = require('./agendaDebug');
 const {
   resolveAiContactName,
   preferredFirstName,
-  phraseWithName
+  phraseWithName,
+  sanitizeReplyWhatsAppName
 } = require('./preferredContactName');
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
@@ -1849,6 +1850,11 @@ async function processBatchedAutoReply(items, opts = {}) {
       cvId: (contactSession && contactSession.cvId) || (leadCv && leadCv.cvId),
       lastOutboundAt: contactSession && contactSession.lastOutboundAt
     });
+    // Nick de WhatsApp (solo para prohibirlo / sanitizar; nunca para saludar).
+    const whatsappPushName =
+      contactName ||
+      (contactSession && contactSession.name) ||
+      null;
     // Backfill preferredName cuando descubrimos el nombre del CV.
     if (
       contactDisplayName &&
@@ -2479,6 +2485,7 @@ async function processBatchedAutoReply(items, opts = {}) {
       });
       replyText = await generateReplyMessage({
         contactName: contactDisplayName,
+        whatsappName: whatsappPushName,
         incomingBody: body,
         basePrompt: cfg.basePrompt,
         personaSystem: cfg.personaSystem,
@@ -2513,6 +2520,10 @@ async function processBatchedAutoReply(items, opts = {}) {
       return turnResult;
     }
 
+    replyText = sanitizeReplyWhatsAppName(replyText, {
+      whatsappName: whatsappPushName,
+      preferredName: contactDisplayName
+    });
     replyText = applySystemClockToReply(replyText, normalizedPhone);
     logAgenda('auto-reply.turno.reply', {
       phone: normalizedPhone,
