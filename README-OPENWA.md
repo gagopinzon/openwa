@@ -7,7 +7,8 @@ El proyecto original (`whatsapp-bulk/`) no se modifica y sigue usando WhatsApp W
 ## Requisitos
 
 - Node.js 18+
-- API key de DeepSeek (mensajes con IA)
+- Ollama local (mensajes masivos personalizados y, por defecto, auto-respuesta / CV)
+- DeepSeek opcional (solo si `AI_REPLY_PROVIDER=deepseek`)
 - Instancia OpenWA desplegada y sesión(es) conectada(s)
 - MongoDB opcional (historial de contactos ya notificados)
 
@@ -18,7 +19,10 @@ Copia `.env.example` a `.env` y completa:
 ```bash
 PORT=3445
 TEST_MODE=true
-DEEPSEEK_API_KEY=tu_clave_deepseek
+AI_REPLY_PROVIDER=ollama
+OLLAMA_URL=http://127.0.0.1:11434/api/chat
+OLLAMA_MODEL=gemma4:12b
+# DEEPSEEK_API_KEY=  # solo si AI_REPLY_PROVIDER=deepseek
 
 OPENWA_BASE_URL=https://openwa.protalentconnections.com/api
 OPENWA_API_KEY=tu_api_key_openwa

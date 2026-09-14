@@ -127,7 +127,7 @@ function buildOutboundMessageParts(contact) {
 }
 
 /**
- * Parsea la respuesta de DeepSeek en saludo + cuerpo.
+ * Parsea la respuesta del LLM (Ollama) en saludo + cuerpo.
  * @param {string} raw
  * @param {string} nombre
  * @returns {{ saludo: string, mensajeIA: string }}
@@ -270,15 +270,15 @@ ${SENDER_PLACEHOLDER}`
 }
 
 /**
- * Genera un mensaje personalizado usando la API de DeepSeek
+ * Genera un mensaje personalizado con Ollama (mismo host/modelo que auto-respuesta).
+ * Si Ollama no está o falla → plantilla local (`generateBasicMessage`). Sin DeepSeek.
  * @param {string} nombre - Nombre de la persona
  * @param {string} experiencia - Experiencia profesional de la persona
  * @returns {Promise<{ saludo: string, mensajeIA: string }>}
  */
 async function generatePersonalizedMessage(nombre, experiencia) {
-  // Si no hay API key o es de prueba, generar mensaje básico
-  if (!API_KEY || API_KEY.includes('test') || API_KEY.includes('tu_api_key')) {
-    console.log('⚠️  API key no configurada o de prueba. Generando mensaje básico...');
+  if (!ollamaService.isConfigured()) {
+    console.log('⚠️  Ollama no configurado. Generando mensaje básico...');
     return generateBasicMessage(nombre, experiencia);
   }
 
@@ -328,79 +328,30 @@ IMPORTANTE - VARIACIÓN:
 - NO uses separadores --- *** ni múltiples versiones`;
 
   try {
-    const response = await axios.post(DEEPSEEK_API_URL, {
-      model: 'deepseek-chat',
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      temperature: 0.95,
-      max_tokens: 550
-    }, {
-      headers: {
-        'Authorization': `Bearer ${API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 30000 // 30 segundos timeout
+    let message = await ollamaService.chatReply(prompt, {
+      skipMonica: true,
+      systemExtra:
+        'Responde SOLO con el formato SALUDO: / MENSAJE: pedido. Sin preámbulos ni explicaciones.'
     });
 
-    if (response.data && response.data.choices && response.data.choices.length > 0) {
-      let message = response.data.choices[0].message.content.trim();
-      
-      // Limpiar la respuesta: si contiene múltiples mensajes separados por "---" o "***", tomar solo el primero
-      const separators = ['---', '***', '==='];
-      for (const separator of separators) {
-        if (message.includes(separator)) {
-          console.log(`⚠️ Se detectaron múltiples mensajes separados por "${separator}". Tomando solo el primero.`);
-          message = message.split(separator)[0].trim();
-          break;
-        }
+    const separators = ['---', '***', '==='];
+    for (const separator of separators) {
+      if (message.includes(separator)) {
+        console.log(
+          `⚠️ Se detectaron múltiples mensajes separados por "${separator}". Tomando solo el primero.`
+        );
+        message = message.split(separator)[0].trim();
+        break;
       }
-
-      return parseSaludoAndMessage(message, nombre);
-    } else {
-      throw new Error('Respuesta inválida de la API de DeepSeek');
     }
 
+    return parseSaludoAndMessage(message, nombre);
   } catch (error) {
-    console.error('Error llamando a DeepSeek API:', error.message);
-    
-    if (error.response) {
-      console.error('Respuesta del servidor:', error.response.status, error.response.data);
-    }
-    
-    // Mensaje de fallback en caso de error - intentar extraer puesto básico
-    let puestoClave = 'dirección comercial';
-    const expLower = experiencia.toLowerCase();
-    if (expLower.includes('gerente') && expLower.includes('producción')) {
-      puestoClave = 'Gerencia de Producción';
-    } else if (expLower.includes('gerente')) {
-      puestoClave = 'Gerencia';
-    } else if (expLower.includes('supervisor')) {
-      puestoClave = 'Supervisión';
-    } else if (expLower.includes('director')) {
-      puestoClave = 'Dirección';
-    } else if (expLower.includes('producción')) {
-      puestoClave = 'Producción';
-    } else if (expLower.includes('ventas')) {
-      puestoClave = 'Ventas';
-    } else if (expLower.includes('operaciones')) {
-      puestoClave = 'Operaciones';
-    }
-    
-    return {
-      saludo: buildGreeting(nombre),
-      mensajeIA: `Vi tu perfil y me pareció muy sólido tu expertise profesional.
-
-En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en ${puestoClave} y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
-
-¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
-
-Atte:
-${SENDER_PLACEHOLDER}`
-    };
+    console.error(
+      `[bulk-msg] Ollama (${ollamaService.getModel()}):`,
+      error.message
+    );
+    return generateBasicMessage(nombre, experiencia);
   }
 }
 
