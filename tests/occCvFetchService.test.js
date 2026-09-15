@@ -3,7 +3,10 @@ const assert = require('node:assert/strict');
 const {
   extractOccCvUrl,
   enrichBufferFromOccIfNeeded,
-  ensureOccCvFetched
+  ensureOccCvFetched,
+  isOccLoginOrChallengeUrl,
+  isOccCvProfileUrl,
+  assertLandedOnOccCvPage
 } = require('../occCvFetchService');
 const cvFileStore = require('../cvFileStore');
 
@@ -141,6 +144,114 @@ test('ensureOccCvFetched reemplaza PDF en disco al agendar', async () => {
     });
     assert.equal(again.skipped, true);
     assert.equal(again.reason, 'already_fetched');
+  } finally {
+    cvFileStore.deleteCvFile(saved.cvId);
+    const remaining = (cvFileStore.loadCvsManifest() || []).filter(
+      (c) => c.cvId !== saved.cvId
+    );
+    cvFileStore.saveCvsManifest(remaining);
+  }
+});
+
+test('isOccLoginOrChallengeUrl detecta challenge e inicia-sesion', () => {
+  assert.equal(
+    isOccLoginOrChallengeUrl(
+      'https://www.occ.com.mx/empresas/inicia-sesion?challenge=704e8821cd054ef4a88213a3b37cee04&nfr=0'
+    ),
+    true
+  );
+  assert.equal(
+    isOccLoginOrChallengeUrl('https://empresa.occ.com.mx/Login'),
+    true
+  );
+  assert.equal(
+    isOccLoginOrChallengeUrl(
+      'https://www.occ.com.mx/empresas/candidatos/cv/22098464?o=4'
+    ),
+    false
+  );
+});
+
+test('isOccCvProfileUrl solo acepta la ficha /cv/', () => {
+  assert.equal(
+    isOccCvProfileUrl('https://www.occ.com.mx/empresas/candidatos/cv/22098464?o=4'),
+    true
+  );
+  assert.equal(
+    isOccCvProfileUrl('https://empresa.occ.com.mx/hirer-center/actividad'),
+    false
+  );
+  assert.equal(
+    isOccCvProfileUrl(
+      'https://www.occ.com.mx/empresas/inicia-sesion?challenge=abc'
+    ),
+    false
+  );
+});
+
+test('assertLandedOnOccCvPage falla rápido fuera de la ficha', () => {
+  assert.throws(
+    () =>
+      assertLandedOnOccCvPage(
+        'https://www.occ.com.mx/empresas/inicia-sesion?challenge=abc'
+      ),
+    (err) => err && err.code === 'occ_session_expired'
+  );
+  assert.throws(
+    () =>
+      assertLandedOnOccCvPage(
+        'https://empresa.occ.com.mx/hirer-center/actividad'
+      ),
+    (err) => err && err.code === 'occ_not_cv_page'
+  );
+  assert.doesNotThrow(() =>
+    assertLandedOnOccCvPage(
+      'https://www.occ.com.mx/empresas/candidatos/cv/22098464?o=4'
+    )
+  );
+});
+
+test('ensureOccCvFetched no reintenta OCC si ya falló; deja el PDF original', async () => {
+  const original = Buffer.from('%PDF-1.4 already-have-this-cv');
+  const saved = cvFileStore.saveCvFile(original, 'occ-stub.pdf');
+  const list = cvFileStore.loadCvsManifest() || [];
+  cvFileStore.saveCvsManifest([
+    ...list.filter((c) => c.cvId !== saved.cvId),
+    {
+      nombre: 'Test',
+      telefono: '5512345678',
+      archivoOriginal: 'occ-stub.pdf',
+      cvId: saved.cvId,
+      cvFileName: saved.cvFileName,
+      procesado: true,
+      inWorkspace: true,
+      savedAt: new Date().toISOString(),
+      occUrl: SAMPLE_URL,
+      occChecked: true,
+      occFetched: false,
+      occFetchFailed: true,
+      occFetchError: 'occ_download_failed: Timeout #download-cv'
+    }
+  ]);
+
+  try {
+    let downloads = 0;
+    const result = await ensureOccCvFetched(saved.cvId, {
+      credentialsOk: true,
+      extractTextFn: async () => {
+        throw new Error('no debe re-leer el PDF');
+      },
+      downloadFn: async () => {
+        downloads += 1;
+        throw new Error('no debe re-descargar OCC');
+      }
+    });
+    assert.equal(result.skipped, true);
+    assert.equal(result.reason, 'already_failed');
+    assert.equal(result.occFetchFailed, true);
+    assert.equal(downloads, 0);
+    const onDisk = cvFileStore.readCvFileBuffer(saved.cvId);
+    assert.ok(onDisk.equals(original));
   } finally {
     cvFileStore.deleteCvFile(saved.cvId);
     const remaining = (cvFileStore.loadCvsManifest() || []).filter(

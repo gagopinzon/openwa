@@ -128,12 +128,46 @@ async function persistStorageState(context) {
  */
 async function looksLikeLoginPage(page) {
   const url = page.url();
-  if (/login|iniciar|signin|auth/i.test(url)) return true;
+  if (isOccLoginOrChallengeUrl(url)) return true;
   const password = page.locator('input[type="password"]');
   try {
     return await password.first().isVisible({ timeout: 1500 });
   } catch {
     return false;
+  }
+}
+
+/**
+ * @param {string} url
+ */
+function isOccLoginOrChallengeUrl(url) {
+  return /login|iniciar|inicia-sesi[oó]n|signin|auth|challenge=/i.test(
+    String(url || '')
+  );
+}
+
+/**
+ * @param {string} url
+ */
+function isOccCvProfileUrl(url) {
+  return /\/cv\/\d+/i.test(String(url || ''));
+}
+
+/**
+ * Si OCC nos mandó a challenge/login/dashboard, no esperar 60s a #download-cv.
+ * @param {string} pageUrl
+ */
+function assertLandedOnOccCvPage(pageUrl) {
+  const url = String(pageUrl || '');
+  if (isOccLoginOrChallengeUrl(url)) {
+    const err = new Error('Sesión OCC inválida o expirada');
+    err.code = 'occ_session_expired';
+    throw err;
+  }
+  if (!isOccCvProfileUrl(url)) {
+    const err = new Error(`OCC no mostró el CV (url=${url})`);
+    err.code = 'occ_not_cv_page';
+    throw err;
   }
 }
 
@@ -212,16 +246,35 @@ async function downloadFromCvPage(context, cvUrl) {
   const page = await context.newPage();
   try {
     await page.goto(cvUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-    await sleep(800);
 
+    const downloadBtn = page.locator('#download-cv');
+    const pollUntil = Date.now() + 12000;
+    while (Date.now() < pollUntil) {
+      const url = page.url();
+      if (isOccLoginOrChallengeUrl(url)) {
+        const err = new Error('Sesión OCC inválida o expirada');
+        err.code = 'occ_session_expired';
+        throw err;
+      }
+      if (!isOccCvProfileUrl(url)) {
+        assertLandedOnOccCvPage(url);
+      }
+      try {
+        if (await downloadBtn.isVisible({ timeout: 400 })) break;
+      } catch {
+        /* aún no aparece #download-cv */
+      }
+      await sleep(300);
+    }
+
+    assertLandedOnOccCvPage(page.url());
     if (await looksLikeLoginPage(page)) {
       const err = new Error('Sesión OCC inválida o expirada');
       err.code = 'occ_session_expired';
       throw err;
     }
 
-    const downloadBtn = page.locator('#download-cv');
-    await downloadBtn.waitFor({ state: 'visible', timeout: NAV_TIMEOUT_MS });
+    await downloadBtn.waitFor({ state: 'visible', timeout: 15000 });
 
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: DOWNLOAD_TIMEOUT_MS }),
@@ -452,6 +505,16 @@ async function ensureOccCvFetched(cvId, opts = {}) {
       occUrl: entry.occUrl || null
     };
   }
+  if (entry?.occFetchFailed && !opts.force) {
+    return {
+      skipped: true,
+      reason: 'already_failed',
+      occFetched: false,
+      occFetchFailed: true,
+      occUrl: entry.occUrl || null,
+      occFetchError: entry.occFetchError || null
+    };
+  }
   if (entry?.occChecked && !entry?.occUrl && !opts.force) {
     return { skipped: true, reason: 'no_occ_link', occFetched: false };
   }
@@ -558,6 +621,9 @@ module.exports = {
   enrichBufferFromOccIfNeeded,
   ensureOccCvFetched,
   closeBrowser,
+  isOccLoginOrChallengeUrl,
+  isOccCvProfileUrl,
+  assertLandedOnOccCvPage,
   OCC_SESSION_DIR,
   STORAGE_STATE_PATH
 };

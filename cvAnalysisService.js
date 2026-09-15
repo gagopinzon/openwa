@@ -552,19 +552,22 @@ function buildPanelLeadExtraido(lead = {}) {
 async function buildPanelAgendaExtras(cvId, opts = {}) {
   logAgenda('cv.buildPanelExtras.start', { cvId, provider: getProvider() });
   // Descargar CV completo desde OCC (si aplica) antes de analizar y mandar a Panel
+  let occReplacedPdf = false;
   try {
     const occCvFetchService = require('./occCvFetchService');
     const occ = await occCvFetchService.ensureOccCvFetched(cvId);
+    occReplacedPdf = Boolean(occ && occ.replaced);
     if (occ && occ.occFetched && !occ.skipped) {
       logAgenda('cv.buildPanelExtras.occFetched', {
         cvId,
         occUrl: occ.occUrl || null,
-        replaced: Boolean(occ.replaced)
+        replaced: occReplacedPdf
       });
     } else if (occ && occ.occFetchFailed) {
       warnAgenda('cv.buildPanelExtras.occFetchFailed', {
         cvId,
-        error: occ.occFetchError || null
+        error: occ.occFetchError || null,
+        nota: 'se sigue con el PDF original ya guardado'
       });
     }
   } catch (err) {
@@ -573,8 +576,9 @@ async function buildPanelAgendaExtras(cvId, opts = {}) {
       message: err && err.message ? err.message : String(err)
     });
   }
+  const forceAnalyze = occReplacedPdf;
   const enriched =
-    (await ensureCvAnalyzed(cvId, { ...opts, force: true })) || null;
+    (await ensureCvAnalyzed(cvId, { ...opts, force: forceAnalyze })) || null;
   const leadExtraido = buildPanelLeadExtraido(enriched || {});
   const analisisCV = buildPanelAnalisisCv(enriched || {});
   const cvAnalizadoEnMsg =

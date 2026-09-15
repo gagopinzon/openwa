@@ -283,7 +283,7 @@ async function confirmPendingInPanel(pending, opts = {}) {
   });
   const enrichedCv = panelExtras.enriched || cv;
   const { leadExtraido, analisisCV, cvAnalizadoEnMsg } = panelExtras;
-  const cvDelivery = await resolvePanelCvDelivery(cvId);
+  const cvDelivery = await resolvePanelCvDelivery(cvId, { skipOccFetch: true });
   logAgenda('agenda-confirm.cvDelivery', {
     pendingId: pending.id,
     cvId,
