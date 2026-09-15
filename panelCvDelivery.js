@@ -2,30 +2,12 @@ const cvFileStore = require('./cvFileStore');
 const { probeCvPublicUrl } = require('./agendaDebug');
 const occCvFetchService = require('./occCvFetchService');
 
-const DEFAULT_MAX_CV_BASE64_CHARS = 700000;
+const DEFAULT_MAX_CV_FILE_BYTES = 10 * 1024 * 1024;
 
-function maxCvBase64Chars() {
-  const raw = Number(process.env.PANEL_CV_MAX_BASE64_CHARS);
+function maxCvFileBytes() {
+  const raw = Number(process.env.PANEL_CV_MAX_FILE_BYTES);
   if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
-  return DEFAULT_MAX_CV_BASE64_CHARS;
-}
-
-function isCvBase64TooLarge(cvBase64) {
-  return String(cvBase64 || '').length > maxCvBase64Chars();
-}
-
-/**
- * Lee el CV local y arma payload base64 para el panel.
- * @param {string} cvId
- * @returns {{ cvBase64: string, cvFileName: string }|null}
- */
-function readPanelCvBase64Payload(cvId) {
-  const buffer = cvFileStore.readCvFileBuffer(cvId);
-  if (!buffer || buffer.length === 0) return null;
-  return {
-    cvBase64: buffer.toString('base64'),
-    cvFileName: cvFileStore.getCvDisplayFilename(cvId)
-  };
+  return DEFAULT_MAX_CV_FILE_BYTES;
 }
 
 function isFatalCvProbeStatus(status) {
@@ -60,8 +42,6 @@ async function tryPublicUrlDelivery(cvId, opts = {}) {
     return null;
   }
 
-  // Hairpin NAT / timeout: este host no alcanza su propio dominio público;
-  // el panel en internet sí puede descargar.
   console.warn(
     '[panel-cv] probe local de cvUrl falló; se envía URL igual:',
     (probe && probe.status) || '',
@@ -71,10 +51,13 @@ async function tryPublicUrlDelivery(cvId, opts = {}) {
 }
 
 /**
- * CV para POST /api/external/msg/reuniones: cvUrl (prod) o base64 (local / PDF chico).
- * Antes de armar el payload, descarga desde OCC si el PDF trae liga (solo al agendar).
+ * CV para POST /api/external/msg/reuniones: cvFile (multipart) o cvUrl si el PDF > 10 MB.
  * @param {string} cvId
  * @param {{ probeCvUrl?: (url: string) => Promise<object>, skipOccFetch?: boolean }} [opts]
+ * @returns {Promise<
+ *   | { delivery: 'file', buffer: Buffer, cvFileName: string, mime: string }
+ *   | { delivery: 'url', cvUrl: string }
+ * >}
  */
 async function resolvePanelCvDelivery(cvId, opts = {}) {
   const id = String(cvId || '').trim();
@@ -95,68 +78,78 @@ async function resolvePanelCvDelivery(cvId, opts = {}) {
     }
   }
 
-  const urlDelivery = await tryPublicUrlDelivery(id, opts);
-  if (urlDelivery) return urlDelivery;
-
-  const base64Payload = readPanelCvBase64Payload(id);
-  if (base64Payload && !isCvBase64TooLarge(base64Payload.cvBase64)) {
-    return {
-      delivery: 'base64',
-      cvBase64: base64Payload.cvBase64,
-      cvFileName: base64Payload.cvFileName
-    };
-  }
-
   if (!cvFileStore.getCvFileMeta(id)) {
     const err = new Error('Archivo del CV no está disponible');
     err.status = 404;
     throw err;
   }
 
-  if (base64Payload && isCvBase64TooLarge(base64Payload.cvBase64)) {
+  const buffer = cvFileStore.readCvFileBuffer(id);
+  if (!buffer || buffer.length === 0) {
+    const err = new Error('Archivo del CV no está disponible');
+    err.status = 404;
+    throw err;
+  }
+
+  const maxBytes = maxCvFileBytes();
+  if (buffer.length <= maxBytes) {
+    const meta = cvFileStore.getCvFileMeta(id);
+    return {
+      delivery: 'file',
+      buffer,
+      cvFileName: cvFileStore.getCvDisplayFilename(id),
+      mime: (meta && meta.mime) || 'application/pdf'
+    };
+  }
+
+  const urlDelivery = await tryPublicUrlDelivery(id, opts);
+  if (urlDelivery) return urlDelivery;
+
+  if (!cvFileStore.isPublicUrlConfigured()) {
     const err = new Error(
-      'El CV es demasiado grande para enviarlo en base64 al panel. ' +
+      'El CV es demasiado grande para enviarlo como cvFile al panel. ' +
         'Configura CV_PUBLIC_URL pública para que el panel descargue el PDF.'
     );
     err.status = 413;
     throw err;
   }
 
-  if (!cvFileStore.isPublicUrlConfigured()) {
-    const err = new Error(
-      'No hay PDF local ni CV_PUBLIC_URL configurada para enviar el CV al panel'
-    );
-    err.status = 503;
-    throw err;
-  }
-
   const cvUrl = cvFileStore.buildCvPublicUrl(id);
   if (!cvFileStore.isCvUrlReachableByPanel(cvUrl)) {
     const err = new Error(cvFileStore.panelUnreachableCvUrlError(cvUrl));
-    err.status = 503;
+    err.status = 413;
     throw err;
   }
 
-  const probeFn = opts.probeCvUrl || probeCvPublicUrl;
-  const probe = await probeFn(cvUrl);
-  if (!probe.ok) {
-    const fatal =
-      probe.status === 401 || probe.status === 403 || probe.status === 404;
-    const err = new Error(cvFileStore.describeCvProbeFailure(cvUrl, probe));
-    err.status = fatal ? 503 : 502;
-    throw err;
-  }
+  const err = new Error(cvFileStore.describeCvProbeFailure(cvUrl, { reason: 'cvFile demasiado grande' }));
+  err.status = 413;
+  throw err;
+}
 
-  return {
-    delivery: 'url',
-    cvUrl
-  };
+/**
+ * Campos para panelMsgClient.crearReunion según el delivery.
+ * @param {{ delivery?: string, buffer?: Buffer, cvFileName?: string, mime?: string, cvUrl?: string }} delivery
+ */
+function cvFieldsFromDelivery(delivery) {
+  const mode = delivery && delivery.delivery;
+  if (mode === 'file') {
+    return {
+      cvFile: delivery.buffer,
+      cvFileName: delivery.cvFileName,
+      cvMime: delivery.mime
+    };
+  }
+  if (mode === 'url') {
+    return { cvUrl: delivery.cvUrl };
+  }
+  const err = new Error('Delivery de CV inválido');
+  err.status = 400;
+  throw err;
 }
 
 module.exports = {
-  DEFAULT_MAX_CV_BASE64_CHARS,
-  maxCvBase64Chars,
-  isCvBase64TooLarge,
-  readPanelCvBase64Payload,
-  resolvePanelCvDelivery
+  DEFAULT_MAX_CV_FILE_BYTES,
+  maxCvFileBytes,
+  resolvePanelCvDelivery,
+  cvFieldsFromDelivery
 };

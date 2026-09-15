@@ -5,6 +5,7 @@ const {
   formatSlotLabel,
   collectGerenteEmails,
   mergePanelDisponibilidad,
+  getAggregatedSlots,
   publicSlots,
   collapseConsecutiveRanges,
   selectOfferStarts,
@@ -303,5 +304,22 @@ describe('agendaAvailability', () => {
     if (minutes >= 8 * 60 + 15) {
       assert.ok(!future.some((s) => s.fecha === ymd && s.horaInicio === '08:00'));
     }
+  });
+
+  it('propaga skipCache a getDisponibilidad', async () => {
+    const calls = [];
+    await getAggregatedSlots({
+      fechaInicio: '2026-09-14',
+      fechaFin: '2026-09-15',
+      skipCache: true,
+      listEmails: () => ['g@x.com'],
+      getDisponibilidad: async (params) => {
+        calls.push(params);
+        return { vendedores: [] };
+      }
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].skipCache, true);
+    assert.equal(calls[0].gerenteEmail, 'g@x.com');
   });
 });

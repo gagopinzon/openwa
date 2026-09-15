@@ -15,6 +15,85 @@ const {
 } = require('./agendaMeetMessages');
 const { logAgenda, warnAgenda } = require('./agendaDebug');
 
+function slotStartKey(item) {
+  if (!item) return '';
+  const fecha = String(item.fecha || '').trim();
+  const hora = String(item.horaInicio || '').trim().slice(0, 5);
+  if (!fecha || !hora) return '';
+  return `${fecha}|${hora}`;
+}
+
+/**
+ * @param {object|null|undefined} confirmed
+ * @param {object|null|undefined} slot
+ */
+function isSameConfirmedSlot(confirmed, slot) {
+  const a = slotStartKey(confirmed);
+  const b = slotStartKey(slot);
+  return Boolean(a && b && a === b);
+}
+
+/**
+ * Repite la hora ya confirmada (a veces con el mismo día), sin pedir otro horario.
+ * @param {string} body
+ * @param {object} confirmed
+ */
+function echoingConfirmedTime(body, confirmed) {
+  const times = agendaIntent.extractTimesFromMessage(body);
+  if (!times.length) return false;
+  const confirmedHhmm = String(confirmed && confirmed.horaInicio ? confirmed.horaInicio : '')
+    .trim()
+    .slice(0, 5);
+  if (!confirmedHhmm || !times.includes(confirmedHhmm)) return false;
+  const range = agendaIntent.resolveDateRangeFromMessage(body);
+  if (!range || range.fechaInicio !== range.fechaFin) return true;
+  const confirmedFecha = String(confirmed && confirmed.fecha ? confirmed.fecha : '').trim();
+  return Boolean(confirmedFecha) && range.fechaInicio === confirmedFecha;
+}
+
+function offerCreatedAfterConfirm(priorOffer, confirmed) {
+  const offerAt = Date.parse(priorOffer && priorOffer.createdAt) || 0;
+  const confirmedAt = Date.parse(confirmed && (confirmed.confirmedAt || confirmed.createdAt)) || 0;
+  return Boolean(offerAt && confirmedAt && offerAt >= confirmedAt);
+}
+
+/**
+ * Tras una cita confirmada, solo se mueve si el lead pide otro horario
+ * (no un "ok" / "perfecto" ni repetir la hora ya agendada).
+ * @param {string} body
+ * @param {object|null|undefined} confirmed
+ * @param {{ priorOffer?: object|null }} [opts]
+ */
+function shouldAttemptReschedule(body, confirmed, opts = {}) {
+  if (!confirmed || confirmed.status !== agendaPendingStore.STATUS.CONFIRMED) {
+    return false;
+  }
+
+  const wantsMove = agendaIntent.wantsRescheduleMeeting(body);
+  const hasTime = agendaIntent.hasExplicitTimeChoice(body);
+  const confirmingYes = agendaIntent.looksLikeTimeConfirmYes(body);
+  const priorOffer = opts.priorOffer || null;
+  const offerOpen = Boolean(
+    priorOffer && Array.isArray(priorOffer.slots) && priorOffer.slots.length
+  );
+  const proposed = priorOffer && priorOffer.proposedSlot;
+  const rescheduleOffer = offerOpen && offerCreatedAfterConfirm(priorOffer, confirmed);
+
+  if (echoingConfirmedTime(body, confirmed) && !wantsMove) return false;
+  if (wantsMove) return true;
+  if (rescheduleOffer && hasTime) return true;
+  if (
+    rescheduleOffer &&
+    confirmingYes &&
+    proposed &&
+    !isSameConfirmedSlot(confirmed, proposed)
+  ) {
+    return true;
+  }
+  if (hasTime && !echoingConfirmedTime(body, confirmed)) return true;
+  return false;
+}
+
 /**
  * Ordena candidatos poniendo primero al vendedor preferido.
  * @param {Array<{ vendedorId: string, gerenteEmail?: string, nombre?: string|null }>} candidates
@@ -147,19 +226,18 @@ async function handleReschedule({
     return { handled: false, reason: 'no_confirmed' };
   }
 
+  if (!shouldAttemptReschedule(body, confirmed, { priorOffer })) {
+    return { handled: false, reason: 'no_reschedule_intent' };
+  }
+
   const wantsMove = agendaIntent.wantsRescheduleMeeting(body);
-  const hasTime =
-    agendaIntent.hasExplicitTimeChoice(body) ||
-    agendaIntent.looksLikeTimeConfirmYes(body);
+  const hasTime = agendaIntent.hasExplicitTimeChoice(body);
   const fromOffer =
     priorOffer &&
     Array.isArray(priorOffer.slots) &&
     priorOffer.slots.length &&
+    offerCreatedAfterConfirm(priorOffer, confirmed) &&
     (hasTime || agendaIntent.looksLikeTimeConfirmYes(body));
-
-  if (!wantsMove && !fromOffer && !hasTime) {
-    return { handled: false, reason: 'no_reschedule_intent' };
-  }
 
   if (!String(confirmed.panelReunionId || '').trim()) {
     return {
@@ -199,9 +277,10 @@ async function handleReschedule({
         fechaInicio: today,
         fechaFin: tomorrow
       };
-    let aggregated = await agendaAvailability.getAggregatedSlotsCached({
+    let aggregated = await agendaAvailability.getAggregatedSlots({
       fechaInicio: range.fechaInicio,
-      fechaFin: range.fechaFin
+      fechaFin: range.fechaFin,
+      skipCache: true
     });
     let slots = aggregated.slots || [];
 
@@ -222,12 +301,13 @@ async function handleReschedule({
 
     if (!chosen) {
       if (!slots.length) {
-        aggregated = await agendaAvailability.getAggregatedSlotsCached({
+        aggregated = await agendaAvailability.getAggregatedSlots({
           fechaInicio: range.fechaInicio <= today ? tomorrow : range.fechaInicio,
           fechaFin: agendaIntent.addDaysYmd(
             range.fechaInicio <= today ? tomorrow : range.fechaInicio,
             6
-          )
+          ),
+          skipCache: true
         });
         slots = aggregated.slots || [];
       }
@@ -261,6 +341,10 @@ async function handleReschedule({
         }
       };
     }
+  }
+
+  if (isSameConfirmedSlot(confirmed, chosen)) {
+    return { handled: false, reason: 'same_slot' };
   }
 
   try {
@@ -323,6 +407,8 @@ async function handleReschedule({
 
 module.exports = {
   preferSameVendor,
+  isSameConfirmedSlot,
+  shouldAttemptReschedule,
   applyRescheduleToPanel,
   handleReschedule
 };

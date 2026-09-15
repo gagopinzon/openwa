@@ -2,7 +2,7 @@ const agendaPendingStore = require('./agendaPendingStore');
 const panelMsgClient = require('./panelMsgClient');
 const cvFileStore = require('./cvFileStore');
 const cvAnalysisService = require('./cvAnalysisService');
-const { resolvePanelCvDelivery } = require('./panelCvDelivery');
+const { resolvePanelCvDelivery, cvFieldsFromDelivery } = require('./panelCvDelivery');
 const {
   extractMeetUrlFromPanel,
   isRetryablePanelError,
@@ -89,7 +89,8 @@ async function resolveRankedVendors(pending, vendors, opts = {}) {
           const data = await fetchFn({
             gerenteEmail,
             fechaInicio: fecha,
-            fechaFin: fecha
+            fechaFin: fecha,
+            skipCache: true
           });
           return { gerenteEmail, data };
         } catch (error) {
@@ -288,7 +289,7 @@ async function confirmPendingInPanel(pending, opts = {}) {
     cvId,
     delivery: cvDelivery.delivery,
     cvFileName: cvDelivery.cvFileName || null,
-    cvBase64Bytes: cvDelivery.cvBase64 ? cvDelivery.cvBase64.length : null,
+    cvFileBytes: cvDelivery.buffer ? cvDelivery.buffer.length : null,
     cvUrlHost:
       cvDelivery.cvUrl && cvDelivery.delivery === 'url'
         ? (() => {
@@ -359,9 +360,7 @@ async function confirmPendingInPanel(pending, opts = {}) {
         fecha: pending.fecha,
         horaInicio: pending.horaInicio,
         horaFin: pending.horaFin,
-        ...(cvDelivery.delivery === 'base64'
-          ? { cvBase64: cvDelivery.cvBase64, cvFileName: cvDelivery.cvFileName }
-          : { cvUrl: cvDelivery.cvUrl }),
+        ...cvFieldsFromDelivery(cvDelivery),
         titulo: `Sesión — ${leadNombre || 'candidato'}`,
         leadNombre,
         leadTelefono:

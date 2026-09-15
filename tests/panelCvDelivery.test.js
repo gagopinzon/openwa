@@ -1,21 +1,29 @@
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
 const cvFileStore = require('../cvFileStore');
-const { resolvePanelCvDelivery } = require('../panelCvDelivery');
+const {
+  resolvePanelCvDelivery,
+  cvFieldsFromDelivery
+} = require('../panelCvDelivery');
 
 describe('panelCvDelivery', () => {
   const prevEnv = {};
   let savedCvId = null;
 
   beforeEach(() => {
-    for (const key of ['CV_PUBLIC_URL', 'WEBHOOK_PUBLIC_URL', 'AUTH_SESSION_SECRET', 'PANEL_CV_MAX_BASE64_CHARS']) {
+    for (const key of [
+      'CV_PUBLIC_URL',
+      'WEBHOOK_PUBLIC_URL',
+      'AUTH_SESSION_SECRET',
+      'PANEL_CV_MAX_FILE_BYTES',
+      'PANEL_CV_MAX_BASE64_CHARS'
+    ]) {
       prevEnv[key] = process.env[key];
     }
     process.env.AUTH_SESSION_SECRET = 'panel-cv-delivery-test';
     delete process.env.CV_PUBLIC_URL;
     delete process.env.WEBHOOK_PUBLIC_URL;
+    delete process.env.PANEL_CV_MAX_FILE_BYTES;
     delete process.env.PANEL_CV_MAX_BASE64_CHARS;
 
     const saved = cvFileStore.saveCvFile(Buffer.from('%PDF-1.4 test'), 'gago-cv.pdf');
@@ -37,83 +45,81 @@ describe('panelCvDelivery', () => {
     }
   });
 
-  it('prefiere cvBase64 cuando el archivo está en disco', async () => {
-    const delivery = await resolvePanelCvDelivery(savedCvId);
-    assert.equal(delivery.delivery, 'base64');
-    assert.ok(delivery.cvBase64);
-    assert.match(delivery.cvFileName, /\.pdf$/i);
-    assert.equal(delivery.cvUrl, undefined);
-    assert.match(Buffer.from(delivery.cvBase64, 'base64').toString('ascii'), /^%PDF/);
-  });
-
-  it('si hay URL pública alcanzable, prefiere cvUrl aunque el PDF esté en disco', async () => {
+  it('usa cvFile cuando el PDF local cabe en 10 MB, aunque haya CV_PUBLIC_URL', async () => {
     process.env.CV_PUBLIC_URL = 'https://msg.protalentconnections.com';
     const delivery = await resolvePanelCvDelivery(savedCvId, {
+      skipOccFetch: true,
+      probeCvUrl: async () => ({ ok: true, status: 200 })
+    });
+    assert.equal(delivery.delivery, 'file');
+    assert.ok(Buffer.isBuffer(delivery.buffer));
+    assert.match(delivery.buffer.toString('ascii'), /^%PDF/);
+    assert.match(delivery.cvFileName, /\.pdf$/i);
+    assert.equal(delivery.mime, 'application/pdf');
+    assert.equal(delivery.cvBase64, undefined);
+    assert.equal(delivery.cvUrl, undefined);
+  });
+
+  it('si el PDF supera el tope y hay URL pública, usa cvUrl', async () => {
+    process.env.PANEL_CV_MAX_FILE_BYTES = '10';
+    process.env.CV_PUBLIC_URL = 'https://msg.protalentconnections.com';
+    const delivery = await resolvePanelCvDelivery(savedCvId, {
+      skipOccFetch: true,
       probeCvUrl: async () => ({ ok: true, status: 200 })
     });
     assert.equal(delivery.delivery, 'url');
     assert.match(delivery.cvUrl, /^https:\/\/msg\.protalentconnections\.com\/api\/public\/cv\//);
+    assert.equal(delivery.buffer, undefined);
     assert.equal(delivery.cvBase64, undefined);
   });
 
-  it('si el PDF en base64 supera el límite y no hay URL, falla con 413', async () => {
-    process.env.PANEL_CV_MAX_BASE64_CHARS = '10';
+  it('si el PDF supera el tope y no hay URL pública, falla con 413', async () => {
+    process.env.PANEL_CV_MAX_FILE_BYTES = '10';
     await assert.rejects(
       () => resolvePanelCvDelivery(savedCvId, { skipOccFetch: true }),
-      (err) => err.status === 413 && /demasiado grande/i.test(err.message)
+      (err) => err.status === 413 && /10 MB|demasiado grande|cvFile/i.test(err.message)
     );
   });
 
-  it('si el probe local falla por red, igual usa cvUrl pública', async () => {
+  it('si no hay archivo, falla con 404 y no inventa cvUrl', async () => {
     process.env.CV_PUBLIC_URL = 'https://msg.protalentconnections.com';
-    process.env.PANEL_CV_MAX_BASE64_CHARS = '10';
-    const delivery = await resolvePanelCvDelivery(savedCvId, {
-      skipOccFetch: true,
-      probeCvUrl: async () => ({ ok: false, status: 0, reason: 'ECONNRESET' })
-    });
-    assert.equal(delivery.delivery, 'url');
-    assert.match(delivery.cvUrl, /^https:\/\/msg\.protalentconnections\.com\/api\/public\/cv\//);
+    await assert.rejects(
+      () => resolvePanelCvDelivery('missing-cv-id', { skipOccFetch: true }),
+      (err) => err.status === 404 && /no está disponible/i.test(err.message)
+    );
   });
 
-  it('si el probe da 401 no usa cvUrl', async () => {
-    process.env.CV_PUBLIC_URL = 'https://msg.protalentconnections.com';
-    const delivery = await resolvePanelCvDelivery(savedCvId, {
-      skipOccFetch: true,
-      probeCvUrl: async () => ({ ok: false, status: 401 })
-    });
-    assert.equal(delivery.delivery, 'base64');
-  });
-
-  it('usa cvUrl solo si no se puede leer el archivo local', async () => {
+  it('si el buffer no se puede leer, 404 aunque exista URL pública', async () => {
     const originalRead = cvFileStore.readCvFileBuffer;
     cvFileStore.readCvFileBuffer = () => null;
     process.env.CV_PUBLIC_URL = 'https://msg.protalentconnections.com';
-
-    try {
-      const delivery = await resolvePanelCvDelivery(savedCvId, {
-        probeCvUrl: async () => ({ ok: true, status: 200 })
-      });
-
-      assert.equal(delivery.delivery, 'url');
-      assert.match(delivery.cvUrl, /^https:\/\/msg\.protalentconnections\.com\/api\/public\/cv\//);
-      assert.equal(delivery.cvBase64, undefined);
-    } finally {
-      cvFileStore.readCvFileBuffer = originalRead;
-    }
-  });
-
-  it('falla si no hay base64 y la URL pública no es alcanzable', async () => {
-    const originalRead = cvFileStore.readCvFileBuffer;
-    cvFileStore.readCvFileBuffer = () => null;
-    process.env.WEBHOOK_PUBLIC_URL = 'http://172.17.0.1:3445';
-
     try {
       await assert.rejects(
-        () => resolvePanelCvDelivery(savedCvId),
-        (err) => err.status === 503 && /172\.17\.0\.1/.test(err.message)
+        () => resolvePanelCvDelivery(savedCvId, { skipOccFetch: true }),
+        (err) => err.status === 404
       );
     } finally {
       cvFileStore.readCvFileBuffer = originalRead;
     }
+  });
+
+  it('cvFieldsFromDelivery arma cvFile o cvUrl según delivery', () => {
+    const fileFields = cvFieldsFromDelivery({
+      delivery: 'file',
+      buffer: Buffer.from('pdf'),
+      cvFileName: 'a.pdf',
+      mime: 'application/pdf'
+    });
+    assert.equal(fileFields.cvFileName, 'a.pdf');
+    assert.equal(fileFields.cvMime, 'application/pdf');
+    assert.ok(Buffer.isBuffer(fileFields.cvFile));
+    assert.equal(fileFields.cvUrl, undefined);
+
+    const urlFields = cvFieldsFromDelivery({
+      delivery: 'url',
+      cvUrl: 'https://msg.example/cv/1'
+    });
+    assert.equal(urlFields.cvUrl, 'https://msg.example/cv/1');
+    assert.equal(urlFields.cvFile, undefined);
   });
 });

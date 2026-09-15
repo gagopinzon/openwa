@@ -1256,6 +1256,27 @@ async function finalizeAgendaBooking({
     return gated;
   }
 
+  const alreadyConfirmed = agendaPendingStore.findConfirmedByPhone(normalizedPhone);
+  if (alreadyConfirmed) {
+    const when =
+      alreadyConfirmed.label ||
+      `${alreadyConfirmed.fecha} ${alreadyConfirmed.horaInicio}`;
+    logAgenda('auto-reply.booking.alreadyConfirmedSkip', {
+      phone: normalizedPhone,
+      pendingId: alreadyConfirmed.id,
+      vendedorId: alreadyConfirmed.vendedorId || null
+    });
+    return {
+      replyText: null,
+      agendaMeta: { reason: 'already_confirmed', pendingId: alreadyConfirmed.id },
+      agendaPendingId: alreadyConfirmed.id,
+      agendaContext:
+        `CITA YA CONFIRMADA: ${when}` +
+        (alreadyConfirmed.urlReunion ? ` Meet: ${alreadyConfirmed.urlReunion}` : '') +
+        `. No crees otra cita ni cambies de vendedor. Solo se mueve si el lead pide otro horario.`
+    };
+  }
+
   const pending = agendaPendingStore.createPending({
     telefono: normalizedPhone,
     chatId: identity.chatId || chatId,

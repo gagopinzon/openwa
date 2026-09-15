@@ -193,7 +193,8 @@ async function getAggregatedSlots(opts = {}) {
           gerenteEmail,
           fechaInicio: opts.fechaInicio,
           fechaFin: opts.fechaFin,
-          slotMinutos: opts.slotMinutos
+          slotMinutos: opts.slotMinutos,
+          skipCache: Boolean(opts.skipCache)
         });
         return { gerenteEmail, data };
       } catch (error) {

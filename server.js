@@ -56,7 +56,7 @@ const openwaInboxPoller = require('./openwaInboxPoller');
 const hermesBridge = require('./hermesBridge');
 const usersStore = require('./usersStore');
 const panelMsgClient = require('./panelMsgClient');
-const { resolvePanelCvDelivery } = require('./panelCvDelivery');
+const { resolvePanelCvDelivery, cvFieldsFromDelivery } = require('./panelCvDelivery');
 const agendaAvailability = require('./agendaAvailability');
 const agendaPendingStore = require('./agendaPendingStore');
 const agendaOfferStore = require('./agendaOfferStore');
@@ -2116,13 +2116,11 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
     const panelData = await panelMsgClient.crearReunion({
       gerenteEmail,
       vendedorId,
-      fecha: pending.fecha,
-      horaInicio: pending.horaInicio,
-      horaFin: pending.horaFin,
-      ...(cvDelivery.delivery === 'base64'
-        ? { cvBase64: cvDelivery.cvBase64, cvFileName: cvDelivery.cvFileName }
-        : { cvUrl: cvDelivery.cvUrl }),
-      titulo: `Sesión — ${pending.contactName || cv?.nombre || 'candidato'}`,
+        fecha: pending.fecha,
+        horaInicio: pending.horaInicio,
+        horaFin: pending.horaFin,
+        ...cvFieldsFromDelivery(cvDelivery),
+        titulo: `Sesión — ${pending.contactName || cv?.nombre || 'candidato'}`,
       leadNombre: pending.contactName || cv?.nombre || panelExtras.leadExtraido.leadNombre,
       leadTelefono: pending.telefono || panelExtras.leadExtraido.leadTelefono,
       leadCorreo: panelExtras.leadExtraido.leadCorreo,
@@ -2434,9 +2432,7 @@ app.post('/api/panel/reuniones', async (req, res) => {
       fecha,
       horaInicio,
       horaFin,
-      ...(cvDelivery.delivery === 'base64'
-        ? { cvBase64: cvDelivery.cvBase64, cvFileName: cvDelivery.cvFileName }
-        : { cvUrl: cvDelivery.cvUrl }),
+      ...cvFieldsFromDelivery(cvDelivery),
       titulo:
         titulo ||
         `Sesión — ${leadNombre || cv?.nombre || cv?.archivoOriginal || 'candidato'}`,
