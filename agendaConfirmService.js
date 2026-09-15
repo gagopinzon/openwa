@@ -279,7 +279,8 @@ async function confirmPendingInPanel(pending, opts = {}) {
   const cv = resolveCvEntry(cvId);
   const panelExtras = await cvAnalysisService.buildPanelAgendaExtras(cvId, {
     nombre: pending.contactName || cv?.nombre,
-    telefono: pending.telefono || cv?.telefono
+    telefono: pending.telefono || cv?.telefono,
+    skipOccFetch: true
   });
   const enrichedCv = panelExtras.enriched || cv;
   const { leadExtraido, analisisCV, cvAnalizadoEnMsg } = panelExtras;

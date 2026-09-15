@@ -972,12 +972,13 @@ function isCvRelatedConfirmError(error) {
 
 function isPanelCvProcessingError(error) {
   const msg = String((error && error.message) || '').toLowerCase();
+  const code = error && error.code ? String(error.code).toLowerCase() : '';
+  if (code.startsWith('occ_')) return false;
   return (
     msg.includes('procesar el cv') ||
+    msg.includes('procesando el cv') ||
     msg.includes('análisis deepseek') ||
-    msg.includes('analisis deepseek') ||
-    msg.includes('timeout') ||
-    msg.includes('descarga')
+    msg.includes('analisis deepseek')
   );
 }
 
@@ -3402,7 +3403,8 @@ module.exports = {
   simulateHumanTyping,
   skipAutoReplyDelays,
   replyDraftService,
-  bindReplyDraftHandlers
+  bindReplyDraftHandlers,
+  isPanelCvProcessingError
 };
 
 bindReplyDraftHandlers();

@@ -551,30 +551,37 @@ function buildPanelLeadExtraido(lead = {}) {
  */
 async function buildPanelAgendaExtras(cvId, opts = {}) {
   logAgenda('cv.buildPanelExtras.start', { cvId, provider: getProvider() });
-  // Descargar CV completo desde OCC (si aplica) antes de analizar y mandar a Panel
+  // OCC al confirmar bloquea la reunión (challenge / #download-cv). El PDF local ya basta.
   let occReplacedPdf = false;
-  try {
-    const occCvFetchService = require('./occCvFetchService');
-    const occ = await occCvFetchService.ensureOccCvFetched(cvId);
-    occReplacedPdf = Boolean(occ && occ.replaced);
-    if (occ && occ.occFetched && !occ.skipped) {
-      logAgenda('cv.buildPanelExtras.occFetched', {
+  if (opts.skipOccFetch) {
+    logAgenda('cv.buildPanelExtras.skipOccFetch', {
+      cvId,
+      nota: 'se envía el PDF ya guardado'
+    });
+  } else {
+    try {
+      const occCvFetchService = require('./occCvFetchService');
+      const occ = await occCvFetchService.ensureOccCvFetched(cvId);
+      occReplacedPdf = Boolean(occ && occ.replaced);
+      if (occ && occ.occFetched && !occ.skipped) {
+        logAgenda('cv.buildPanelExtras.occFetched', {
+          cvId,
+          occUrl: occ.occUrl || null,
+          replaced: occReplacedPdf
+        });
+      } else if (occ && occ.occFetchFailed) {
+        warnAgenda('cv.buildPanelExtras.occFetchFailed', {
+          cvId,
+          error: occ.occFetchError || null,
+          nota: 'se sigue con el PDF original ya guardado'
+        });
+      }
+    } catch (err) {
+      warnAgenda('cv.buildPanelExtras.occError', {
         cvId,
-        occUrl: occ.occUrl || null,
-        replaced: occReplacedPdf
-      });
-    } else if (occ && occ.occFetchFailed) {
-      warnAgenda('cv.buildPanelExtras.occFetchFailed', {
-        cvId,
-        error: occ.occFetchError || null,
-        nota: 'se sigue con el PDF original ya guardado'
+        message: err && err.message ? err.message : String(err)
       });
     }
-  } catch (err) {
-    warnAgenda('cv.buildPanelExtras.occError', {
-      cvId,
-      message: err && err.message ? err.message : String(err)
-    });
   }
   const forceAnalyze = occReplacedPdf;
   const enriched =
