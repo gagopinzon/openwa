@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { extractTextFromPDF, verifyPdfReadable } = require('../pdfProcessor');
+const { extractTextFromPDF, extractCVData, verifyPdfReadable } = require('../pdfProcessor');
 
 /**
  * PDF mínimo con texto en un stream sin comprimir y xref clásico.
@@ -69,5 +69,79 @@ describe('pdfProcessor', () => {
   it('verifyPdfReadable acepta PDFs con XRef dañada si el contenido es recuperable', async () => {
     const pdf = corruptXrefOffsets(buildSimplePdf('Nombre Recuperable'));
     assert.equal(await verifyPdfReadable(pdf), true);
+  });
+});
+
+describe('extractCVData (encabezado OCC)', () => {
+  it('formato nuevo: nombre en la 1ª línea y ciudad, estado en la 2ª', () => {
+    const text = [
+      'Ana López García',
+      'San Mateo Atenco, Estado de México',
+      '5517975170',
+      'ana.lopez@mail.com',
+      'Experiencia profesional',
+      '- Project manager sr en AMF Bakery',
+      'Julio 2022 - Julio 2022',
+      'Coordinar proyectos CAPEX'
+    ].join('\n');
+    const data = extractCVData(text);
+    assert.equal(data.nombre, 'Ana López García');
+    assert.equal(data.ciudad, 'San Mateo Atenco');
+    assert.equal(data.estado, 'Estado de México');
+    assert.equal(data.correo, 'ana.lopez@mail.com');
+    assert.match(data.telefono, /5517975170/);
+  });
+
+  it('formato nuevo: alcaldía y Ciudad de México', () => {
+    const text = [
+      'Luis Ordóñez',
+      'Azcapotzalco, Ciudad de México',
+      '5576778083',
+      'luis@mail.com',
+      'Experiencia profesional',
+      '- PMO en Aeromexico',
+      'Febrero 2025 - Junio 2025',
+      'Gestión de proyectos'
+    ].join('\n');
+    const data = extractCVData(text);
+    assert.equal(data.nombre, 'Luis Ordóñez');
+    assert.equal(data.ciudad, 'Azcapotzalco');
+    assert.equal(data.estado, 'Ciudad de México');
+  });
+
+  it('formato nuevo: alcaldía con inicial (Gustavo A. Madero)', () => {
+    const text = [
+      'Mario Paydón Juárez',
+      'Gustavo A. Madero, Ciudad de México',
+      '5581958464',
+      'mario@mail.com',
+      'Experiencia profesional',
+      '- PMO Lead en Santander',
+      'Octubre 2023 - Octubre 2023',
+      'Lead PMO Office'
+    ].join('\n');
+    const data = extractCVData(text);
+    assert.equal(data.nombre, 'Mario Paydón Juárez');
+    assert.equal(data.ciudad, 'Gustavo A. Madero');
+    assert.equal(data.estado, 'Ciudad de México');
+  });
+
+  it('formato viejo: salta occ.com.mx y no usa la ciudad como nombre', () => {
+    const text = [
+      '| www.occ.com.mx',
+      'Omar Rodolfo Morales Muñoz',
+      'Estado de México',
+      '(55) 5436 2147',
+      'omar@mail.com',
+      'Experiencia profesional',
+      '- Strategic Procurement en Consultor Independiente',
+      'enero 2024 - julio 2026',
+      'Análisis de gasto'
+    ].join('\n');
+    const data = extractCVData(text);
+    assert.equal(data.nombre, 'Omar Rodolfo Morales Muñoz');
+    assert.equal(data.ciudad, '');
+    assert.equal(data.estado, 'Estado de México');
+    assert.equal(data.correo, 'omar@mail.com');
   });
 });

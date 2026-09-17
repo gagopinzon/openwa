@@ -215,15 +215,15 @@ function normalizeLeadFromRegex(text, hints = {}) {
     telefono:
       String(hints.telefono || base.telefono || '').trim() ||
       'No encontrado',
-    correo: email || '',
-    leadCorreo: email || '',
-    email: email || '',
+    correo: email || base.correo || '',
+    leadCorreo: email || base.leadCorreo || '',
+    email: email || base.email || '',
     experiencia: base.experiencia || '',
     textoCompleto: text,
-    ciudad: '',
-    estado: '',
-    leadCiudad: '',
-    leadEstado: '',
+    ciudad: base.ciudad || '',
+    estado: base.estado || '',
+    leadCiudad: base.leadCiudad || base.ciudad || '',
+    leadEstado: base.leadEstado || base.estado || '',
     analysisProvider: 'regex'
   };
 }

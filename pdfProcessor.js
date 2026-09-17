@@ -164,30 +164,95 @@ async function extractTextFromPDF(buffer, opts = {}) {
   throw new Error(`Error procesando PDF: ${reason}`);
 }
 
+const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+const PHONE_RE = /(?:\+52\s?)?\(?\d{2,3}\)?[\s.-]?\d{3,4}[\s.-]?\d{4}/;
+const MEXICO_STATE_RE =
+  /^(estado de|ciudad de m[eé]xico|cdmx|jalisco|nuevo le[oó]n|m[eé]xico|puebla|quer[eé]taro|guanajuato|veracruz|yucat[aá]n|sonora|chihuahua|coahuila|tamaulipas|baja california|quintana roo|morelos|hidalgo|tlaxcala|tabasco|chiapas|oaxaca|guerrero|michoac[aá]n|nayarit|colima|aguascalientes|zacatecas|durango|sinaloa|campeche|baja california sur|san luis potos[ií])\b/i;
+
+function isHeaderNoise(line) {
+  return /occ\.com\.mx|^\|?\s*www\./i.test(String(line || ''));
+}
+
+function isEmailLine(line) {
+  return EMAIL_RE.test(String(line || ''));
+}
+
+function isPhoneLine(line) {
+  const digits = String(line || '').replace(/\D/g, '');
+  if (digits.length >= 10 && digits.length <= 13) return true;
+  return PHONE_RE.test(String(line || ''));
+}
+
+function isExperienceHeader(line) {
+  return /experiencia\s+profesional/i.test(String(line || ''));
+}
+
+function looksLikeLocation(line) {
+  const s = String(line || '').trim();
+  if (!s || isEmailLine(s) || isPhoneLine(s) || isExperienceHeader(s) || isHeaderNoise(s)) {
+    return false;
+  }
+  if (s.includes(',')) return true;
+  return MEXICO_STATE_RE.test(s);
+}
+
+function parseLocalidad(line) {
+  const raw = String(line || '').trim();
+  if (!raw) return { ciudad: '', estado: '' };
+  const parts = raw.split(',').map((p) => p.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    return { ciudad: parts[0], estado: parts.slice(1).join(', ') };
+  }
+  if (MEXICO_STATE_RE.test(raw)) {
+    return { ciudad: '', estado: raw };
+  }
+  return { ciudad: raw, estado: '' };
+}
+
+function extractOccHeader(lines) {
+  let i = 0;
+  if (lines[0] && isHeaderNoise(lines[0])) i += 1;
+
+  const nombre =
+    lines[i] && !isExperienceHeader(lines[i]) && !isEmailLine(lines[i]) && !isPhoneLine(lines[i])
+      ? lines[i]
+      : 'No encontrado';
+  i += 1;
+
+  let ciudad = '';
+  let estado = '';
+  if (lines[i] && looksLikeLocation(lines[i])) {
+    const loc = parseLocalidad(lines[i]);
+    ciudad = loc.ciudad;
+    estado = loc.estado;
+  }
+
+  const headerBlob = lines.slice(0, 10).join('\n');
+  const emailMatch = headerBlob.match(EMAIL_RE);
+  const correo = emailMatch ? emailMatch[0] : '';
+
+  return { nombre, ciudad, estado, correo };
+}
+
 /**
  * Extrae datos estructurados de un CV desde el texto
  * @param {string} text - Texto del CV
- * @returns {Object} - Objeto con nombre, teléfono y experiencia
+ * @returns {Object} - Objeto con nombre, teléfono, ciudad y experiencia
  */
 function extractCVData(text) {
-  const lines = text
+  const lines = String(text || '')
     .split('\n')
-    .map(line => line.trim())
-    .filter(line => line.length > 0);
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 
-  // Extraer nombre (generalmente la segunda línea)
-  const nombre = lines.length > 1 ? lines[1] : 'No encontrado';
+  const header = extractOccHeader(lines);
+  const nombre = header.nombre || 'No encontrado';
 
-  // Extraer teléfono con múltiples patrones
-  const phoneRegex = /(?:\+52\s?)?\(?\d{2,3}\)?[\s.-]?\d{3,4}[\s.-]?\d{4}/;
-  const phoneMatch = text.match(phoneRegex);
+  const phoneMatch = String(text || '').match(PHONE_RE);
   let telefono = phoneMatch ? phoneMatch[0] : 'No encontrado';
-  
-  // Limpiar y formatear teléfono
+
   if (telefono !== 'No encontrado') {
-    // Remover espacios y caracteres especiales
     telefono = telefono.replace(/[\s().-]/g, '');
-    // Agregar +52 si no tiene código de país
     if (!telefono.startsWith('+52') && !telefono.startsWith('52')) {
       telefono = '52' + telefono;
     }
@@ -196,14 +261,21 @@ function extractCVData(text) {
     }
   }
 
-  // Extraer experiencia profesional
   const experiencia = extractExperienciaProfesional(text);
+  const correo = header.correo || '';
 
   return {
     nombre,
     telefono,
     experiencia,
-    textoCompleto: text
+    textoCompleto: text,
+    ciudad: header.ciudad || '',
+    estado: header.estado || '',
+    leadCiudad: header.ciudad || '',
+    leadEstado: header.estado || '',
+    correo,
+    email: correo,
+    leadCorreo: correo
   };
 }
 
