@@ -39,38 +39,78 @@ function normalizeDelayRange(delayRange, delayMinutesFallback = 3) {
 }
 
 /**
- * Espera aleatoria entre mensajes, respetando controles de pausa/aborto.
- * @param {Function|null} checkControls
- * @param {Function|null} onWaitProgress - (remainingMs, totalMs) => void
  * @param {{ minSeconds?: number, maxSeconds?: number }|null} delayRange
- * @returns {'ok'|'aborted'}
+ * @param {number} [delayMinutesFallback]
+ * @param {() => number} [rng]
  */
-async function waitBetweenMessages(checkControls, onWaitProgress = null, delayRange = null) {
-  const { minSeconds, maxSeconds } = normalizeDelayRange(delayRange);
-  const randomDelaySeconds =
-    Math.floor(Math.random() * (maxSeconds - minSeconds + 1)) + minSeconds;
-  const delayMs = randomDelaySeconds * 1000;
+function sampleDelaySeconds(delayRange, delayMinutesFallback = 3, rng = Math.random) {
+  const { minSeconds, maxSeconds } = normalizeDelayRange(delayRange, delayMinutesFallback);
+  const roll = typeof rng === 'function' ? rng() : Math.random();
+  return Math.floor(roll * (maxSeconds - minSeconds + 1)) + minSeconds;
+}
 
-  const minutes = Math.floor(randomDelaySeconds / 60);
-  const seconds = randomDelaySeconds % 60;
-  let timeDisplay = '';
-  if (minutes > 0 && seconds > 0) {
-    timeDisplay = `${minutes} minuto${minutes > 1 ? 's' : ''} y ${seconds} segundo${seconds > 1 ? 's' : ''}`;
-  } else if (minutes > 0) {
-    timeDisplay = `${minutes} minuto${minutes > 1 ? 's' : ''}`;
-  } else {
-    timeDisplay = `${seconds} segundo${seconds > 1 ? 's' : ''}`;
+/**
+ * Desfase acumulado del primer mensaje por línea: la primera activa arranca al instante;
+ * cada siguiente activa espera una muestra más del intervalo aleatorio.
+ * @param {number} sessionCount
+ * @param {{ minSeconds?: number, maxSeconds?: number }|null} delayRange
+ * @param {() => number} [rng]
+ * @param {boolean[]|null} [activeMask] - si se pasa, las inactivas no desplazan a las demás
+ * @returns {number[]}
+ */
+function buildStartupDelayMsList(sessionCount, delayRange, rng = Math.random, activeMask = null) {
+  const n = Math.max(0, Math.floor(Number(sessionCount) || 0));
+  const list = [];
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const active = !Array.isArray(activeMask) || Boolean(activeMask[i]);
+    list.push(active ? acc : 0);
+    if (active) {
+      acc += sampleDelaySeconds(delayRange, 3, rng) * 1000;
+    }
   }
+  return list;
+}
 
-  console.log(`Esperando ${timeDisplay} antes del siguiente mensaje...`);
+function formatDelayDisplay(delaySeconds) {
+  const total = Math.max(0, Math.round(Number(delaySeconds) || 0));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes > 0 && seconds > 0) {
+    return `${minutes} minuto${minutes > 1 ? 's' : ''} y ${seconds} segundo${seconds > 1 ? 's' : ''}`;
+  }
+  if (minutes > 0) {
+    return `${minutes} minuto${minutes > 1 ? 's' : ''}`;
+  }
+  return `${seconds} segundo${seconds !== 1 ? 's' : ''}`;
+}
 
-  let remainingTime = delayMs;
+/**
+ * Espera un delay concreto, respetando controles de pausa/aborto.
+ * @param {number} delayMs
+ * @param {Function|null} checkControls
+ * @param {Function|null} onWaitProgress
+ * @param {string} [logLabel]
+ * @returns {Promise<'ok'|'aborted'>}
+ */
+async function waitMs(
+  delayMs,
+  checkControls,
+  onWaitProgress = null,
+  logLabel = 'antes del siguiente mensaje'
+) {
+  const totalMs = Math.max(0, Math.floor(Number(delayMs) || 0));
+  if (totalMs <= 0) return 'ok';
+
+  console.log(`Esperando ${formatDelayDisplay(totalMs / 1000)} ${logLabel}...`);
+
+  let remainingTime = totalMs;
   const checkInterval = 5000;
 
   const reportWait = () => {
     if (onWaitProgress) {
       try {
-        onWaitProgress(remainingTime, delayMs);
+        onWaitProgress(remainingTime, totalMs);
       } catch (err) {
         console.warn('onWaitProgress:', err.message);
       }
@@ -146,6 +186,23 @@ async function waitBetweenMessages(checkControls, onWaitProgress = null, delayRa
   }
 
   return 'ok';
+}
+
+/**
+ * Espera aleatoria entre mensajes, respetando controles de pausa/aborto.
+ * @param {Function|null} checkControls
+ * @param {Function|null} onWaitProgress - (remainingMs, totalMs) => void
+ * @param {{ minSeconds?: number, maxSeconds?: number }|null} delayRange
+ * @returns {'ok'|'aborted'}
+ */
+async function waitBetweenMessages(checkControls, onWaitProgress = null, delayRange = null) {
+  const randomDelaySeconds = sampleDelaySeconds(delayRange);
+  return waitMs(
+    randomDelaySeconds * 1000,
+    checkControls,
+    onWaitProgress,
+    'antes del siguiente mensaje'
+  );
 }
 
 async function applySendingControls(checkControls) {
@@ -557,15 +614,44 @@ async function sendSessionQueue(
   onMessageResult = null,
   onWaitProgress = null,
   failoverCtx = null,
-  delayRange = null
+  delayRange = null,
+  startupDelayMs = 0
 ) {
   const results = [];
   const cfg = getFailoverConfig();
   let processedOnThisSession = 0;
   const range = normalizeDelayRange(delayRange);
+  let startAborted = false;
 
   try {
-  while (true) {
+  const initialStartupMs = Math.max(0, Math.floor(Number(startupDelayMs) || 0));
+  if (initialStartupMs > 0 && queueItems.length > 0) {
+    const next = queueItems[0];
+    console.log(
+      `Sesión ${logicalSessionId}: desfase inicial de ${(initialStartupMs / 1000).toFixed(0)}s antes del primer mensaje`
+    );
+    if (onProgress) {
+      onProgress({
+        sessionId: logicalSessionId,
+        sessionCurrent: 0,
+        sessionTotal: queueItems.length,
+        phase: 'waiting',
+        nombre: next.contact.nombre,
+        telefono: next.contact.telefono
+      });
+    }
+    const waitResult = await waitMs(
+      initialStartupMs,
+      checkControls,
+      onWaitProgress,
+      'antes del primer mensaje'
+    );
+    if (waitResult === 'aborted') {
+      startAborted = true;
+    }
+  }
+
+  while (!startAborted) {
     if (failoverCtx && failoverCtx.deadSessionIds.has(logicalSessionId)) {
       break;
     }
@@ -839,7 +925,17 @@ async function sendRoundRobinBulk(
   );
   console.log(`📊 Distribución por cantidad → ${distribution.join(', ')}`);
 
-  const sessionPromises = sessionOrder.map((logicalSessionId) => {
+  const activeMask = sessionOrder.map(
+    (sId) => (queues.get(sId) || []).length > 0
+  );
+  const startupDelays = buildStartupDelayMsList(N, range, Math.random, activeMask);
+  console.log(
+    `Desfase de arranque: ${sessionOrder
+      .map((sId, i) => `${sId} +${Math.round(startupDelays[i] / 1000)}s`)
+      .join(', ')}`
+  );
+
+  const sessionPromises = sessionOrder.map((logicalSessionId, index) => {
     const service = servicesBySessionId.get(logicalSessionId);
     if (!service) {
       return Promise.reject(
@@ -865,7 +961,8 @@ async function sendRoundRobinBulk(
       onMessageResult,
       onWaitProgress,
       failoverCtx,
-      range
+      range,
+      startupDelays[index]
     );
   });
 
@@ -881,3 +978,6 @@ module.exports.sendRoundRobinBulk = sendRoundRobinBulk;
 module.exports.sendSessionQueue = sendSessionQueue;
 module.exports.ROUND_ROBIN_CONTROL_ID = ROUND_ROBIN_CONTROL_ID;
 module.exports.ensureSessionHealthy = ensureSessionHealthy;
+module.exports.normalizeDelayRange = normalizeDelayRange;
+module.exports.sampleDelaySeconds = sampleDelaySeconds;
+module.exports.buildStartupDelayMsList = buildStartupDelayMsList;

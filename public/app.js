@@ -8089,7 +8089,7 @@ class CVAnalyzer {
                     weightValidation.weights
                 );
                 confirmMessage += `Reparto: ${preview.map((row) => `${this.getSessionLabel(row.id)} ${row.count}`).join(', ')}\n`;
-                confirmMessage += `Cada línea envía su primer mensaje a la vez; luego espera ${delayLabel} entre mensajes.\n`;
+                confirmMessage += `Las líneas no arrancan a la vez: cada primer mensaje se desfasa con el intervalo aleatorio de ${delayLabel}; después cada línea sigue usando ese mismo intervalo.\n`;
             } else {
                 confirmMessage += `Línea: ${sessionLabels}.\n`;
                 confirmMessage += `Delay aleatorio de ${delayLabel} entre cada mensaje.`;
@@ -8433,9 +8433,16 @@ class CVAnalyzer {
                 : 'Enviando mensaje...';
         } else if (state.phase === 'waiting') {
             const wait = state.remainingMs != null ? this.formatWaitTime(state.remainingMs) : '...';
-            statusText = state.nombre
-                ? `Esperando <strong>${wait}</strong> → próximo: ${state.nombre}`
-                : `Esperando <strong>${wait}</strong> para el siguiente mensaje`;
+            const isFirst = !state.sessionCurrent;
+            if (isFirst) {
+                statusText = state.nombre
+                    ? `Esperando <strong>${wait}</strong> → primer mensaje: ${state.nombre}`
+                    : `Esperando <strong>${wait}</strong> para el primer mensaje`;
+            } else {
+                statusText = state.nombre
+                    ? `Esperando <strong>${wait}</strong> → próximo: ${state.nombre}`
+                    : `Esperando <strong>${wait}</strong> para el siguiente mensaje`;
+            }
         } else if (state.phase === 'session_dead') {
             statusText = '⛔ Línea desconectada / bloqueada — reencolando…';
         } else if (state.phase === 'requeued') {

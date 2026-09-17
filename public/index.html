@@ -501,7 +501,7 @@
             <section class="session-sending-panel" id="sessionSendingPanel" style="display: none;">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Envío en progreso</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">
-                    Cada sesión envía en paralelo con su propio tiempo de espera (intervalo configurable entre mensajes).
+                    Cada sesión envía en paralelo con su propio intervalo. Al iniciar, los primeros mensajes se desfasan con ese mismo intervalo aleatorio para no salir todos de golpe.
                 </p>
                 <div id="sessionSendingCards" class="session-sending-cards"></div>
                 <div class="session-sending-global" style="margin-top: 16px; text-align: center;">
@@ -554,7 +554,7 @@
             <div class="send-delay-settings" id="sendDelaySettings">
                 <div class="send-delay-settings-title">Intervalo entre mensajes (aleatorio)</div>
                 <p class="send-delay-settings-hint">
-                    Se guarda en el servidor y aplica a todos los envíos masivos OpenWA.
+                    Se guarda en el servidor y aplica a todos los envíos masivos OpenWA, incluido el desfase del primer mensaje de cada línea.
                 </p>
                 <div class="send-delay-settings-row">
                     <label class="send-delay-field">
