@@ -453,6 +453,74 @@ function resolveCalendarDateFromMessage(text, now = new Date()) {
 }
 
 /**
+ * Días relativos/nominales en el texto, con índice de la última mención.
+ * Si el lead dice "hoy estoy ocupado, mañana a las 13", gana "mañana".
+ * @param {string} raw texto ya foldAgendaText
+ * @param {string} today YYYY-MM-DD
+ * @returns {Array<{ index: number, range: { fechaInicio: string, fechaFin: string } }>}
+ */
+function collectRelativeDayHits(raw, today) {
+  const hits = [];
+
+  for (const m of raw.matchAll(/\bhoy\b/g)) {
+    hits.push({
+      index: m.index,
+      range: { fechaInicio: today, fechaFin: today }
+    });
+  }
+
+  for (const m of raw.matchAll(/\bpasado\s+manana\b/g)) {
+    const t = addDaysYmd(today, 2);
+    hits.push({
+      index: m.index,
+      range: { fechaInicio: t, fechaFin: t }
+    });
+  }
+
+  // "mañana" (día), no "de/en/por la mañana" ni el "mañana" de "pasado mañana"
+  for (const m of raw.matchAll(/\bmanana\b/g)) {
+    const before = raw.slice(Math.max(0, m.index - 12), m.index);
+    if (/(?:de|en|por)\s+la\s+$/.test(before)) continue;
+    if (/pasado\s+$/.test(before)) continue;
+    const t = addDaysYmd(today, 1);
+    hits.push({
+      index: m.index,
+      range: { fechaInicio: t, fechaFin: t }
+    });
+  }
+
+  for (const m of raw.matchAll(/\b(?:en|dentro\s+de)\s+(\d{1,2})\s+dias?\b/g)) {
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || n < 1 || n > 14) continue;
+    const t = addDaysYmd(today, n);
+    hits.push({
+      index: m.index,
+      range: { fechaInicio: t, fechaFin: t }
+    });
+  }
+
+  // Nombres de día: última mención de cada uno; si hay varios distintos, gana el último
+  for (const [name, targetDow] of Object.entries(WEEKDAY_NAMES)) {
+    const nameNorm = name
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    const re = new RegExp(`\\b${nameNorm}\\b`, 'g');
+    let m;
+    while ((m = re.exec(raw))) {
+      let delta = (targetDow - weekdayOfYmd(today) + 7) % 7;
+      if (delta === 0 && !/\bhoy\b/.test(raw)) delta = 7;
+      const day = addDaysYmd(today, delta);
+      hits.push({
+        index: m.index,
+        range: { fechaInicio: day, fechaFin: day }
+      });
+    }
+  }
+
+  return hits;
+}
+
+/**
  * Interpreta el mensaje y devuelve un rango de fechas a consultar.
  * @param {string} text
  * @param {Date} [now]
@@ -464,37 +532,7 @@ function resolveDateRangeFromMessage(text, now = new Date()) {
 
   const today = todayYmd(now);
 
-  if (/\bhoy\b/.test(raw)) {
-    return { fechaInicio: today, fechaFin: today };
-  }
-
-  // "pasado mañana" antes de "mañana"
-  if (/\bpasado\s+manana\b/.test(raw)) {
-    const t = addDaysYmd(today, 2);
-    return { fechaInicio: t, fechaFin: t };
-  }
-
-  // "en 3 días" / "dentro de 2 dias"
-  const inDays = /\b(?:en|dentro\s+de)\s+(\d{1,2})\s+dias?\b/.exec(raw);
-  if (inDays) {
-    const n = Number(inDays[1]);
-    if (Number.isFinite(n) && n >= 1 && n <= 14) {
-      const t = addDaysYmd(today, n);
-      return { fechaInicio: t, fechaFin: t };
-    }
-  }
-
-  // "mañana" (día siguiente), NO "de/en/por la mañana" (periodo AM)
-  const withoutAmPeriod = raw.replace(/(?:de|en|por)\s+la\s+manana\b/g, ' ');
-  if (/\bmanana\b/.test(withoutAmPeriod)) {
-    const t = addDaysYmd(today, 1);
-    return { fechaInicio: t, fechaFin: t };
-  }
-
-  if (/\besta\s+semana\b/.test(raw) || /\bproxim[oa]s?\s+dias?\b/.test(raw)) {
-    return { fechaInicio: today, fechaFin: addDaysYmd(today, 6) };
-  }
-
+  // Fechas absolutas (jueves 17, el 17 de septiembre) antes que relativas
   const monthHit = resolveDayMonthFromMessage(raw, today);
   if (monthHit) return monthHit;
 
@@ -504,15 +542,15 @@ function resolveDateRangeFromMessage(text, now = new Date()) {
   const elDay = resolveElDayOfMonth(raw, today);
   if (elDay) return elDay;
 
-  for (const [name, targetDow] of Object.entries(WEEKDAY_NAMES)) {
-    const nameNorm = name
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '');
-    if (!new RegExp(`\\b${nameNorm}\\b`).test(raw)) continue;
-    let delta = (targetDow - weekdayOfYmd(today) + 7) % 7;
-    if (delta === 0 && !/\bhoy\b/.test(raw)) delta = 7;
-    const day = addDaysYmd(today, delta);
-    return { fechaInicio: day, fechaFin: day };
+  // Relativos: si hay varios ("hoy… pero mañana…"), gana la última mención
+  const relativeHits = collectRelativeDayHits(raw, today);
+  if (relativeHits.length) {
+    relativeHits.sort((a, b) => a.index - b.index);
+    return relativeHits[relativeHits.length - 1].range;
+  }
+
+  if (/\besta\s+semana\b/.test(raw) || /\bproxim[oa]s?\s+dias?\b/.test(raw)) {
+    return { fechaInicio: today, fechaFin: addDaysYmd(today, 6) };
   }
 
   if (looksLikeScheduleIntent(text)) {
@@ -844,7 +882,13 @@ function matchSlotFromMessage(text, slots, opts = {}) {
   let candidates = list;
   if (range && range.fechaInicio === range.fechaFin) {
     const daySlots = list.filter((s) => s.fecha === range.fechaInicio);
-    if (daySlots.length) candidates = daySlots;
+    if (daySlots.length) {
+      candidates = daySlots;
+    } else {
+      // Pidió un día concreto que no está en la oferta → no matchear
+      // la misma hora de otro día (p. ej. "lunes 18:00" vs oferta de hoy).
+      return null;
+    }
   }
 
   const ymdForTz =
@@ -865,9 +909,14 @@ function matchSlotFromMessage(text, slots, opts = {}) {
   const hit = pickSlotForTimes(times, candidates);
   if (hit) return hit;
   if (confirming && times.length) {
-    const allStarts = new Set(list.map((s) => String(s.horaInicio || '').trim()));
+    // Solo ampliar dentro del mismo día pedido; nunca otro día.
+    const fallbackPool =
+      range && range.fechaInicio === range.fechaFin ? candidates : list;
+    const allStarts = new Set(
+      fallbackPool.map((s) => String(s.horaInicio || '').trim())
+    );
     const expanded = expandTimesAgainstSlots(times, allStarts);
-    const fallback = pickSlotForTimes(expanded, list);
+    const fallback = pickSlotForTimes(expanded, fallbackPool);
     if (fallback) return fallback;
   }
 

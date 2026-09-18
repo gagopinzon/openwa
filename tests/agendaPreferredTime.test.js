@@ -174,6 +174,50 @@ describe('agendaPreferredTime', () => {
     assert.match(text, /lunes/i);
   });
 
+  it('no duplica la misma hora al listar cercanas', () => {
+    const text = formatNearestReply(
+      [
+        slot(today, '18:00'),
+        slot(today, '18:00'),
+        slot(today, '18:30'),
+        slot(today, '18:30'),
+        slot(today, '19:00'),
+        slot(today, '19:00')
+      ],
+      '13:00',
+      today
+    );
+    assert.match(text, /Hoy: 18:00, 18:30, 19:00/);
+    assert.doesNotMatch(text, /18:00, 18:00/);
+  });
+
+  it('mañana a las 13 no ofrece huecos etiquetados como hoy', () => {
+    const now = new Date('2026-09-02T18:00:00-06:00');
+    const slots = [
+      slot(today, '18:00'),
+      slot(today, '18:00'),
+      slot(today, '19:00'),
+      slot(tomorrow, '14:00'),
+      slot(tomorrow, '15:00')
+    ];
+    const decision = resolvePreferredTimeOffer(
+      'Hoy estoy ocupado, pero mañana a partir de las 13:00 me parece bien',
+      slots,
+      { today, tomorrow, now }
+    );
+    assert.equal(decision.action, 'nearest');
+    assert.ok(decision.nearby.length >= 1);
+    assert.ok(decision.nearby.every((s) => s.fecha === tomorrow));
+    const text = formatNearestReply(
+      decision.nearby,
+      decision.preferredTime,
+      today,
+      decision.timezone
+    );
+    assert.match(text, /mañana/i);
+    assert.doesNotMatch(text, /\bhoy\b/i);
+  });
+
   it('ASK_PREFERRED_CONTEXT prohíbe listar horarios', () => {
     assert.match(ASK_PREFERRED_CONTEXT, /PREGUNTA_HORA/);
     assert.match(ASK_PREFERRED_CONTEXT, /NO listes/i);

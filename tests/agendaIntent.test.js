@@ -254,6 +254,7 @@ describe('agendaIntent', () => {
   });
 
   it('al decir sí, toma la hora que el bot acaba de proponer', () => {
+    const now = new Date('2026-09-02T18:00:00Z'); // miércoles CDMX
     const slots = [
       { fecha: '2026-09-03', horaInicio: '10:00', horaFin: '10:15' },
       { fecha: '2026-09-03', horaInicio: '17:00', horaFin: '17:15' },
@@ -263,9 +264,10 @@ describe('agendaIntent', () => {
       'El jueves 3 sep está disponible de 08:00 a 20:00, y de 20:30 a 22:00. ¿Te funciona comenzar a las 17:00 hrs?';
     assert.deepEqual(extractProposedTimesFromBotText(lastBotText), ['17:00']);
 
-    const hit = matchSlotFromMessage('si esta perfecto', slots, { lastBotText });
+    const hit = matchSlotFromMessage('si esta perfecto', slots, { lastBotText, now });
     assert.ok(hit);
     assert.equal(hit.horaInicio, '17:00');
+    assert.equal(hit.fecha, '2026-09-03');
   });
 
   it('al decir sí, usa proposedTimes del offer si no hay texto del bot', () => {
@@ -315,5 +317,53 @@ describe('agendaIntent', () => {
     assert.ok(hit);
     assert.equal(hit.fecha, '2026-09-03');
     assert.equal(hit.horaInicio, '17:00');
+  });
+
+  it('si dice hoy ocupado pero mañana, gana mañana', () => {
+    const now = new Date('2026-09-17T23:30:00Z'); // jueves CDMX
+    const today = todayYmd(now);
+    const manana = addDaysYmd(today, 1);
+    assert.deepEqual(
+      resolveDateRangeFromMessage(
+        'Hoy estoy un tanto ocupado en la oficina, pero mañana a partir de las 13:00 me parece bien',
+        now
+      ),
+      { fechaInicio: manana, fechaFin: manana }
+    );
+    assert.deepEqual(
+      resolveDateRangeFromMessage('mañana no puedo, mejor hoy a las 18', now),
+      { fechaInicio: today, fechaFin: today }
+    );
+  });
+
+  it('no confirma lunes 18:00 usando el hueco de hoy en la oferta previa', () => {
+    const now = new Date('2026-09-17T23:30:00Z'); // jueves
+    const today = todayYmd(now);
+    const monday = addDaysYmd(today, 4); // jueves → lunes
+    const priorOnlyToday = [
+      { fecha: today, horaInicio: '18:00', horaFin: '18:15' },
+      { fecha: today, horaInicio: '18:30', horaFin: '18:45' },
+      { fecha: today, horaInicio: '19:00', horaFin: '19:15' }
+    ];
+    assert.equal(
+      matchSlotFromMessage(
+        'La podemos programar el Lunes a las 18:00 te parece bien ?',
+        priorOnlyToday,
+        { now }
+      ),
+      null
+    );
+    const withMonday = [
+      ...priorOnlyToday,
+      { fecha: monday, horaInicio: '18:00', horaFin: '18:15' }
+    ];
+    const hit = matchSlotFromMessage(
+      'La podemos programar el Lunes a las 18:00 te parece bien ?',
+      withMonday,
+      { now }
+    );
+    assert.ok(hit);
+    assert.equal(hit.fecha, monday);
+    assert.equal(hit.horaInicio, '18:00');
   });
 });

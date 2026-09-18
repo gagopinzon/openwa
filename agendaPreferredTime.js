@@ -106,14 +106,34 @@ function selectNearestInWindow(slots, preferredHhmm, opts = {}) {
     : [];
   const pool = inWindow.length ? inWindow : list;
   const todays = sortByDistance(
-    pool.filter((s) => String(s.fecha) === today),
+    dedupeSlotsByStart(pool.filter((s) => String(s.fecha) === today)),
     pref
   );
   const tomorrows = sortByDistance(
-    pool.filter((s) => String(s.fecha) === tomorrow),
+    dedupeSlotsByStart(pool.filter((s) => String(s.fecha) === tomorrow)),
     pref
   );
+  // Día pinneado (hoy===mañana en opts): no intercalear el mismo pool 2×
+  if (today && today === tomorrow) {
+    return todays.slice(0, max);
+  }
   return interleaveDays(todays, tomorrows, max);
+}
+
+/**
+ * Un horario por (fecha, horaInicio) — varios asesores no deben listarse 2×.
+ * @param {Array<object>} slots
+ */
+function dedupeSlotsByStart(slots) {
+  const seen = new Set();
+  const out = [];
+  for (const s of Array.isArray(slots) ? slots : []) {
+    const key = `${String(s.fecha || '')}|${String(s.horaInicio || '').trim()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
 }
 
 /**
@@ -152,12 +172,14 @@ function formatConfirmReply(slot, today, tz = null) {
  * @param {{ localHhmm?: string, centroHhmm?: string, label?: string, differs?: boolean }|null} [tz]
  */
 function formatNearestReply(nearby, preferredHhmm, today, tz = null) {
-  const list = Array.isArray(nearby) ? nearby : [];
+  const list = dedupeSlotsByStart(Array.isArray(nearby) ? nearby : []);
   const byFecha = new Map();
   for (const s of list) {
     const fecha = String(s.fecha || '');
     if (!byFecha.has(fecha)) byFecha.set(fecha, []);
-    byFecha.get(fecha).push(String(s.horaInicio).trim());
+    const hora = String(s.horaInicio).trim();
+    const hours = byFecha.get(fecha);
+    if (!hours.includes(hora)) hours.push(hora);
   }
   const fechas = [...byFecha.keys()].sort();
   const todayYmd = today ? String(today) : fechas[0];
