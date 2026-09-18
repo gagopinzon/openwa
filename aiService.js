@@ -1,6 +1,6 @@
 const axios = require('axios');
 require('dotenv').config();
-const { SENDER_PLACEHOLDER } = require('./messageSignature');
+const { SENDER_PLACEHOLDER, ensureSenderPlaceholder } = require('./messageSignature');
 const ollamaService = require('./ollamaService');
 const { preferredFirstName, phraseWithName, buildWhatsAppNameGuard, sanitizeReplyWhatsAppName } = require('./preferredContactName');
 const agendaIntent = require('./agendaIntent');
@@ -185,7 +185,7 @@ Atte:
 ${SENDER_PLACEHOLDER}`;
   }
 
-  return { saludo, mensajeIA: body };
+  return { saludo, mensajeIA: ensureSenderPlaceholder(body) };
 }
 
 /**
@@ -300,7 +300,7 @@ ESTRUCTURA FIJA DEL MENSAJE (4 bloques separados por línea en blanco):
 1) Reconocimiento del perfil / expertise (1-2 frases, personalizado, máx ~90 caracteres en la parte personalizada)
 2) Qué hace Pro Talent por perfiles como el suyo + vacantes en el PUESTO CLAVE
 3) Pregunta/CTA ofreciendo sesión gratuita de diagnóstico
-4) Firma exacta:
+4) Firma exacta. Copia literalmente estas 2 líneas, sin cambiar nada:
 Atte:
 ${SENDER_PLACEHOLDER}
 
@@ -320,6 +320,10 @@ IMPORTANTE - SALUDO Y NOMBRE:
 - SALUDO = solo esa línea corta
 - El MENSAJE NO debe empezar con Hola/Qué tal ni repetir el nombre
 - El nombre "${firstName}" solo en SALUDO
+
+IMPORTANTE - FIRMA:
+- Después de "Atte:" SOLO va ${SENDER_PLACEHOLDER}
+- NUNCA pongas "Pro Talent", "[YOUR_NAME]", un nombre inventado ni dejes la firma vacía
 
 IMPORTANTE - VARIACIÓN:
 - Sí varía redacción; no inventes otra estructura ni agregues bloques extra

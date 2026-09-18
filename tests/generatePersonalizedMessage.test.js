@@ -46,7 +46,43 @@ Atte:
     assert.equal(seenOpts?.skipMonica, true);
     assert.match(out.saludo, /Ana/i);
     assert.match(out.mensajeIA, /Pro Talent/);
+    assert.match(out.mensajeIA, /Atte:\n\{\{SENDER_NAME\}\}/);
     assert.doesNotMatch(out.mensajeIA, /^SALUDO:/i);
+  });
+
+  it('corrige firma Pro Talent o [YOUR_NAME] del modelo a {{SENDER_NAME}}', async () => {
+    ollamaService.isConfigured = () => true;
+    ollamaService.chatReply = async () => `SALUDO: Buen día César
+MENSAJE:
+Tu trayectoria en riesgos es impresionante.
+
+En Pro Talent ayudamos a expertos como tú.
+
+¿Te gustaría agendar una sesión gratuita?
+
+Atte:
+Pro Talent`;
+
+    const withCompany = await generatePersonalizedMessage(
+      'César López',
+      'Jefe de Riesgos'
+    );
+    assert.match(withCompany.mensajeIA, /Atte:\n\{\{SENDER_NAME\}\}/);
+    assert.doesNotMatch(withCompany.mensajeIA, /Atte:\s*\n\s*Pro Talent/i);
+
+    ollamaService.chatReply = async () => `SALUDO: Hola César
+MENSAJE:
+¿Te gustaría agendar una sesión gratuita de diagnóstico?
+
+Atte:
+[YOUR_NAME]`;
+
+    const withPlaceholder = await generatePersonalizedMessage(
+      'César López',
+      'Jefe de Riesgos'
+    );
+    assert.match(withPlaceholder.mensajeIA, /Atte:\n\{\{SENDER_NAME\}\}/);
+    assert.doesNotMatch(withPlaceholder.mensajeIA, /YOUR_NAME/);
   });
 
   it('cae a plantilla si Ollama no está configurado', async () => {

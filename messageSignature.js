@@ -4,6 +4,8 @@ const LEGACY_SENDER = 'Mónica González';
 /** Marcador reemplazado al enviar según la sesión de WhatsApp */
 const SENDER_PLACEHOLDER = '{{SENDER_NAME}}';
 
+const ATTE_BLOCK_RE = /\r?\n*\s*Atte:\s*\r?\n?[\s\S]*$/i;
+
 /**
  * @param {object|null|undefined} raw
  * @returns {string}
@@ -16,6 +18,39 @@ function extractProfileNameFromOpenWA(raw) {
 }
 
 /**
+ * Reescribe el bloque "Atte:" con la firma dada. No toca el cuerpo.
+ * @param {string} message
+ * @param {string} signatureLine
+ * @param {{ appendIfMissing?: boolean }} [opts]
+ * @returns {string}
+ */
+function setAtteSignature(message, signatureLine, opts = {}) {
+  if (!message) return message;
+  const name = String(signatureLine || '').trim();
+  if (!name) return message;
+
+  const body = String(message);
+  const signature = `\n\nAtte:\n${name}`;
+  if (/\bAtte:/i.test(body)) {
+    return body.replace(ATTE_BLOCK_RE, signature);
+  }
+  if (opts.appendIfMissing) {
+    return `${body.trim()}${signature}`;
+  }
+  return body;
+}
+
+/**
+ * Tras generar el primer mensaje: la firma queda como placeholder,
+ * aunque el modelo haya puesto Pro Talent, [YOUR_NAME] u otro texto.
+ * @param {string} message
+ * @returns {string}
+ */
+function ensureSenderPlaceholder(message) {
+  return setAtteSignature(message, SENDER_PLACEHOLDER, { appendIfMissing: true });
+}
+
+/**
  * @param {string} message
  * @param {string} senderName
  * @returns {string}
@@ -25,23 +60,12 @@ function applySenderName(message, senderName) {
   const name = String(senderName || '').trim();
   if (!name) return message;
 
-  let result = message.split(SENDER_PLACEHOLDER).join(name);
-  // Variantes por si el modelo o la UI dejaron texto literal
+  let result = String(message);
+  result = result.split(SENDER_PLACEHOLDER).join(name);
   result = result.split('{{sender_name}}').join(name);
   result = result.split('{{Sender Name}}').join(name);
 
-  const legacyPattern = new RegExp(
-    `(\\nAtte:\\s*\\n)\\s*${LEGACY_SENDER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`,
-    'i'
-  );
-  if (legacyPattern.test(result)) {
-    result = result.replace(legacyPattern, `$1${name}`);
-  }
-
-  result = result.replace(/(\nAtte:\s*\n)\s*Sender\s*name\s*$/i, `$1${name}`);
-  result = result.replace(/(\nAtte:\s*\n)\s*Remitente\s*$/i, `$1${name}`);
-
-  return result;
+  return setAtteSignature(result, name);
 }
 
 /**
@@ -63,6 +87,8 @@ module.exports = {
   LEGACY_SENDER,
   SENDER_PLACEHOLDER,
   extractProfileNameFromOpenWA,
+  setAtteSignature,
+  ensureSenderPlaceholder,
   applySenderName,
   resolveSessionSenderName
 };

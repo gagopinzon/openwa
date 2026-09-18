@@ -4164,10 +4164,19 @@ class CVAnalyzer {
         const senderName = sessionId
             ? this.getSessionSenderName(sessionId)
             : this.getPreviewSenderName();
-        return message
+        if (!senderName) return message;
+        let result = String(message)
             .split('{{SENDER_NAME}}')
             .join(senderName)
-            .replace(/(\nAtte:\s*\n)\s*Mónica González\s*$/i, `$1${senderName}`);
+            .split('{{sender_name}}')
+            .join(senderName);
+        if (/\bAtte:/i.test(result)) {
+            result = result.replace(
+                /\r?\n*\s*Atte:\s*\r?\n?[\s\S]*$/i,
+                `\n\nAtte:\n${senderName}`
+            );
+        }
+        return result;
     }
 
     /** Devuelve array de sessionId de los checkboxes marcados (solo líneas habilitadas/conectadas) */
