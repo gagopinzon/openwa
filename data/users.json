@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "users": [
+    {
+      "id": "98291e7b-c86c-4e2d-80be-6f1b179e3fe0",
+      "username": "hector",
+      "passwordHash": "6633a565d07344ec756c242693d8a2cb:4e2a8cb251b80641b5fac74745cb9c5af2cd608d735552ea0d375400a8fb7f2a748a27592acee535ba9eea4c5dc08a040c012d181838756ae1d41590b47f6dcd",
+      "role": "ops",
+      "permissions": {},
+      "gerenteEmail": "",
+      "createdAt": "2026-09-22T15:50:37.604Z",
+      "updatedAt": "2026-09-22T15:50:37.604Z"
+    }
+  ]
+}
