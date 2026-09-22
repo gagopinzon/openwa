@@ -1093,6 +1093,12 @@ class CVAnalyzer {
         if (isOps && this.conversationsSessionSelect) {
             this.conversationsSessionSelect.value = 'all';
         }
+        const conversationsIntro = document.getElementById('conversationsIntro');
+        if (conversationsIntro) {
+            conversationsIntro.textContent = isOps
+                ? 'Chats en un solo lugar. Puedes leer y responder desde aquí.'
+                : 'Chats de todos los celulares en un solo lugar. Cada conversación indica de qué sesión es, y puedes responder desde aquí.';
+        }
         this.applyAutoReplyRoleUI();
 
         const uploadSection = document.querySelector('.upload-section');
@@ -1868,7 +1874,11 @@ class CVAnalyzer {
                       )
                     : '';
             btn.innerHTML = `
-                <span class="hit-session">${this.escapeHtml(hit.sessionLabel || hit.sessionId || '')}</span>
+                ${
+                    this.isOpsUser()
+                        ? ''
+                        : `<span class="hit-session">${this.escapeHtml(hit.sessionLabel || hit.sessionId || '')}</span>`
+                }
                 <div class="hit-chat">${this.escapeHtml(chatLabel)}</div>
                 <div class="hit-snippet">${this.formatConversationsSearchSnippet(hit.snippet || hit.body || '')}</div>
                 ${time ? `<div class="hit-meta">${this.escapeHtml(time)}</div>` : ''}
@@ -2332,8 +2342,11 @@ class CVAnalyzer {
             const previewHtml = previewLines.length
                 ? previewLines.map((line) => this.escapeHtml(line)).join('<br>')
                 : '';
+            const sessionHtml = this.isOpsUser()
+                ? ''
+                : `<span class="chat-session">${this.escapeHtml(sessionLabel)}</span>`;
             btn.innerHTML = `
-                <span class="chat-session">${this.escapeHtml(sessionLabel)}</span>
+                ${sessionHtml}
                 <div class="chat-name-row">
                     <div class="chat-name">${this.escapeHtml(chat.name || chat.id)}</div>
                     ${directionBadge}
@@ -2570,9 +2583,12 @@ class CVAnalyzer {
         this.updateConversationThreadActions();
 
         if (this.conversationsThreadHeader) {
+            const desdeHtml = this.isOpsUser()
+                ? ''
+                : `<span class="thread-session">Desde: ${this.escapeHtml(this.activeConversation.sessionLabel)}</span>`;
             this.conversationsThreadHeader.innerHTML = `
                 ${this.escapeHtml(this.activeConversation.name)}
-                <span class="thread-session">Desde: ${this.escapeHtml(this.activeConversation.sessionLabel)}</span>
+                ${desdeHtml}
             `;
         }
         if (this.conversationsThreadMessages) {
@@ -2952,7 +2968,11 @@ class CVAnalyzer {
         }
         this.conversationsThreadHeader.innerHTML = `
             ${this.escapeHtml(this.activeConversation.name)}
-            <span class="thread-session">Desde: ${this.escapeHtml(this.activeConversation.sessionLabel)}</span>
+            ${
+                this.isOpsUser()
+                    ? ''
+                    : `<span class="thread-session">Desde: ${this.escapeHtml(this.activeConversation.sessionLabel)}</span>`
+            }
             ${blockedBadge}${aiBadge}${meetingBadge}
         `;
     }
@@ -3635,9 +3655,13 @@ class CVAnalyzer {
             if (bubble) bubble.classList.remove('is-pending');
 
             this.showStatus(
-                data.aiPaused === true
-                    ? `Enviado desde ${sessionLabel}. IA pausada en este chat.`
-                    : `Enviado desde ${sessionLabel}`,
+                this.isOpsUser()
+                    ? data.aiPaused === true
+                        ? 'Enviado. IA pausada en este chat.'
+                        : 'Enviado'
+                    : data.aiPaused === true
+                      ? `Enviado desde ${sessionLabel}. IA pausada en este chat.`
+                      : `Enviado desde ${sessionLabel}`,
                 'success'
             );
 
