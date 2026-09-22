@@ -1086,6 +1086,13 @@ class CVAnalyzer {
             this.agendaConfirmedPanel.style.display = hasControl ? '' : 'none';
             if (hasControl) this.loadAgendaConfirmed();
         }
+        const conversationsSessionFilter = document.getElementById('conversationsSessionFilter');
+        if (conversationsSessionFilter) {
+            conversationsSessionFilter.style.display = isOps ? 'none' : 'inline-flex';
+        }
+        if (isOps && this.conversationsSessionSelect) {
+            this.conversationsSessionSelect.value = 'all';
+        }
         this.applyAutoReplyRoleUI();
 
         const uploadSection = document.querySelector('.upload-section');
@@ -1641,12 +1648,21 @@ class CVAnalyzer {
 
     populateConversationsSessionSelect() {
         if (!this.conversationsSessionSelect) return;
+        if (this.isOpsUser()) {
+            this.conversationsSessionSelect.innerHTML = '';
+            const allOpt = document.createElement('option');
+            allOpt.value = 'all';
+            allOpt.textContent = 'Todos los remitentes';
+            this.conversationsSessionSelect.appendChild(allOpt);
+            this.conversationsSessionSelect.value = 'all';
+            return;
+        }
         const prev = this.conversationsSessionSelect.value || 'all';
         this.conversationsSessionSelect.innerHTML = '';
 
         const allOpt = document.createElement('option');
         allOpt.value = 'all';
-        allOpt.textContent = this.isOpsUser() ? 'Todos los remitentes' : 'Todas las sesiones';
+        allOpt.textContent = 'Todas las sesiones';
         this.conversationsSessionSelect.appendChild(allOpt);
 
         if (!this.configuredSessions.length) {
@@ -1655,9 +1671,7 @@ class CVAnalyzer {
         this.configuredSessions.forEach((s) => {
             const opt = document.createElement('option');
             opt.value = s.id;
-            opt.textContent = this.isOpsUser()
-                ? s.senderName || s.label || 'Remitente'
-                : s.label || s.id;
+            opt.textContent = s.label || s.id;
             this.conversationsSessionSelect.appendChild(opt);
         });
         if (prev === 'all' || this.configuredSessions.some((s) => s.id === prev)) {

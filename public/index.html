@@ -243,8 +243,10 @@
                     Chats de todos los celulares en un solo lugar. Cada conversación indica de qué sesión es, y puedes responder desde aquí.
                 </p>
                 <div class="conversations-toolbar">
-                    <label for="conversationsSessionSelect" style="font-weight: 600; font-size: 13px;">Sesión:</label>
-                    <select id="conversationsSessionSelect" class="form-select" style="min-width: 180px; padding: 8px;"></select>
+                    <span id="conversationsSessionFilter" style="display: inline-flex; align-items: center; gap: 8px;">
+                        <label for="conversationsSessionSelect" style="font-weight: 600; font-size: 13px;">Sesión:</label>
+                        <select id="conversationsSessionSelect" class="form-select" style="min-width: 180px; padding: 8px;"></select>
+                    </span>
                     <label class="conversations-unread-filter" for="conversationsUnreadOnlyToggle">
                         <input type="checkbox" id="conversationsUnreadOnlyToggle">
                         Solo no leídos
