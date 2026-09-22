@@ -35,12 +35,16 @@ class CVAnalyzer {
         this.androidDevices = [];
         this.initAndroidGatewayPanel();
         this.loadConfig().then(async () => {
-            await this.refreshAndroidDevices({ silent: true });
+            if (this.isSuperUser()) {
+                await this.refreshAndroidDevices({ silent: true });
+            }
             await this.loadSessions();
-            await this.refreshCvsFromServer({ silent: true });
-            await this.refreshSendQueue();
-            await this.loadSendSettings();
-            if (this.isSuperUser() || this.getControllableSessions().length > 0) {
+            if (!this.isOpsUser()) {
+                await this.refreshCvsFromServer({ silent: true });
+                await this.refreshSendQueue();
+                await this.loadSendSettings();
+            }
+            if (this.isSuperUser() || this.isOpsUser() || this.getControllableSessions().length > 0) {
                 this.loadAutoReplyStatus();
                 this.loadAutoReplyConfig();
                 this.applyAutoReplyRoleUI();
@@ -51,6 +55,7 @@ class CVAnalyzer {
                 this.loadUsers();
             }
             this.loadDisponibilidadCalendar({ silent: true });
+            this.applyPermissionUI();
         });
         window.cvAnalyzer = this;
     }
@@ -548,6 +553,7 @@ class CVAnalyzer {
         this.createUserForm = document.getElementById('createUserForm');
         this.newUserUsername = document.getElementById('newUserUsername');
         this.newUserPassword = document.getElementById('newUserPassword');
+        this.newUserRole = document.getElementById('newUserRole');
         this.newUserGerenteEmail = document.getElementById('newUserGerenteEmail');
         this.usersFormStatus = document.getElementById('usersFormStatus');
         this.sessionsAddForm = document.getElementById('sessionsAddForm');
@@ -868,6 +874,7 @@ class CVAnalyzer {
         }
 
         const unassigned = sessions.filter((s) => this.isSessionUnassigned(s.id, users));
+        const lineUsers = users.filter((u) => u.role !== 'ops');
         const columnsHtml = [
             `<div class="lines-kanban-column is-unassigned" data-column="unassigned" data-user-id="">
                 <p class="lines-kanban-column-title">Sin asignar <span class="count">(${unassigned.length})</span></p>
@@ -878,7 +885,7 @@ class CVAnalyzer {
                                   .map((s) =>
                                       this.renderLinePillHtml(s, {
                                           mode: 'unassigned',
-                                          users
+                                          users: lineUsers
                                       })
                                   )
                                   .join('')
@@ -888,7 +895,7 @@ class CVAnalyzer {
             </div>`
         ];
 
-        for (const user of users) {
+        for (const user of lineUsers) {
             const assigned = sessions
                 .map((session) => {
                     const access = user.permissions && user.permissions[session.id];
@@ -896,7 +903,7 @@ class CVAnalyzer {
                     return { session, access };
                 })
                 .filter(Boolean);
-            const others = users.filter((u) => u.id !== user.id);
+            const others = lineUsers.filter((u) => u.id !== user.id);
             const transferSelect =
                 assigned.length && others.length
                     ? `<select class="form-select line-transfer-user" data-from-user-id="${this.escapeHtml(user.id)}" data-from-username="${this.escapeHtml(user.username)}" title="Pasar todas las líneas a otro vendedor">
@@ -1016,8 +1023,15 @@ class CVAnalyzer {
         return Boolean(this.currentUser && this.currentUser.isSuper);
     }
 
+    isOpsUser() {
+        return Boolean(
+            this.currentUser &&
+                (this.currentUser.isOps || this.currentUser.role === 'ops')
+        );
+    }
+
     getSessionAccess(sessionId) {
-        if (this.isSuperUser()) return 'control';
+        if (this.isSuperUser() || this.isOpsUser()) return 'control';
         const session = (this.configuredSessions || []).find((s) => s.id === sessionId);
         if (session && session.access) return session.access;
         const perms = (this.currentUser && this.currentUser.permissions) || {};
@@ -1034,27 +1048,39 @@ class CVAnalyzer {
 
     applyPermissionUI() {
         const isSuper = this.isSuperUser();
-        const hasControl = this.getControllableSessions().length > 0 || isSuper;
+        const isOps = this.isOpsUser();
+        const hasControl = this.getControllableSessions().length > 0 || isSuper || isOps;
 
+        if (this.linesPanel) {
+            this.linesPanel.style.display = isOps ? 'none' : '';
+        }
         if (this.accountsSection) {
             this.accountsSection.style.display = isSuper ? 'block' : 'none';
         }
         if (this.androidTestSendPanel) {
             this.androidTestSendPanel.style.display = isSuper ? 'block' : 'none';
         }
+        const androidGatewaySection = document.getElementById('androidGatewaySection');
+        if (androidGatewaySection) {
+            androidGatewaySection.style.display = isSuper ? '' : 'none';
+        }
         if (this.sessionsAddForm) {
             this.sessionsAddForm.style.display = isSuper ? 'flex' : 'none';
         }
         if (this.openWhatsAppBtn) {
-            this.openWhatsAppBtn.style.display = hasControl ? '' : 'none';
+            this.openWhatsAppBtn.style.display = hasControl && !isOps ? '' : 'none';
+        }
+        const sessionSelector = document.querySelector('.session-selector');
+        if (sessionSelector) {
+            sessionSelector.style.display = isOps ? 'none' : '';
         }
         if (this.autoReplyPanel) {
-            const showAutoReply = isSuper || this.getControllableSessions().length > 0;
+            const showAutoReply = isSuper || isOps || this.getControllableSessions().length > 0;
             this.autoReplyPanel.style.display = showAutoReply ? '' : 'none';
         }
         if (this.agendaPendingPanel) {
-            this.agendaPendingPanel.style.display = hasControl ? '' : 'none';
-            if (hasControl) this.loadAgendaPending();
+            this.agendaPendingPanel.style.display = hasControl && !isOps ? '' : 'none';
+            if (hasControl && !isOps) this.loadAgendaPending();
         }
         if (this.agendaConfirmedPanel) {
             this.agendaConfirmedPanel.style.display = hasControl ? '' : 'none';
@@ -1064,7 +1090,7 @@ class CVAnalyzer {
 
         const uploadSection = document.querySelector('.upload-section');
         const resultsSection = document.getElementById('resultsSection');
-        if (!hasControl) {
+        if (!hasControl || isOps) {
             if (uploadSection) uploadSection.style.display = 'none';
             if (resultsSection) resultsSection.style.display = 'none';
         } else if (uploadSection) {
@@ -1074,11 +1100,22 @@ class CVAnalyzer {
 
     applyAutoReplyRoleUI() {
         const isSuper = this.isSuperUser();
+        const isOps = this.isOpsUser();
+        const showAdmin = isSuper || isOps;
         document.querySelectorAll('.auto-reply-admin-only').forEach((el) => {
-            el.style.display = isSuper ? '' : 'none';
+            // Android test panel stays super-only even though it shares the class
+            if (el.id === 'androidTestSendPanel') {
+                el.style.display = isSuper ? '' : 'none';
+                return;
+            }
+            el.style.display = showAdmin ? '' : 'none';
         });
         if (this.autoReplyUserHint) {
-            this.autoReplyUserHint.style.display = isSuper ? 'none' : '';
+            this.autoReplyUserHint.style.display = showAdmin ? 'none' : '';
+        }
+        const sessionsBox = document.getElementById('autoReplySessionsBox');
+        if (sessionsBox) {
+            sessionsBox.style.display = isOps ? 'none' : '';
         }
     }
 
@@ -1356,6 +1393,16 @@ class CVAnalyzer {
     getWebhookActivationState(data) {
         const sessions = Number(data.sessionsConfigured) || 0;
         const active = Number(data.webhooksActive) || 0;
+        if (this.isOpsUser()) {
+            if (active <= 0) {
+                return { key: 'off', label: 'Webhooks: inactivos', detail: 'No hay webhooks registrados en OpenWA' };
+            }
+            return {
+                key: 'on',
+                label: 'Webhooks: activos',
+                detail: 'OpenWA está enviando mensajes entrantes a esta app'
+            };
+        }
         if (active <= 0) return { key: 'off', label: 'Webhooks: inactivos', detail: 'No hay webhooks registrados en OpenWA' };
         if (sessions > 0 && active >= sessions) {
             return {
@@ -1599,7 +1646,7 @@ class CVAnalyzer {
 
         const allOpt = document.createElement('option');
         allOpt.value = 'all';
-        allOpt.textContent = 'Todas las sesiones';
+        allOpt.textContent = this.isOpsUser() ? 'Todos los remitentes' : 'Todas las sesiones';
         this.conversationsSessionSelect.appendChild(allOpt);
 
         if (!this.configuredSessions.length) {
@@ -1608,7 +1655,9 @@ class CVAnalyzer {
         this.configuredSessions.forEach((s) => {
             const opt = document.createElement('option');
             opt.value = s.id;
-            opt.textContent = s.label || s.id;
+            opt.textContent = this.isOpsUser()
+                ? s.senderName || s.label || 'Remitente'
+                : s.label || s.id;
             this.conversationsSessionSelect.appendChild(opt);
         });
         if (prev === 'all' || this.configuredSessions.some((s) => s.id === prev)) {
@@ -3803,6 +3852,10 @@ class CVAnalyzer {
 
     renderAutoReplySessions() {
         if (!this.autoReplySessionsList) return;
+        if (this.isOpsUser()) {
+            this.autoReplySessionsList.innerHTML = '';
+            return;
+        }
         const isSuper = this.isSuperUser();
         const sessions = isSuper
             ? this.configuredSessions || []
@@ -4139,7 +4192,11 @@ class CVAnalyzer {
 
     getSessionLabel(sessionId) {
         const found = this.configuredSessions.find((s) => s.id === sessionId);
-        return found ? found.label : sessionId;
+        if (!found) return this.isOpsUser() ? 'Remitente' : sessionId;
+        if (this.isOpsUser()) {
+            return (found.senderName || found.label || 'Remitente').trim();
+        }
+        return found.label || sessionId;
     }
 
     getSessionSenderName(sessionId) {
@@ -5004,15 +5061,19 @@ class CVAnalyzer {
 
         this.usersList.innerHTML = users
             .map((user) => {
+                const isOps = user.role === 'ops';
                 const assignedCount = Object.values(user.permissions || {}).filter(
                     (v) => v === 'view' || v === 'control'
                 ).length;
+                const meta = isOps
+                    ? 'Ops · todas las líneas (ocultas)'
+                    : `${assignedCount} línea${assignedCount === 1 ? '' : 's'}`;
                 return `
                 <div class="user-card" data-user-id="${this.escapeHtml(user.id)}">
                     <div class="user-card-header">
                         <div>
                             <strong>${this.escapeHtml(user.username)}</strong>
-                            <span class="user-card-meta">${assignedCount} línea${assignedCount === 1 ? '' : 's'}</span>
+                            <span class="user-card-meta">${this.escapeHtml(meta)}</span>
                         </div>
                         <button type="button" class="btn btn-danger btn-sm delete-user-btn" data-id="${this.escapeHtml(user.id)}">Eliminar</button>
                     </div>
@@ -5038,22 +5099,27 @@ class CVAnalyzer {
         if (!this.isSuperUser()) return;
         const username = this.newUserUsername ? this.newUserUsername.value.trim() : '';
         const password = this.newUserPassword ? this.newUserPassword.value : '';
+        const role = this.newUserRole ? this.newUserRole.value : 'user';
         const gerenteEmail = this.newUserGerenteEmail ? this.newUserGerenteEmail.value.trim() : '';
 
         try {
             const response = await fetch('/api/users', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password, permissions: {}, gerenteEmail })
+                body: JSON.stringify({ username, password, role, permissions: {}, gerenteEmail })
             });
             const data = await response.json();
             if (!data.success) throw new Error(data.error || 'No se pudo crear');
 
             if (this.newUserUsername) this.newUserUsername.value = '';
             if (this.newUserPassword) this.newUserPassword.value = '';
+            if (this.newUserRole) this.newUserRole.value = 'user';
             if (this.newUserGerenteEmail) this.newUserGerenteEmail.value = '';
             if (this.usersFormStatus) {
-                this.usersFormStatus.textContent = `Usuario "${username}" creado. Asígnale líneas en el tablero de arriba.`;
+                this.usersFormStatus.textContent =
+                    role === 'ops'
+                        ? `Usuario ops "${username}" creado. Ve citas confirmadas, conversaciones y auto-respuesta sin nombres de línea.`
+                        : `Usuario "${username}" creado. Asígnale líneas en el tablero de arriba.`;
                 this.usersFormStatus.style.color = '#15803d';
             }
             await this.loadUsers();

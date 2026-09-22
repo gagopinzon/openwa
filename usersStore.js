@@ -10,13 +10,19 @@ const ACCESS_LEVELS = Object.freeze({
   CONTROL: 'control'
 });
 
+const USER_ROLES = Object.freeze({
+  USER: 'user',
+  OPS: 'ops'
+});
+
 /**
  * @typedef {'view'|'control'} SessionAccess
+ * @typedef {'user'|'ops'} StoredUserRole
  * @typedef {{
  *   id: string,
  *   username: string,
  *   passwordHash: string,
- *   role: 'user',
+ *   role: StoredUserRole,
  *   permissions: Record<string, SessionAccess>,
  *   gerenteEmail?: string,
  *   createdAt: string,
@@ -88,6 +94,16 @@ function sanitizePermissions(permissions) {
     }
   }
   return out;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {StoredUserRole}
+ */
+function sanitizeRole(value) {
+  const role = String(value || '').trim().toLowerCase();
+  if (role === USER_ROLES.OPS) return USER_ROLES.OPS;
+  return USER_ROLES.USER;
 }
 
 /**
@@ -175,7 +191,7 @@ function findUserById(id) {
 }
 
 /**
- * @param {{ username: string, password: string, permissions?: Record<string, SessionAccess>, gerenteEmail?: string }} input
+ * @param {{ username: string, password: string, role?: StoredUserRole, permissions?: Record<string, SessionAccess>, gerenteEmail?: string }} input
  */
 function createUser(input) {
   const username = String(input.username || '').trim();
@@ -192,6 +208,7 @@ function createUser(input) {
     throw new Error('Ese nombre está reservado para el superusuario del .env');
   }
 
+  const role = sanitizeRole(input.role);
   const gerenteEmail = sanitizeGerenteEmail(input.gerenteEmail);
 
   const store = readStore();
@@ -205,8 +222,9 @@ function createUser(input) {
     id: crypto.randomUUID(),
     username,
     passwordHash: hashPassword(password),
-    role: 'user',
-    permissions: sanitizePermissions(input.permissions),
+    role,
+    // ops tiene acceso implícito a todas las líneas; no guarda permisos por sesión
+    permissions: role === USER_ROLES.OPS ? {} : sanitizePermissions(input.permissions),
     gerenteEmail,
     createdAt: now,
     updatedAt: now
@@ -219,7 +237,7 @@ function createUser(input) {
 
 /**
  * @param {string} id
- * @param {{ password?: string, permissions?: Record<string, SessionAccess>, gerenteEmail?: string }} patch
+ * @param {{ password?: string, role?: StoredUserRole, permissions?: Record<string, SessionAccess>, gerenteEmail?: string }} patch
  */
 function updateUser(id, patch) {
   const store = readStore();
@@ -233,7 +251,14 @@ function updateUser(id, patch) {
     store.users[idx].passwordHash = hashPassword(patch.password);
   }
 
-  if (patch.permissions != null) {
+  if (patch.role != null) {
+    store.users[idx].role = sanitizeRole(patch.role);
+  }
+
+  const effectiveRole = store.users[idx].role === USER_ROLES.OPS ? USER_ROLES.OPS : USER_ROLES.USER;
+  if (effectiveRole === USER_ROLES.OPS) {
+    store.users[idx].permissions = {};
+  } else if (patch.permissions != null) {
     store.users[idx].permissions = sanitizePermissions(patch.permissions);
   }
 
@@ -346,6 +371,7 @@ function authenticateStoredUser(username, password) {
 
 module.exports = {
   ACCESS_LEVELS,
+  USER_ROLES,
   getAllUsers,
   findUserByUsername,
   findUserById,
@@ -358,6 +384,7 @@ module.exports = {
   authenticateStoredUser,
   publicUser,
   sanitizePermissions,
+  sanitizeRole,
   sanitizeGerenteEmail,
   getSuperGerenteEmail,
   setSuperGerenteEmail

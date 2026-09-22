@@ -73,9 +73,13 @@ const {
   isAuthenticated,
   getRequestUser,
   filterSessionsForUser,
+  presentSessionsForUser,
+  isOpsUser,
   canControlSession,
   canViewSession,
   requireSuper,
+  requireSuperOrOps,
+  forbidOpsInfrastructure,
   forbidUnlessControlSessions,
   forbidUnlessViewSession,
   setAuthCookie,
@@ -1287,6 +1291,7 @@ app.post('/api/auth/login', (req, res) => {
       username: result.user.username,
       role: result.user.role,
       isSuper: result.user.isSuper,
+      isOps: Boolean(result.user.isOps),
       permissions: result.user.permissions || {},
       gerenteEmail: result.user.gerenteEmail || ''
     }
@@ -1309,6 +1314,7 @@ app.get('/api/auth/status', (req, res) => {
           username: user.username,
           role: user.role,
           isSuper: user.isSuper,
+          isOps: Boolean(user.isOps),
           permissions: user.permissions || {},
           gerenteEmail: user.gerenteEmail || ''
         }
@@ -1328,6 +1334,7 @@ app.get('/api/me', (req, res) => {
       username: user.username,
       role: user.role,
       isSuper: user.isSuper,
+      isOps: Boolean(user.isOps),
       gerenteEmail: user.gerenteEmail || '',
       envGerenteEmail: panelMsgClient.defaultGerenteEmail() || ''
     }
@@ -1383,6 +1390,7 @@ app.post('/api/users', requireSuper, (req, res) => {
     const user = usersStore.createUser({
       username: req.body.username,
       password: req.body.password,
+      role: req.body.role,
       permissions: req.body.permissions,
       gerenteEmail: req.body.gerenteEmail
     });
@@ -1397,6 +1405,9 @@ app.put('/api/users/:id', requireSuper, (req, res) => {
     const patch = {};
     if (req.body.password != null && String(req.body.password).length > 0) {
       patch.password = req.body.password;
+    }
+    if (req.body.role != null) {
+      patch.role = req.body.role;
     }
     if (req.body.permissions != null) {
       patch.permissions = req.body.permissions;
@@ -1451,6 +1462,7 @@ app.get('/', (req, res) => {
 // Ruta para subir y procesar CVs
 app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({
         error: 'No se subieron archivos PDF'
@@ -1809,7 +1821,7 @@ app.post('/cvs/update-phone', async (req, res) => {
 
 // Ruta para obtener configuración del sistema
 app.get('/config', (req, res) => {
-  const sessions = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
+  const sessions = presentSessionsForUser(req.user, sessionsStore.getAllSessions());
   const current = req.user || getRequestUser(req);
   const userGerente = (current && current.gerenteEmail) || '';
   const envGerente = panelMsgClient.defaultGerenteEmail() || '';
@@ -1823,6 +1835,7 @@ app.get('/config', (req, res) => {
           username: current.username,
           role: current.role,
           isSuper: current.isSuper,
+          isOps: Boolean(current.isOps),
           permissions: current.permissions || {},
           gerenteEmail: current.gerenteEmail || ''
         }
@@ -1984,13 +1997,28 @@ app.get('/api/agenda/slots', async (req, res) => {
 app.get('/api/agenda/pending', (req, res) => {
   try {
     if (!forbidUnlessAnyControl(req, res)) return;
-    const statusFilter = req.query.status
+    const user = req.user || getRequestUser(req);
+    let statusFilter = req.query.status
       ? String(req.query.status).split(',').map((s) => s.trim()).filter(Boolean)
       : [agendaPendingStore.STATUS.PENDING_LINK];
+
+    // ops solo puede ver citas confirmadas (no pendientes de link)
+    if (isOpsUser(user)) {
+      const onlyConfirmed = statusFilter.every(
+        (s) => s === agendaPendingStore.STATUS.CONFIRMED
+      );
+      if (!onlyConfirmed) {
+        return res.status(403).json({
+          success: false,
+          error: 'Esta sección no está disponible para tu usuario'
+        });
+      }
+      statusFilter = [agendaPendingStore.STATUS.CONFIRMED];
+    }
+
     const items = agendaPendingStore.listPending({ status: statusFilter });
-    const user = req.user || getRequestUser(req);
     const isSuper = user && (user.isSuper || user.role === 'super');
-    const filtered = isSuper
+    const filtered = isSuper || isOpsUser(user)
       ? items
       : items.filter((item) => {
           if (!item.logicalSessionId) return true;
@@ -2004,6 +2032,7 @@ app.get('/api/agenda/pending', (req, res) => {
 
 app.post('/api/agenda/pending', (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     if (!forbidUnlessAnyControl(req, res)) return;
     const body = req.body || {};
     const fecha = String(body.fecha || '').trim();
@@ -2045,6 +2074,7 @@ app.post('/api/agenda/pending', (req, res) => {
 
 app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     if (!forbidUnlessAnyControl(req, res)) return;
     const pending = agendaPendingStore.getById(req.params.id);
     if (!pending) {
@@ -2198,6 +2228,7 @@ app.post('/api/agenda/pending/:id/confirm', async (req, res) => {
 
 app.post('/api/agenda/pending/:id/cancel', (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     if (!forbidUnlessAnyControl(req, res)) return;
     const pending = agendaPendingStore.getById(req.params.id);
     if (!pending) {
@@ -2474,7 +2505,7 @@ app.post('/api/panel/reuniones', async (req, res) => {
 
 app.get('/api/sessions', (req, res) => {
   try {
-    const sessions = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
+    const sessions = presentSessionsForUser(req.user, sessionsStore.getAllSessions());
     res.json({ success: true, sessions });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -2484,6 +2515,7 @@ app.get('/api/sessions', (req, res) => {
 /** Estado conectada/desconectada en OpenWA para las líneas visibles del usuario. */
 app.get('/api/sessions/connection-status', async (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     const sessions = filterSessionsForUser(req.user, sessionsStore.getAllSessions());
     if (TEST_MODE) {
       const statuses = {};
@@ -2696,6 +2728,7 @@ app.get('/api/send-queue', (req, res) => {
 
 app.post('/api/send-queue', async (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     const selectedSessions =
       Array.isArray(req.body?.selectedSessions) && req.body.selectedSessions.length > 0
         ? req.body.selectedSessions.map(String)
@@ -2877,6 +2910,7 @@ function requireAndroidToken(req, res) {
 // --- Android gateway (agente en celular) ---
 app.get('/api/android/devices', (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     if (!forbidUnlessAnyControl(req, res)) return;
     res.json({
       success: true,
@@ -2928,6 +2962,7 @@ app.delete('/api/android/devices/:id', requireSuper, (req, res) => {
 
 app.get('/api/android/jobs', (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     if (!forbidUnlessAnyControl(req, res)) return;
     const jobs = androidGatewayStore.listJobs({
       batchId: req.query.batchId || null,
@@ -3165,6 +3200,7 @@ app.post('/api/android/raid-send', requireSuper, (req, res) => {
 // Ruta para enviar mensajes por WhatsApp
 app.post('/send-whatsapp', async (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     const sendingBatch = sendQueueStore.getSendingBatch();
     if (sendingBatch || isAnySendingInProgress()) {
       return res.status(409).json({
@@ -3820,7 +3856,7 @@ function logCvLookupMiss(phone, hints = {}) {
 function userHasAnyControl(req) {
   const user = req.user || getRequestUser(req);
   if (!user) return false;
-  if (user.isSuper || user.role === 'super') return true;
+  if (user.isSuper || user.role === 'super' || isOpsUser(user)) return true;
   const sessions = sessionsStore.getAllSessions();
   return filterSessionsForUser(user, sessions, 'control').length > 0;
 }
@@ -5427,7 +5463,19 @@ app.post('/api/conversations/unblock', async (req, res) => {
 
 app.get('/api/auto-reply/status', (req, res) => {
   try {
-    res.json({ success: true, ...autoReplyService.getStatus() });
+    const status = autoReplyService.getStatus();
+    if (isOpsUser(req.user || getRequestUser(req))) {
+      return res.json({
+        success: true,
+        ...status,
+        enabledSessionIds: null,
+        enabledSessionsCount: null,
+        sessionsConfigured: null,
+        webhooksActive: status.webhooksActive > 0 ? 1 : 0,
+        webhookIdsBySession: {}
+      });
+    }
+    res.json({ success: true, ...status });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -5435,13 +5483,20 @@ app.get('/api/auto-reply/status', (req, res) => {
 
 app.get('/api/auto-reply/config', (req, res) => {
   try {
-    res.json({ success: true, config: autoReplyStore.getPublicConfig() });
+    const config = autoReplyStore.getPublicConfig();
+    if (isOpsUser(req.user || getRequestUser(req))) {
+      return res.json({
+        success: true,
+        config: { ...config, enabledSessionIds: null }
+      });
+    }
+    res.json({ success: true, config });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-app.get('/api/auto-reply/defaults', requireSuper, (req, res) => {
+app.get('/api/auto-reply/defaults', requireSuperOrOps, (req, res) => {
   try {
     res.json({ success: true, defaults: autoReplyStore.getRecommendedDefaults() });
   } catch (error) {
@@ -5451,6 +5506,7 @@ app.get('/api/auto-reply/defaults', requireSuper, (req, res) => {
 
 app.patch('/api/auto-reply/sessions', (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     const sessionId = String(req.body.sessionId || '').trim();
     if (!sessionId) {
       return res.status(400).json({ success: false, error: 'sessionId es obligatorio' });
@@ -5489,19 +5545,24 @@ app.patch('/api/auto-reply/sessions', (req, res) => {
   }
 });
 
-app.put('/api/auto-reply/config', requireSuper, (req, res) => {
+app.put('/api/auto-reply/config', requireSuperOrOps, (req, res) => {
   try {
+    const body = { ...(req.body || {}) };
+    // ops no puede listar ni ajustar líneas una a una
+    if (isOpsUser(req.user || getRequestUser(req))) {
+      delete body.enabledSessionIds;
+    }
     const config = autoReplyStore.updateConfig({
-      enabled: req.body.enabled,
-      basePrompt: req.body.basePrompt,
-      personaSystem: req.body.personaSystem,
-      systemInstructions: req.body.systemInstructions,
-      cvPolicyWithCv: req.body.cvPolicyWithCv,
-      cvPolicyWithoutCv: req.body.cvPolicyWithoutCv,
-      rules: req.body.rules,
-      enabledSessionIds: req.body.enabledSessionIds,
-      minDelayMs: req.body.minDelayMs,
-      maxDelayMs: req.body.maxDelayMs
+      enabled: body.enabled,
+      basePrompt: body.basePrompt,
+      personaSystem: body.personaSystem,
+      systemInstructions: body.systemInstructions,
+      cvPolicyWithCv: body.cvPolicyWithCv,
+      cvPolicyWithoutCv: body.cvPolicyWithoutCv,
+      rules: body.rules,
+      enabledSessionIds: body.enabledSessionIds,
+      minDelayMs: body.minDelayMs,
+      maxDelayMs: body.maxDelayMs
     });
     res.json({ success: true, config });
   } catch (error) {
@@ -5519,6 +5580,7 @@ app.get('/api/send-settings', (req, res) => {
 
 app.put('/api/send-settings', (req, res) => {
   try {
+    if (!forbidOpsInfrastructure(req, res)) return;
     if (!forbidUnlessAnyControl(req, res)) return;
     const settings = sendSettingsStore.updateSettings({
       minDelaySec: req.body.minDelaySec,
@@ -5530,7 +5592,7 @@ app.put('/api/send-settings', (req, res) => {
   }
 });
 
-app.post('/api/auto-reply/activate', requireSuper, async (req, res) => {
+app.post('/api/auto-reply/activate', requireSuperOrOps, async (req, res) => {
   try {
     console.log(`[auto-reply] POST /activate by ${req.user?.username || 'unknown'}`);
     const status = autoReplyService.getStatus();
@@ -5552,7 +5614,7 @@ app.post('/api/auto-reply/activate', requireSuper, async (req, res) => {
   }
 });
 
-app.post('/api/auto-reply/deactivate', requireSuper, async (req, res) => {
+app.post('/api/auto-reply/deactivate', requireSuperOrOps, async (req, res) => {
   try {
     console.log(`[auto-reply] POST /deactivate by ${req.user?.username || 'unknown'}`);
     const results = await autoReplyService.deactivateWebhooks();
@@ -5564,7 +5626,7 @@ app.post('/api/auto-reply/deactivate', requireSuper, async (req, res) => {
   }
 });
 
-app.post('/api/auto-reply/test', requireSuper, async (req, res) => {
+app.post('/api/auto-reply/test', requireSuperOrOps, async (req, res) => {
   try {
     const openwaSessionId =
       req.body.openwaSessionId ||

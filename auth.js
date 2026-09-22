@@ -43,20 +43,22 @@ function parseCookies(req) {
 }
 
 /**
- * @param {{ username: string, role: 'super'|'user' }} user
+ * @param {{ username: string, role: 'super'|'user'|'ops' }} user
  */
 function createSessionToken(user) {
+  const role =
+    user.role === 'super' ? 'super' : user.role === 'ops' ? 'ops' : 'user';
   const payload = JSON.stringify({
     exp: Date.now() + SESSION_MS,
     u: String(user.username || '').trim(),
-    r: user.role === 'super' ? 'super' : 'user'
+    r: role
   });
   const signature = crypto.createHmac('sha256', getSessionSecret()).update(payload).digest('hex');
   return `${Buffer.from(payload).toString('base64url')}.${signature}`;
 }
 
 /**
- * @returns {{ exp: number, username: string, role: 'super'|'user' }|null}
+ * @returns {{ exp: number, username: string, role: 'super'|'user'|'ops' }|null}
  */
 function decodeSessionToken(token) {
   if (!token || typeof token !== 'string') return null;
@@ -85,7 +87,8 @@ function decodeSessionToken(token) {
     if (typeof data.exp !== 'number' || data.exp <= Date.now()) return null;
     const username = String(data.u || '').trim();
     if (!username) return null;
-    const role = data.r === 'super' ? 'super' : 'user';
+    const role =
+      data.r === 'super' ? 'super' : data.r === 'ops' ? 'ops' : 'user';
     return { exp: data.exp, username, role };
   } catch {
     return null;
@@ -101,10 +104,12 @@ function verifySessionToken(token) {
  * Si auth está desactivada, se trata como super anónimo.
  * @returns {{
  *   username: string,
- *   role: 'super'|'user',
+ *   role: 'super'|'user'|'ops',
  *   isSuper: boolean,
+ *   isOps: boolean,
  *   permissions: Record<string, 'view'|'control'>,
- *   id?: string
+ *   id?: string,
+ *   gerenteEmail?: string
  * }|null}
  */
 function getRequestUser(req) {
@@ -113,6 +118,7 @@ function getRequestUser(req) {
       username: 'local',
       role: 'super',
       isSuper: true,
+      isOps: false,
       permissions: {},
       gerenteEmail:
         usersStore.getSuperGerenteEmail() ||
@@ -133,6 +139,7 @@ function getRequestUser(req) {
       username: superName,
       role: 'super',
       isSuper: true,
+      isOps: false,
       permissions: {},
       gerenteEmail:
         usersStore.getSuperGerenteEmail() ||
@@ -143,12 +150,14 @@ function getRequestUser(req) {
   const stored = usersStore.findUserByUsername(decoded.username);
   if (!stored) return null;
 
+  const isOps = stored.role === usersStore.USER_ROLES.OPS;
   return {
     id: stored.id,
     username: stored.username,
-    role: 'user',
+    role: isOps ? 'ops' : 'user',
     isSuper: false,
-    permissions: { ...(stored.permissions || {}) },
+    isOps,
+    permissions: isOps ? {} : { ...(stored.permissions || {}) },
     gerenteEmail: String(stored.gerenteEmail || '').trim()
   };
 }
@@ -185,6 +194,7 @@ function validateCredentials(username, password) {
         username: expectedUser,
         role: 'super',
         isSuper: true,
+        isOps: false,
         permissions: {},
         gerenteEmail:
           usersStore.getSuperGerenteEmail() ||
@@ -195,14 +205,16 @@ function validateCredentials(username, password) {
 
   const stored = usersStore.authenticateStoredUser(inputUser, inputPass);
   if (stored) {
+    const isOps = stored.role === usersStore.USER_ROLES.OPS;
     return {
       ok: true,
       user: {
         id: stored.id,
         username: stored.username,
-        role: 'user',
+        role: isOps ? 'ops' : 'user',
         isSuper: false,
-        permissions: { ...(stored.permissions || {}) },
+        isOps,
+        permissions: isOps ? {} : { ...(stored.permissions || {}) },
         gerenteEmail: String(stored.gerenteEmail || '').trim()
       }
     };
@@ -211,9 +223,15 @@ function validateCredentials(username, password) {
   return { ok: false };
 }
 
+function isOpsUser(user) {
+  return Boolean(user && (user.isOps || user.role === 'ops'));
+}
+
 function getSessionAccess(user, sessionId) {
   if (!user) return null;
-  if (user.isSuper || user.role === 'super') return usersStore.ACCESS_LEVELS.CONTROL;
+  if (user.isSuper || user.role === 'super' || isOpsUser(user)) {
+    return usersStore.ACCESS_LEVELS.CONTROL;
+  }
   const id = String(sessionId || '').trim();
   if (!id) return null;
   const level = user.permissions && user.permissions[id];
@@ -233,7 +251,7 @@ function canControlSession(user, sessionId) {
 
 function filterSessionsForUser(user, sessions, minAccess = 'view') {
   const list = Array.isArray(sessions) ? sessions : [];
-  if (!user || user.isSuper || user.role === 'super') {
+  if (!user || user.isSuper || user.role === 'super' || isOpsUser(user)) {
     return list.map((s) => ({
       ...s,
       access: usersStore.ACCESS_LEVELS.CONTROL
@@ -250,6 +268,64 @@ function filterSessionsForUser(user, sessions, minAccess = 'view') {
       if (minAccess === 'control') return s.access === usersStore.ACCESS_LEVELS.CONTROL;
       return true;
     });
+}
+
+/**
+ * Quita etiquetas/IDs técnicos de línea para el rol ops (solo remitente).
+ * Conserva `id` interno para que conversaciones/APIs sigan funcionando.
+ * @param {object|null} user
+ * @param {object[]} sessions
+ * @returns {object[]}
+ */
+function presentSessionsForUser(user, sessions) {
+  const filtered = filterSessionsForUser(user, sessions);
+  if (!isOpsUser(user)) return filtered;
+
+  return filtered.map((s) => {
+    const remitter = String(s.senderName || '').trim() || 'Remitente';
+    return {
+      id: s.id,
+      label: remitter,
+      senderName: remitter,
+      access: s.access || usersStore.ACCESS_LEVELS.CONTROL
+    };
+  });
+}
+
+function requireSuper(req, res, next) {
+  const user = req.user || getRequestUser(req);
+  if (!user || !user.isSuper) {
+    return res.status(403).json({
+      success: false,
+      error: 'Solo el superusuario puede realizar esta acción'
+    });
+  }
+  return next();
+}
+
+/** Super del .env o rol ops (auto-respuesta / operación sin infraestructura). */
+function requireSuperOrOps(req, res, next) {
+  const user = req.user || getRequestUser(req);
+  if (!user || (!user.isSuper && !isOpsUser(user))) {
+    return res.status(403).json({
+      success: false,
+      error: 'No tienes permiso para realizar esta acción'
+    });
+  }
+  return next();
+}
+
+/** Bloquea envío masivo / gateway / citas pendientes para ops. */
+function forbidOpsInfrastructure(req, res) {
+  const user = req.user || getRequestUser(req);
+  if (isOpsUser(user)) {
+    res.status(403).json({
+      success: false,
+      error: 'Esta sección no está disponible para tu usuario'
+    });
+    return false;
+  }
+  return true;
 }
 
 function isPublicPath(pathname) {
@@ -329,24 +405,13 @@ function authMiddleware(req, res, next) {
   return res.redirect('/login');
 }
 
-function requireSuper(req, res, next) {
-  const user = req.user || getRequestUser(req);
-  if (!user || !user.isSuper) {
-    return res.status(403).json({
-      success: false,
-      error: 'Solo el superusuario puede realizar esta acción'
-    });
-  }
-  return next();
-}
-
 function forbidUnlessControlSessions(sessionIds, req, res) {
   const user = req.user || getRequestUser(req);
   if (!user) {
     res.status(401).json({ success: false, error: 'No autenticado' });
     return false;
   }
-  if (user.isSuper) return true;
+  if (user.isSuper || isOpsUser(user)) return true;
 
   const ids = Array.isArray(sessionIds) ? sessionIds : [sessionIds];
   for (const id of ids) {
@@ -367,7 +432,7 @@ function forbidUnlessViewSession(sessionId, req, res) {
     res.status(401).json({ success: false, error: 'No autenticado' });
     return false;
   }
-  if (user.isSuper) return true;
+  if (user.isSuper || isOpsUser(user)) return true;
   if (!canViewSession(user, sessionId)) {
     res.status(403).json({
       success: false,
@@ -406,7 +471,11 @@ module.exports = {
   canViewSession,
   canControlSession,
   filterSessionsForUser,
+  presentSessionsForUser,
+  isOpsUser,
   requireSuper,
+  requireSuperOrOps,
+  forbidOpsInfrastructure,
   forbidUnlessControlSessions,
   forbidUnlessViewSession,
   setAuthCookie,

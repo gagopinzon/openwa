@@ -125,6 +125,10 @@
                         <div class="users-create-row">
                             <input type="text" id="newUserUsername" class="form-select" placeholder="Usuario" required minlength="3" autocomplete="off">
                             <input type="password" id="newUserPassword" class="form-select" placeholder="Contraseña" required minlength="6" autocomplete="new-password">
+                            <select id="newUserRole" class="form-select" title="Rol del usuario">
+                                <option value="user">Vendedor (líneas asignadas)</option>
+                                <option value="ops">Ops (sin ver líneas)</option>
+                            </select>
                         </div>
                         <div class="users-create-row" style="margin-top: 8px;">
                             <input type="email" id="newUserGerenteEmail" class="form-select" placeholder="Correo gerente en Panel (opcional)" autocomplete="off">
@@ -803,7 +807,11 @@
                     const userLabel = document.getElementById('authUserLabel');
                     logoutBtn.style.display = 'inline-block';
                     if (userLabel && data.user) {
-                        const role = data.user.isSuper ? 'superusuario' : 'usuario';
+                        const role = data.user.isSuper
+                            ? 'superusuario'
+                            : data.user.isOps || data.user.role === 'ops'
+                              ? 'ops'
+                              : 'usuario';
                         userLabel.textContent = `${data.user.username} (${role})`;
                         userLabel.style.display = 'inline';
                     }
