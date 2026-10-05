@@ -262,12 +262,14 @@ function extractCVData(text) {
   }
 
   const experiencia = extractExperienciaProfesional(text);
+  const ultimoTrabajo = extractUltimoTrabajo(text);
   const correo = header.correo || '';
 
   return {
     nombre,
     telefono,
     experiencia,
+    ultimoTrabajo,
     textoCompleto: text,
     ciudad: header.ciudad || '',
     estado: header.estado || '',
@@ -288,19 +290,19 @@ function extractExperienciaProfesional(text) {
   // Buscar sección de experiencia profesional
   const experienciaRegex = /experiencia\s+profesional[\s\S]*?(?=objetivo\s+profesional|educaci[oó]n|idiomas|liga\s+de\s+curr[ií]culo|$)/i;
   const match = text.match(experienciaRegex);
-  
+
   if (match) {
     let experiencia = match[0];
     // Limpiar el texto extraído
     experiencia = experiencia
       .replace(/experiencia\s+profesional[\s-]*/i, '')
       .trim();
-    
+
     // Limitar a un máximo de 1000 caracteres para evitar mensajes muy largos
     if (experiencia.length > 1000) {
       experiencia = experiencia.substring(0, 1000) + '...';
     }
-    
+
     return experiencia;
   }
 
@@ -308,11 +310,11 @@ function extractExperienciaProfesional(text) {
   const trabajoRegex = /([a-zA-ZñÑáéíóúÁÉÍÓÚ\s]+)\s+en\s+([a-zA-ZñÑáéíóúÁÉÍÓÚ\s]+)\s*([a-z]+ \d{4}\s*-\s*[a-z]+ \d{4}|[a-z]+ \d{4}\s*-\s*(actual|presente))/gi;
   const trabajos = [];
   let matchTrabajo;
-  
+
   while ((matchTrabajo = trabajoRegex.exec(text)) !== null) {
     trabajos.push(matchTrabajo[0]);
   }
-  
+
   if (trabajos.length > 0) {
     return trabajos.join(' ');
   }
@@ -320,8 +322,94 @@ function extractExperienciaProfesional(text) {
   return 'Experiencia no encontrada';
 }
 
+const EXPERIENCE_HEADER_RE = /experiencia\s+profesional[\s\S]*?(?=objetivo\s+profesional|educaci[oó]n|idiomas|liga\s+de\s+curr[ií]culo|cursos|certificaci|habilidades|referencias|$)/i;
+const MONTH_NAMES =
+  'enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre';
+const DATE_RANGE_RE = new RegExp(
+  `\\b(?:${MONTH_NAMES})\\s+\\d{4}\\s*[-—]\\s*(?:${MONTH_NAMES}|actual|presente|actualidad)\\b`,
+  'i'
+);
+const STANDALONE_YEAR_RE = /\b(19|20)\d{2}\b/;
+
+function looksLikeJobTitle(line) {
+  const s = String(line || '').trim();
+  if (!s || s.length < 3) return false;
+  if (/^experiencia\s+profesional/i.test(s)) return false;
+  if (/^objetivo\s+profesional/i.test(s)) return false;
+  if (/^educaci[oó]n/i.test(s)) return false;
+  if (/^idiomas/i.test(s)) return false;
+  if (/^habilidades/i.test(s)) return false;
+  if (/^cursos|certificaci/i.test(s)) return false;
+  if (/^referencias/i.test(s)) return false;
+  if (/^liga\s+de\s+curr[ií]culo/i.test(s)) return false;
+  if (/^\d{10,}$/.test(s.replace(/\D/g, ''))) return false;
+  if (EMAIL_RE.test(s)) return false;
+  if (isPhoneLine(s)) return false;
+  if (looksLikeLocation(s)) return false;
+  if (DATE_RANGE_RE.test(s) && s.split(/\s+/).length <= 4) return false;
+  return /[a-zA-ZÁÉÍÓÚáéíóúÑñ]/.test(s);
+}
+
+function normalizeJobTitle(line) {
+  let s = String(line || '').trim();
+  // Quitar viñetas y numeración inicial
+  s = s.replace(/^[\-•·\*\d]+\s*[.)-]?\s*/, '');
+  // Quitar ubicaciones al final entre paréntesis o después de |
+  s = s.replace(/\s*[|\\/].*/, '');
+  s = s.replace(/\s*\([^)]*\)\s*$/, '');
+  // Si tiene " en Empresa", quedarse solo con el puesto
+  const enIdx = s.toLowerCase().indexOf(' en ');
+  if (enIdx > 0) {
+    s = s.slice(0, enIdx).trim();
+  }
+  // Quitar fechas sueltas
+  s = s.replace(DATE_RANGE_RE, '').trim();
+  s = s.replace(STANDALONE_YEAR_RE, '').trim();
+  // Limpiar caracteres raros
+  s = s.replace(/\s+/g, ' ').trim();
+  // Capitalizar
+  return s
+    .split(/\s+/)
+    .map((w) => (w ? w.charAt(0).toLocaleUpperCase('es') + w.slice(1).toLocaleLowerCase('es') : ''))
+    .join(' ');
+}
+
+/**
+ * Extrae el título del último trabajo/puesto del CV.
+ * @param {string} text - Texto completo del CV
+ * @returns {string} - Último puesto extraído o cadena vacía
+ */
+function extractUltimoTrabajo(text) {
+  const raw = String(text || '');
+  const sectionMatch = raw.match(EXPERIENCE_HEADER_RE);
+
+  if (sectionMatch) {
+    const lines = sectionMatch[0]
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    for (const line of lines) {
+      if (!looksLikeJobTitle(line)) continue;
+      const title = normalizeJobTitle(line);
+      if (title.length >= 3 && title.length <= 80) return title;
+    }
+  }
+
+  // Fallback: buscar patrón explícito "Cargo en Empresa" en todo el texto
+  const fallbackRe = /([a-zA-ZÁÉÍÓÚáéíóúÑñ\s]+)\s+en\s+[a-zA-ZÁÉÍÓÚáéíóúÑñ\s&]+/i;
+  const fallbackMatch = raw.match(fallbackRe);
+  if (fallbackMatch) {
+    const title = normalizeJobTitle(fallbackMatch[1]);
+    if (title.length >= 3 && title.length <= 80) return title;
+  }
+
+  return '';
+}
+
 module.exports = {
   verifyPdfReadable,
   extractTextFromPDF,
-  extractCVData
+  extractCVData,
+  extractUltimoTrabajo
 };

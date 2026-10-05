@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { extractTextFromPDF, extractCVData, verifyPdfReadable } = require('../pdfProcessor');
+const { extractTextFromPDF, extractCVData, verifyPdfReadable, extractUltimoTrabajo } = require('../pdfProcessor');
 
 /**
  * PDF mínimo con texto en un stream sin comprimir y xref clásico.
@@ -143,5 +143,41 @@ describe('extractCVData (encabezado OCC)', () => {
     assert.equal(data.ciudad, '');
     assert.equal(data.estado, 'Estado de México');
     assert.equal(data.correo, 'omar@mail.com');
+  });
+
+  it('extrae ultimoTrabajo desde formato OCC con viñeta', () => {
+    const text = [
+      'Ana López García',
+      'San Mateo Atenco, Estado de México',
+      'Experiencia profesional',
+      '- Project manager sr en AMF Bakery',
+      'Julio 2022 - Julio 2022'
+    ].join('\n');
+    const data = extractCVData(text);
+    assert.equal(data.ultimoTrabajo, 'Project Manager Sr');
+  });
+
+  it('extrae ultimoTrabajo sin viñeta', () => {
+    const text = [
+      'Luis Ordóñez',
+      'Experiencia profesional',
+      'PMO Lead en Aeromexico',
+      'Febrero 2025 - Junio 2025'
+    ].join('\n');
+    assert.equal(extractUltimoTrabajo(text), 'Pmo Lead');
+  });
+
+  it('ignora fechas y ubicaciones al extraer ultimoTrabajo', () => {
+    const text = [
+      'Experiencia profesional',
+      'enero 2020 - diciembre 2022',
+      'Gerente de Ventas en Empresa XYZ',
+      'Ciudad de México'
+    ].join('\n');
+    assert.equal(extractUltimoTrabajo(text), 'Gerente De Ventas');
+  });
+
+  it('devuelve cadena vacía si no hay experiencia', () => {
+    assert.equal(extractUltimoTrabajo('Solo nombre\nTeléfono\nObjetivo profesional'), '');
   });
 });

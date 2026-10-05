@@ -26,13 +26,14 @@ describe('generatePersonalizedMessage (Ollama)', () => {
     ollamaService.chatReply = async (prompt, opts) => {
       seenOpts = opts;
       assert.match(String(prompt), /Gerente de Producción/);
+      assert.match(String(prompt), /ÚLTIMO TRABAJO/);
       return `SALUDO: Hola Ana
 MENSAJE:
 Vi tu trayectoria en planta y destaca tu liderazgo operativo.
 
-En Pro Talent conectamos perfiles como el tuyo con vacantes clave en Gerencia de Producción.
+En PROTALENT conectamos perfiles como el tuyo con vacantes clave en Gerencia de Producción.
 
-¿Te interesaría una sesión gratuita de diagnóstico?
+¿Te interesaría una sesión de diagnóstico?
 
 Atte:
 {{SENDER}}`;
@@ -40,12 +41,13 @@ Atte:
 
     const out = await generatePersonalizedMessage(
       'Ana López',
-      'Gerente de Producción en ACME 2020-2024'
+      'Gerente de Producción en ACME 2020-2024',
+      'Gerente de Producción'
     );
 
     assert.equal(seenOpts?.skipMonica, true);
     assert.match(out.saludo, /Ana/i);
-    assert.match(out.mensajeIA, /Pro Talent/);
+    assert.match(out.mensajeIA, /PROTALENT|Pro Talent/i);
     assert.match(out.mensajeIA, /Atte:\n\{\{SENDER_NAME\}\}/);
     assert.doesNotMatch(out.mensajeIA, /^SALUDO:/i);
   });
@@ -93,12 +95,14 @@ Atte:
 
     const out = await generatePersonalizedMessage(
       'Carlos Ruiz',
+      'Supervisor de Calidad',
       'Supervisor de Calidad'
     );
 
     assert.match(out.saludo, /Carlos/i);
-    assert.match(out.mensajeIA, /Pro Talent/);
+    assert.match(out.mensajeIA, /PROTALENT|Pro Talent/i);
     assert.match(out.mensajeIA, /Atte:/i);
+    assert.match(out.mensajeIA, /Supervisor de Calidad/);
   });
 
   it('cae a plantilla si Ollama falla', async () => {
@@ -110,10 +114,12 @@ Atte:
 
     const out = await generatePersonalizedMessage(
       'María Pérez',
+      'Directora de Operaciones',
       'Directora de Operaciones'
     );
 
     assert.match(out.saludo, /María/i);
-    assert.match(out.mensajeIA, /Pro Talent/);
+    assert.match(out.mensajeIA, /PROTALENT|Pro Talent/i);
+    assert.match(out.mensajeIA, /Directora de Operaciones/);
   });
 });

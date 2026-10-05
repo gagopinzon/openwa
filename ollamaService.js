@@ -24,6 +24,11 @@ function getTimeoutMs() {
   return Number.isFinite(v) && v >= 5000 ? v : 120000;
 }
 
+function getBulkTimeoutMs() {
+  const v = parseInt(process.env.OLLAMA_BULK_TIMEOUT_MS || '60000', 10);
+  return Number.isFinite(v) && v >= 3000 ? v : 60000;
+}
+
 function getThinkEnabled() {
   const raw = String(process.env.OLLAMA_THINK || '').trim().toLowerCase();
   if (!raw) return false;
@@ -43,7 +48,7 @@ function isConfigured() {
 
 /**
  * @param {string} userPrompt
- * @param {{ basePrompt?: string, systemExtra?: string, personaSystem?: string, skipMonica?: boolean }} [opts]
+ * @param {{ basePrompt?: string, systemExtra?: string, personaSystem?: string, skipMonica?: boolean, timeoutMs?: number }} [opts]
  * @returns {Promise<string>}
  */
 async function chatReply(userPrompt, opts = {}) {
@@ -56,6 +61,8 @@ async function chatReply(userPrompt, opts = {}) {
     ? [extra, base].filter(Boolean)
     : [extra, persona, base].filter(Boolean);
   const system = systemParts.join('\n\n');
+
+  const timeoutMs = Number(opts.timeoutMs) >= 3000 ? Number(opts.timeoutMs) : getTimeoutMs();
 
   const response = await axios.post(
     getChatUrl(),
@@ -70,7 +77,7 @@ async function chatReply(userPrompt, opts = {}) {
     },
     {
       headers: { 'Content-Type': 'application/json' },
-      timeout: getTimeoutMs(),
+      timeout: timeoutMs,
       validateStatus: () => true
     }
   );
@@ -94,6 +101,7 @@ module.exports = {
   getChatUrl,
   getModel,
   getThinkEnabled,
+  getBulkTimeoutMs,
   isConfigured,
   isExplicitlyEnabled,
   chatReply,

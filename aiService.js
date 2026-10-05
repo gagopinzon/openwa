@@ -39,9 +39,9 @@ function cleanReplyText(message) {
 }
 
 const GREETING_TEMPLATES = [
-  (name) => `Hola ${name}`,
-  (name) => `Qué tal ${name}`,
-  (name) => `Buen día ${name}`
+  (name) => `Hola ${name},`,
+  (name) => `Qué tal ${name},`,
+  (name) => `Buen día ${name},`
 ];
 
 /**
@@ -175,94 +175,30 @@ function parseSaludoAndMessage(raw, nombre) {
   );
 
   if (!body) {
-    body = `Vi tu perfil y me pareció muy sólido tu expertise profesional.
-
-En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.
-
-¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?
-
-Atte:
-${SENDER_PLACEHOLDER}`;
+    ({ mensajeIA: body } = generateBasicMessage(nombre));
   }
 
   return { saludo, mensajeIA: ensureSenderPlaceholder(body) };
 }
 
 /**
- * Genera un mensaje básico sin IA cuando no hay API key
+ * Genera un mensaje básico sin IA cuando no hay API key o falla el modelo.
  * @param {string} nombre - Nombre de la persona
- * @param {string} experiencia - Experiencia profesional
+ * @param {string} [experiencia] - Experiencia profesional (legacy / fallback)
+ * @param {string} [ultimoTrabajo] - Último puesto de trabajo extraído del CV
  * @returns {{ saludo: string, mensajeIA: string }}
  */
-function generateBasicMessage(nombre, experiencia) {
-  let expertise = 'profesional';
-  let puestoClave = 'dirección comercial'; // Default
-  
-  // Buscar patrones comunes para expertise
-  if (experiencia.toLowerCase().includes('gerente')) {
-    expertise = 'como Gerente';
-    if (experiencia.toLowerCase().includes('producción')) {
-      puestoClave = 'Gerencia de Producción';
-    } else if (experiencia.toLowerCase().includes('ventas')) {
-      puestoClave = 'Gerencia de Ventas';
-    } else if (experiencia.toLowerCase().includes('operaciones')) {
-      puestoClave = 'Gerencia de Operaciones';
-    } else {
-      puestoClave = 'Gerencia';
-    }
-  } else if (experiencia.toLowerCase().includes('supervisor')) {
-    expertise = 'como Supervisor';
-    puestoClave = 'Supervisión';
-  } else if (experiencia.toLowerCase().includes('director')) {
-    expertise = 'como Director';
-    puestoClave = 'Dirección';
-  } else if (experiencia.toLowerCase().includes('producción')) {
-    expertise = 'en Producción';
-    puestoClave = 'Producción';
-  } else if (experiencia.toLowerCase().includes('ventas')) {
-    expertise = 'en Ventas';
-    puestoClave = 'Ventas';
-  } else if (experiencia.toLowerCase().includes('marketing')) {
-    expertise = 'en Marketing';
-    puestoClave = 'Marketing';
-  } else if (experiencia.toLowerCase().includes('finanzas')) {
-    expertise = 'en Finanzas';
-    puestoClave = 'Finanzas';
-  } else if (experiencia.toLowerCase().includes('recursos humanos')) {
-    expertise = 'en Recursos Humanos';
-    puestoClave = 'Recursos Humanos';
-  }
-
-  const openerVariants = [
-    (e) => `Vi tu perfil y me pareció muy sólido tu expertise ${e}.`,
-    (e) => `Revisé tu trayectoria y destaca tu expertise ${e}.`,
-    (e) => `Tu perfil se ve muy interesante; resalta tu expertise ${e}.`
-  ];
-  const bodyVariants = [
-    (p) =>
-      `En Pro Talent ayudamos a perfiles como el tuyo a escalar profesionalmente, conectándolos con vacantes clave en ${p} y fortaleciendo su posicionamiento con estrategias activas que resaltan resultados y liderazgo.`,
-    (p) =>
-      `En Pro Talent acompañamos a perfiles como el tuyo a crecer, vinculándolos con oportunidades clave en ${p} y reforzando su posicionamiento con estrategias que destacan resultados y liderazgo.`,
-    (p) =>
-      `Desde Pro Talent impulsamos a profesionales como tú, acercándolos a vacantes relevantes en ${p} y potenciando su posicionamiento con estrategias activas de resultados y liderazgo.`
-  ];
-  const ctaVariants = [
-    '¿Te interesaría una sesión gratuita de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar a tu siguiente nivel?',
-    '¿Te gustaría una sesión gratuita de diagnóstico para revisar tu perfil y contarte cómo podemos apoyarte a dar el siguiente paso?',
-    '¿Qué te parecería una sesión gratuita de diagnóstico para analizar tu perfil y mostrarte cómo podemos ayudarte a avanzar?'
-  ];
-
-  const opener = openerVariants[Math.floor(Math.random() * openerVariants.length)](expertise);
-  const mid = bodyVariants[Math.floor(Math.random() * bodyVariants.length)](puestoClave);
-  const cta = ctaVariants[Math.floor(Math.random() * ctaVariants.length)];
+function generateBasicMessage(nombre, experiencia, ultimoTrabajo) {
+  const expertise = String(ultimoTrabajo || '').trim() || deriveExpertiseFromExperiencia(experiencia);
+  const firstName = extractFirstName(nombre);
 
   return {
-    saludo: buildGreeting(nombre),
-    mensajeIA: `${opener}
+    saludo: `Hola ${firstName},`,
+    mensajeIA: `Vi tu perfil y me pareció muy sólido tu expertise en ${expertise}.
 
-${mid}
+En PROTALENT ayudamos a perfiles como el tuyo a escalar profesionalmente, posicionándote con estrategias para generar oportunidades y competir por vacantes clave.
 
-${cta}
+¿Te interesaría una sesión de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar al siguiente nivel?
 
 Atte:
 ${SENDER_PLACEHOLDER}`
@@ -270,16 +206,41 @@ ${SENDER_PLACEHOLDER}`
 }
 
 /**
+ * Fallback para inferir el área de expertise desde el texto de experiencia
+ * cuando no se pudo extraer un último trabajo concreto.
+ * @param {string} experiencia
+ * @returns {string}
+ */
+function deriveExpertiseFromExperiencia(experiencia) {
+  const exp = String(experiencia || '').toLowerCase();
+  if (exp.includes('gerente') && exp.includes('producción')) return 'Gerencia de Producción';
+  if (exp.includes('gerente') && exp.includes('ventas')) return 'Gerencia de Ventas';
+  if (exp.includes('gerente') && exp.includes('operaciones')) return 'Gerencia de Operaciones';
+  if (exp.includes('gerente')) return 'Gerencia';
+  if (exp.includes('supervisor')) return 'Supervisión';
+  if (exp.includes('director')) return 'Dirección';
+  if (exp.includes('producción')) return 'Producción';
+  if (exp.includes('ventas')) return 'Ventas';
+  if (exp.includes('marketing')) return 'Marketing';
+  if (exp.includes('finanzas')) return 'Finanzas';
+  if (exp.includes('recursos humanos')) return 'Recursos Humanos';
+  return 'tu área';
+}
+
+/**
  * Genera un mensaje personalizado con Ollama (mismo host/modelo que auto-respuesta).
  * Si Ollama no está o falla → plantilla local (`generateBasicMessage`). Sin DeepSeek.
  * @param {string} nombre - Nombre de la persona
  * @param {string} experiencia - Experiencia profesional de la persona
+ * @param {string} [ultimoTrabajo] - Último puesto de trabajo extraído del CV
  * @returns {Promise<{ saludo: string, mensajeIA: string }>}
  */
-async function generatePersonalizedMessage(nombre, experiencia) {
+async function generatePersonalizedMessage(nombre, experiencia, ultimoTrabajo) {
+  const expertise = String(ultimoTrabajo || '').trim();
+
   if (!ollamaService.isConfigured()) {
     console.log('⚠️  Ollama no configurado. Generando mensaje básico...');
-    return generateBasicMessage(nombre, experiencia);
+    return generateBasicMessage(nombre, experiencia, expertise);
   }
 
   const firstName = extractFirstName(nombre);
@@ -289,17 +250,30 @@ async function generatePersonalizedMessage(nombre, experiencia) {
 Experiencia profesional de ${firstName}:
 ${experiencia}
 
+ÚLTIMO TRABAJO / PUESTO RELEVANTE: ${expertise || 'No especificado'}
+
 INSTRUCCIONES:
 1. Lee cuidadosamente la experiencia profesional
-2. Identifica el PUESTO CLAVE más relevante (ej: Gerencia de Producción, Supervisión de Calidad, Dirección de Operaciones)
-3. Identifica un logro, rol o industria para personalizar
-4. Usa solo el primer nombre ("${firstName}"), sin apellidos
-5. VARIACIÓN OBLIGATORIA: reescribe con otras palabras manteniendo la MISMA estructura e idea (4 bloques). No copies el texto plantilla palabra por palabra. Cambia verbos, adjetivos y formulaciones; conserva el sentido Pro Talent + diagnóstico gratuito.
+2. El último trabajo relevante es: "${expertise || 'su posición actual'}"
+3. Usa solo el primer nombre ("${firstName}"), sin apellidos
+4. VARIACIÓN OBLIGATORIA: reescribe con otras palabras manteniendo la MISMA estructura e idea (4 bloques). No copies el texto plantilla palabra por palabra. Cambia verbos, adjetivos y formulaciones; conserva el sentido Pro Talent + diagnóstico gratuito.
+
+MENSAJE BASE QUE DEBES REESCRIBIR (conserva la idea y estructura, varía palabras):
+Hola ${firstName},
+
+Vi tu perfil y me pareció muy sólido tu expertise en ${expertise || 'su último trabajo'}.
+
+En PROTALENT ayudamos a perfiles como el tuyo a escalar profesionalmente, posicionándote con estrategias para generar oportunidades y competir por vacantes clave.
+
+¿Te interesaría una sesión de diagnóstico para revisar tu perfil y explicarte cómo podemos ayudarte a llegar al siguiente nivel?
+
+Atte:
+${SENDER_PLACEHOLDER}
 
 ESTRUCTURA FIJA DEL MENSAJE (4 bloques separados por línea en blanco):
-1) Reconocimiento del perfil / expertise (1-2 frases, personalizado, máx ~90 caracteres en la parte personalizada)
-2) Qué hace Pro Talent por perfiles como el suyo + vacantes en el PUESTO CLAVE
-3) Pregunta/CTA ofreciendo sesión gratuita de diagnóstico
+1) Reconocimiento del perfil / expertise en ${expertise || 'su área'} (1-2 frases, personalizado, máx ~90 caracteres en la parte personalizada)
+2) Qué hace PROTALENT por perfiles como el suyo + vacantes clave
+3) Pregunta/CTA ofreciendo sesión de diagnóstico
 4) Firma exacta. Copia literalmente estas 2 líneas, sin cambiar nada:
 Atte:
 ${SENDER_PLACEHOLDER}
@@ -323,7 +297,7 @@ IMPORTANTE - SALUDO Y NOMBRE:
 
 IMPORTANTE - FIRMA:
 - Después de "Atte:" SOLO va ${SENDER_PLACEHOLDER}
-- NUNCA pongas "Pro Talent", "[YOUR_NAME]", un nombre inventado ni dejes la firma vacía
+- NUNCA pongas "Pro Talent", "PROTALENT", "[YOUR_NAME]", un nombre inventado ni dejes la firma vacía
 
 IMPORTANTE - VARIACIÓN:
 - Sí varía redacción; no inventes otra estructura ni agregues bloques extra
@@ -334,6 +308,7 @@ IMPORTANTE - VARIACIÓN:
   try {
     let message = await ollamaService.chatReply(prompt, {
       skipMonica: true,
+      timeoutMs: ollamaService.getBulkTimeoutMs(),
       systemExtra:
         'Responde SOLO con el formato SALUDO: / MENSAJE: pedido. Sin preámbulos ni explicaciones.'
     });
@@ -355,73 +330,97 @@ IMPORTANTE - VARIACIÓN:
       `[bulk-msg] Ollama (${ollamaService.getModel()}):`,
       error.message
     );
-    return generateBasicMessage(nombre, experiencia);
+    return generateBasicMessage(nombre, experiencia, expertise);
   }
 }
 
 /**
- * Genera mensajes personalizados para múltiples CVs
- * @param {Array} cvs - Array de objetos CV con nombre y experiencia
- * @returns {Promise<Array>} - Array de mensajes generados
+ * Procesa un array en lotes con concurrencia limitada.
+ * @template T, R
+ * @param {Array<T>} items
+ * @param {(item: T, index: number) => Promise<R>} fn
+ * @param {number} [concurrency]
+ * @returns {Promise<R[]>}
  */
-async function generateBulkMessages(cvs, onProgress = null) {
-  const messages = [];
+async function asyncPool(items, fn, concurrency = 3) {
+  const results = new Array(items.length);
+  const executing = new Set();
 
-  for (let i = 0; i < cvs.length; i++) {
-    const cv = cvs[i];
-    console.log(`Generando mensaje ${i + 1}/${cvs.length} para ${cv.nombre}`);
-
-    if (onProgress) {
-      onProgress({
-        current: i,
-        total: cvs.length,
-        nombre: cv.nombre,
-        phase: 'generating'
-      });
-    }
-
-    try {
-      const generated = await generatePersonalizedMessage(cv.nombre, cv.experiencia);
-      messages.push({
-        ...cv,
-        saludo: generated.saludo,
-        mensajeIA: generated.mensajeIA
-      });
-
-      if (onProgress) {
-        onProgress({
-          current: i + 1,
-          total: cvs.length,
-          nombre: cv.nombre,
-          phase: 'done'
-        });
-      }
-
-      // Delay entre llamadas para evitar rate limiting
-      if (i < cvs.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-
-    } catch (error) {
-      console.error(`Error generando mensaje para ${cv.nombre}:`, error.message);
-      messages.push({
-        ...cv,
-        saludo: buildGreeting(cv.nombre),
-        mensajeIA: `Error generando mensaje para ${cv.nombre}`
-      });
-
-      if (onProgress) {
-        onProgress({
-          current: i + 1,
-          total: cvs.length,
-          nombre: cv.nombre,
-          phase: 'error'
-        });
-      }
+  for (let i = 0; i < items.length; i++) {
+    const promise = fn(items[i], i).then((result) => {
+      results[i] = result;
+      executing.delete(promise);
+      return result;
+    });
+    results[i] = promise;
+    executing.add(promise);
+    if (executing.size >= concurrency) {
+      await Promise.race(executing);
     }
   }
 
-  return messages;
+  await Promise.all(executing);
+  return Promise.all(results);
+}
+
+/**
+ * Genera mensajes personalizados para múltiples CVs con concurrencia controlada.
+ * @param {Array} cvs - Array de objetos CV con nombre, experiencia y opcional ultimoTrabajo
+ * @returns {Promise<Array>} - Array de mensajes generados
+ */
+async function generateBulkMessages(cvs, onProgress = null) {
+  const total = cvs.length;
+  const completedIndexes = new Set();
+
+  const report = (phase, nombre) => {
+    if (!onProgress) return;
+    onProgress({
+      current: completedIndexes.size,
+      total,
+      nombre,
+      phase
+    });
+  };
+
+  const processOne = async (cv, i) => {
+    const label = `${i + 1}/${total}`;
+    console.log(`Generando mensaje ${label} para ${cv.nombre}`);
+
+    report('generating', cv.nombre);
+
+    const ultimoTrabajo = String(cv.ultimoTrabajo || '').trim();
+
+    try {
+      const generated = await generatePersonalizedMessage(
+        cv.nombre,
+        cv.experiencia,
+        ultimoTrabajo
+      );
+
+      completedIndexes.add(i);
+      report('done', cv.nombre);
+
+      return {
+        ...cv,
+        saludo: generated.saludo,
+        mensajeIA: generated.mensajeIA
+      };
+    } catch (error) {
+      console.error(`Error generando mensaje para ${cv.nombre}:`, error.message);
+      completedIndexes.add(i);
+      report('error', cv.nombre);
+
+      // Fallback inmediato a plantilla básica en vez de devolver un error crudo
+      const fallback = generateBasicMessage(cv.nombre, cv.experiencia, ultimoTrabajo);
+      return {
+        ...cv,
+        saludo: fallback.saludo,
+        mensajeIA: fallback.mensajeIA
+      };
+    }
+  };
+
+  return asyncPool(cvs, processOne, 3);
 }
 
 function generateBasicReply({ contactName, incomingBody, matchedRule, senderName, agendaContext }) {

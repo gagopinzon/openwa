@@ -41,9 +41,18 @@ async function ingestLeadCvFromBuffer(buffer, originalName, opts = {}) {
       nombre: cvData.nombre,
       telefono: cvData.telefono
     });
+
+    // Extraer el último trabajo desde el análisis IA si está disponible
+    const puestoPrincipal =
+      analyzed?.panelAnalisis?.puesto?.[0] ||
+      analyzed?.puesto?.[0] ||
+      analyzed?.ultimoTrabajo ||
+      '';
+
     cvData = {
       ...cvData,
       ...analyzed,
+      ultimoTrabajo: String(analyzed?.ultimoTrabajo || puestoPrincipal || '').trim(),
       procesado: true
     };
     if (opts.telefono) cvData.telefono = String(opts.telefono).trim();
