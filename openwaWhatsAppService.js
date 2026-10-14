@@ -50,24 +50,29 @@ function sampleDelaySeconds(delayRange, delayMinutesFallback = 3, rng = Math.ran
 }
 
 /**
- * Desfase acumulado del primer mensaje por línea: la primera activa arranca al instante;
- * cada siguiente activa espera una muestra más del intervalo aleatorio.
+ * Desfase de arranque acotado: todas las líneas arrancan dentro de una ventana
+ * de 2 minutos (reparto uniforme), sin importar el intervalo entre mensajes.
+ * La primera activa arranca al instante (0s) y la última como máximo a los 120s.
  * @param {number} sessionCount
- * @param {{ minSeconds?: number, maxSeconds?: number }|null} delayRange
- * @param {() => number} [rng]
+ * @param {{ minSeconds?: number, maxSeconds?: number }|null} _delayRange - se ignora, se conserva por compatibilidad
+ * @param {() => number} [_rng] - se ignora, se conserva por compatibilidad
  * @param {boolean[]|null} [activeMask] - si se pasa, las inactivas no desplazan a las demás
  * @returns {number[]}
  */
-function buildStartupDelayMsList(sessionCount, delayRange, rng = Math.random, activeMask = null) {
+const STARTUP_SPREAD_MAX_MS = 2 * 60 * 1000;
+
+function buildStartupDelayMsList(sessionCount, _delayRange, _rng = Math.random, activeMask = null) {
   const n = Math.max(0, Math.floor(Number(sessionCount) || 0));
-  const list = [];
-  let acc = 0;
+  const list = new Array(n).fill(0);
+  const activeIndexes = [];
   for (let i = 0; i < n; i++) {
     const active = !Array.isArray(activeMask) || Boolean(activeMask[i]);
-    list.push(active ? acc : 0);
-    if (active) {
-      acc += sampleDelaySeconds(delayRange, 3, rng) * 1000;
-    }
+    if (active) activeIndexes.push(i);
+  }
+  const m = activeIndexes.length;
+  if (m <= 1) return list;
+  for (let k = 0; k < m; k++) {
+    list[activeIndexes[k]] = Math.round((k * STARTUP_SPREAD_MAX_MS) / (m - 1));
   }
   return list;
 }
@@ -981,3 +986,4 @@ module.exports.ensureSessionHealthy = ensureSessionHealthy;
 module.exports.normalizeDelayRange = normalizeDelayRange;
 module.exports.sampleDelaySeconds = sampleDelaySeconds;
 module.exports.buildStartupDelayMsList = buildStartupDelayMsList;
+module.exports.STARTUP_SPREAD_MAX_MS = STARTUP_SPREAD_MAX_MS;

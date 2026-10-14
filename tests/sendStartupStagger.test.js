@@ -2,7 +2,8 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   sampleDelaySeconds,
-  buildStartupDelayMsList
+  buildStartupDelayMsList,
+  STARTUP_SPREAD_MAX_MS
 } = require('../openwaWhatsAppService');
 
 describe('sampleDelaySeconds', () => {
@@ -21,13 +22,14 @@ describe('sampleDelaySeconds', () => {
 });
 
 describe('buildStartupDelayMsList', () => {
-  it('la primera línea arranca en 0 y las siguientes acumulan el intervalo', () => {
+  it('reparte el arranque dentro de 2 minutos aunque el intervalo sea grande', () => {
+    assert.equal(STARTUP_SPREAD_MAX_MS, 120000);
     const delays = buildStartupDelayMsList(
-      3,
-      { minSeconds: 60, maxSeconds: 60 },
+      4,
+      { minSeconds: 900, maxSeconds: 1200 },
       () => 0
     );
-    assert.deepEqual(delays, [0, 60000, 120000]);
+    assert.deepEqual(delays, [0, 40000, 80000, 120000]);
   });
 
   it('una sola línea no espera', () => {
@@ -44,6 +46,7 @@ describe('buildStartupDelayMsList', () => {
       () => 0,
       [true, false, true, true]
     );
+    // 3 activas repartidas en 0, 60s, 120s
     assert.deepEqual(delays, [0, 0, 60000, 120000]);
   });
 

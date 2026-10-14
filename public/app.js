@@ -8202,7 +8202,7 @@ class CVAnalyzer {
                     weightValidation.weights
                 );
                 confirmMessage += `Reparto: ${preview.map((row) => `${this.getSessionLabel(row.id)} ${row.count}`).join(', ')}\n`;
-                confirmMessage += `Las líneas no arrancan a la vez: cada primer mensaje se desfasa con el intervalo aleatorio de ${delayLabel}; después cada línea sigue usando ese mismo intervalo.\n`;
+                confirmMessage += `Las líneas arrancan repartidas dentro de los primeros 2 minutos; después cada línea sigue usando ese mismo intervalo.\n`;
             } else {
                 confirmMessage += `Línea: ${sessionLabels}.\n`;
                 confirmMessage += `Delay aleatorio de ${delayLabel} entre cada mensaje.`;
