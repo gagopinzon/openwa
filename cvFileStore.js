@@ -398,6 +398,26 @@ function clearAllCvFiles() {
  * Campos que se persisten (sin textoCompleto para no inflar el JSON).
  * @param {object} cv
  */
+/** Diagnóstico IA para el panel (sin el texto completo del CV, que es pesado). */
+function sanitizePanelAnalisis(pa) {
+  if (!pa || typeof pa !== 'object') return undefined;
+  const { textoExtraido, ...rest } = pa;
+  return Object.keys(rest).length ? rest : undefined;
+}
+
+/** Campos obtenidos por IA (extracción al subir / diagnóstico al agendar) que deben sobrevivir reinicios. */
+function aiExtractedFields(cv) {
+  return {
+    analyzedAt: cv.analyzedAt || undefined,
+    extractionProvider: cv.extractionProvider || undefined,
+    ultimoTrabajo: cv.ultimoTrabajo || undefined,
+    ultimaEmpresa: cv.ultimaEmpresa || undefined,
+    puestos: Array.isArray(cv.puestos) && cv.puestos.length ? cv.puestos.slice(0, 4) : undefined,
+    aniosExperiencia: cv.aniosExperiencia || undefined,
+    panelAnalisis: sanitizePanelAnalisis(cv.panelAnalisis)
+  };
+}
+
 function sanitizeCvForPersist(cv) {
   if (!cv || typeof cv !== 'object') return null;
   return {
@@ -420,6 +440,7 @@ function sanitizeCvForPersist(cv) {
     leadEstado: cv.leadEstado || cv.estado || undefined,
     estado: cv.estado || cv.leadEstado || undefined,
     analysisProvider: cv.analysisProvider || undefined,
+    ...aiExtractedFields(cv),
     inWorkspace: cv.inWorkspace !== false,
     savedAt: cv.savedAt || new Date().toISOString(),
     occUrl: cv.occUrl || undefined,
@@ -457,6 +478,7 @@ function hydrateStoredCv(cv) {
     leadEstado: cv.leadEstado || cv.estado || undefined,
     estado: cv.estado || cv.leadEstado || undefined,
     analysisProvider: cv.analysisProvider || undefined,
+    ...aiExtractedFields(cv),
     inWorkspace: cv.inWorkspace !== false,
     savedAt: cv.savedAt || null,
     occUrl: cv.occUrl || undefined,
@@ -491,6 +513,8 @@ function saveCvsManifest(cvs) {
  * @param {string} cvId
  * @param {object} patch
  */
+const cvEntryListeners = [];
+
 function updateCvEntry(cvId, patch) {
   const id = String(cvId || '').trim();
   if (!id) return null;
@@ -499,7 +523,23 @@ function updateCvEntry(cvId, patch) {
   if (idx < 0) return null;
   cvs[idx] = sanitizeCvForPersist({ ...cvs[idx], ...patch, cvId: id });
   saveCvsManifest(cvs);
+  for (const listener of cvEntryListeners) {
+    try {
+      listener(id, patch);
+    } catch (err) {
+      console.warn('[cvFileStore] listener updateCvEntry:', err.message);
+    }
+  }
   return cvs[idx];
+}
+
+/**
+ * Permite que el servidor sincronice su copia en memoria (cvsData) cuando otro módulo
+ * actualiza un CV en disco; si no, el siguiente persist sobrescribiría el cambio.
+ * @param {(cvId: string, patch: object) => void} listener
+ */
+function onCvEntryUpdated(listener) {
+  if (typeof listener === 'function') cvEntryListeners.push(listener);
 }
 
 /**
@@ -618,6 +658,7 @@ function isPanelIntegrationConfigured() {
 }
 
 module.exports = {
+  onCvEntryUpdated,
   CV_TTL_MS,
   TOKEN_TTL_SECONDS,
   CV_FILES_DIR,

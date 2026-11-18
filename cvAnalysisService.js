@@ -332,6 +332,199 @@ async function analyzeCvText(text, opts = {}) {
   return normalizeLeadFromRegex(text, opts);
 }
 
+const NOT_FOUND_RE = /^(no encontrado|n\/a|na|null|undefined|ninguno|desconocido|-+)$/i;
+
+function cleanField(value) {
+  const s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  return NOT_FOUND_RE.test(s) ? '' : s;
+}
+
+/**
+ * Normaliza teléfono a formato +52XXXXXXXXXX (igual que extractCVData).
+ * @param {string} raw
+ * @returns {string} '' si no parece un teléfono válido
+ */
+function normalizeMxPhone(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length < 10) return '';
+  if (digits.length === 10) return `+52${digits}`;
+  if (digits.length === 12 && digits.startsWith('52')) return `+${digits}`;
+  if (digits.length === 13 && digits.startsWith('521')) return `+52${digits.slice(3)}`;
+  if (String(raw).trim().startsWith('+') && digits.length <= 15) return `+${digits}`;
+  return '';
+}
+
+function capitalizeWords(value) {
+  const s = cleanField(value);
+  if (!s) return '';
+  // Respeta capitalización mixta del modelo; solo corrige TODO MAYÚSCULAS / minúsculas.
+  if (s !== s.toUpperCase() && s !== s.toLowerCase()) return s;
+  return s
+    .toLocaleLowerCase('es')
+    .split(' ')
+    .map((w) => (w ? w.charAt(0).toLocaleUpperCase('es') + w.slice(1) : w))
+    .join(' ');
+}
+
+function buildCvExtractionPrompt(text) {
+  return (
+    'Extrae los datos del candidato de este CV. El CV puede venir en cualquier formato ' +
+    '(sin secciones fijas, columnas mezcladas, texto desordenado); deduce cada dato por contexto.\n' +
+    'Responde SOLO con JSON válido (sin markdown ni comentarios).\n' +
+    'Reglas:\n' +
+    '- nombre: nombre completo de la persona (no el nombre de una empresa ni un título).\n' +
+    '- telefono: el celular/teléfono del candidato tal como aparece (no teléfonos de empresas o referencias).\n' +
+    '- correo: email del candidato.\n' +
+    '- ciudad y estado: donde vive el candidato (México salvo que diga otro país). Si solo hay ciudad, deduce el estado; si solo hay estado, deja ciudad vacía.\n' +
+    '- ultimoTrabajo: título del puesto más reciente o actual, en español, máximo 6 palabras, sin nombre de empresa ni fechas.\n' +
+    '- ultimaEmpresa: empresa del puesto más reciente.\n' +
+    '- experiencia: resumen de 2-4 frases de su experiencia profesional (puestos, empresas, logros clave), máximo 600 caracteres.\n' +
+    '- puestos: 4 títulos de puesto para los que encaja (el primero = ultimoTrabajo), máximo 5 palabras cada uno, sin Sr/Jr.\n' +
+    '- aniosExperiencia: número aproximado de años de experiencia laboral total (0 si no se puede deducir).\n' +
+    'Si un dato no aparece, usa cadena vacía (o 0 / array vacío). NO inventes datos de contacto.\n\n' +
+    'Formato JSON:\n' +
+    '{"nombre":"","telefono":"","correo":"","ciudad":"","estado":"","ultimoTrabajo":"","ultimaEmpresa":"","experiencia":"","puestos":["","","",""],"aniosExperiencia":0}\n\n' +
+    `CV:\n${text}`
+  );
+}
+
+async function requestCvExtractionJson(snippet, provider) {
+  const system =
+    'Eres un extractor de datos de currículums. Devuelves únicamente JSON válido, sin explicaciones.';
+  if (provider === 'ollama') {
+    const raw = await ollamaService.chatReply(buildCvExtractionPrompt(snippet), {
+      skipMonica: true,
+      systemExtra: system
+    });
+    return parseJsonObject(raw);
+  }
+
+  const model =
+    String(process.env.DEEPSEEK_CV_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-chat').trim() ||
+    'deepseek-chat';
+  const timeoutRaw = parseInt(process.env.DEEPSEEK_TIMEOUT_MS || '120000', 10);
+  const timeout = Number.isFinite(timeoutRaw) && timeoutRaw >= 5000 ? timeoutRaw : 120000;
+  const response = await axios.post(
+    process.env.DEEPSEEK_API_URL || DEEPSEEK_API_URL,
+    {
+      model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: buildCvExtractionPrompt(snippet) }
+      ],
+      max_tokens: 1024,
+      temperature: 0.1,
+      response_format: { type: 'json_object' }
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`
+      },
+      timeout
+    }
+  );
+  return parseJsonObject(response.data?.choices?.[0]?.message?.content);
+}
+
+/**
+ * Combina la respuesta de la IA con la extracción regex (respaldo campo por campo).
+ * @param {object|null} parsed
+ * @param {string} text
+ * @param {string} provider
+ */
+function mergeExtractedCvFields(parsed, text, provider) {
+  const base = extractCVData(text);
+  const ai = parsed && typeof parsed === 'object' ? parsed : {};
+  const contacto = ai.contacto && typeof ai.contacto === 'object' ? ai.contacto : {};
+  const localidad = ai.localidad && typeof ai.localidad === 'object' ? ai.localidad : {};
+
+  const baseNombre = cleanField(base.nombre);
+  const nombre = capitalizeWords(ai.nombre || contacto.nombre) || baseNombre || 'No encontrado';
+
+  // Teléfono: el de la IA solo si sus dígitos aparecen en el texto (evita alucinaciones).
+  const textDigits = String(text || '').replace(/\D/g, '');
+  const aiPhone = normalizeMxPhone(ai.telefono || contacto.telefono);
+  const aiPhoneInText = aiPhone && textDigits.includes(aiPhone.replace(/\D/g, '').slice(-10));
+  const telefono =
+    (aiPhoneInText ? aiPhone : '') || normalizeMxPhone(base.telefono) || 'No encontrado';
+
+  const aiEmail = cleanField(ai.correo || ai.email || contacto.email).toLowerCase();
+  const textLower = String(text || '').toLowerCase();
+  const correo =
+    (aiEmail.includes('@') && textLower.includes(aiEmail) ? aiEmail : '') ||
+    cleanField(base.correo) ||
+    ((String(text || '').match(EMAIL_RE) || [])[0] || '').toLowerCase();
+
+  const ciudad = capitalizeWords(ai.ciudad || localidad.ciudad) || cleanField(base.ciudad);
+  const estado = capitalizeWords(ai.estado || localidad.estado) || cleanField(base.estado);
+  const ultimoTrabajo =
+    cleanField(ai.ultimoTrabajo || ai.puesto).slice(0, 80) || cleanField(base.ultimoTrabajo);
+  const ultimaEmpresa = cleanField(ai.ultimaEmpresa).slice(0, 120);
+  const experiencia =
+    cleanField(ai.experiencia).slice(0, 1000) ||
+    (base.experiencia !== 'Experiencia no encontrada' ? base.experiencia : '') ||
+    'Experiencia no encontrada';
+  const puestos = normalizePuesto(ai.puestos || ai.puesto);
+  if (ultimoTrabajo && !puestos.length) puestos.push(ultimoTrabajo);
+  const anios = Number(ai.aniosExperiencia);
+  const aniosExperiencia = Number.isFinite(anios) && anios > 0 ? Math.round(anios) : null;
+
+  return {
+    nombre,
+    telefono,
+    correo,
+    email: correo,
+    leadCorreo: correo,
+    ciudad,
+    estado,
+    leadCiudad: ciudad,
+    leadEstado: estado,
+    ultimoTrabajo,
+    ultimaEmpresa,
+    experiencia,
+    puestos,
+    aniosExperiencia,
+    textoCompleto: text,
+    extractionProvider: provider,
+    panelAnalisis: {
+      contacto: { nombre, email: correo, telefono: telefono === 'No encontrado' ? '' : telefono },
+      localidad: { ciudad, estado },
+      puesto: puestos,
+      ultimaExperiencia: ultimoTrabajo
+        ? `${ultimoTrabajo}${ultimaEmpresa ? ` en ${ultimaEmpresa}` : ''}`
+        : experiencia.slice(0, 280)
+    }
+  };
+}
+
+/**
+ * Extrae datos estructurados (nombre, teléfono, correo, ciudad, estado, puesto, experiencia)
+ * de un CV sin formato fijo usando la IA configurada; si falla, cae a regex.
+ * @param {string} text - texto plano del CV
+ * @returns {Promise<object>} mismo shape que extractCVData + campos extra
+ */
+async function extractCvFieldsWithAi(text) {
+  const snippet = String(text || '').trim().slice(0, 12000);
+  const provider = getProvider();
+  const canOllama = provider === 'ollama' && ollamaService.isConfigured();
+  const canDeepSeek = provider === 'deepseek' && hasDeepSeekKey();
+  if (!snippet || (!canOllama && !canDeepSeek)) {
+    return mergeExtractedCvFields(null, snippet, 'regex');
+  }
+  try {
+    const parsed = await requestCvExtractionJson(snippet, provider);
+    if (!parsed) {
+      console.warn(`[cvExtract] ${provider} no devolvió JSON válido; uso regex`);
+      return mergeExtractedCvFields(null, snippet, `${provider}_fallback_regex`);
+    }
+    return mergeExtractedCvFields(parsed, snippet, provider);
+  } catch (error) {
+    console.warn(`[cvExtract] ${provider} falló, uso regex:`, error.message);
+    return mergeExtractedCvFields(null, snippet, `regex_after_${provider}_error`);
+  }
+}
+
 /**
  * @param {Buffer} buffer
  * @param {{ nombre?: string, telefono?: string }} [opts]
@@ -433,7 +626,8 @@ function preserveFilledLeadFields(existing, incoming) {
 /**
  * Re-analiza el CV en disco si faltan datos clave (p. ej. email para el panel).
  * @param {string} cvId
- * @param {{ nombre?: string, telefono?: string, force?: boolean }} [opts]
+ * @param {{ nombre?: string, telefono?: string, force?: boolean, requireDiagnostico?: boolean }} [opts]
+ *   requireDiagnostico: re-analiza con IA si el CV aún no tiene diagnóstico real (evaluaciones) para el panel.
  */
 async function ensureCvAnalyzed(cvId, opts = {}) {
   const id = String(cvId || '').trim();
@@ -450,10 +644,13 @@ async function ensureCvAnalyzed(cvId, opts = {}) {
   const hasEmail = [existing?.leadCorreo, existing?.correo, existing?.email].some(
     (value) => value && String(value).includes('@')
   );
-  if (hasEmail && !opts.force) {
+  const hasDiagnostico = Boolean(existing) && isCvAnalizadoEnMsg(existing, existing.panelAnalisis);
+  const needsDiagnostico = Boolean(opts.requireDiagnostico) && !hasDiagnostico;
+  if (hasEmail && !opts.force && !needsDiagnostico) {
     logAgenda('cv.ensureAnalyzed.cache', {
       cvId: id,
-      correo: existing?.leadCorreo || existing?.correo || existing?.email
+      correo: existing?.leadCorreo || existing?.correo || existing?.email,
+      diagnostico: hasDiagnostico
     });
     return existing;
   }
@@ -461,18 +658,57 @@ async function ensureCvAnalyzed(cvId, opts = {}) {
   logAgenda('cv.ensureAnalyzed.reanalizar', {
     cvId: id,
     force: Boolean(opts.force),
-    hadEmail: hasEmail
+    hadEmail: hasEmail,
+    motivo: needsDiagnostico ? 'diagnostico_msg' : opts.force ? 'force' : 'sin_email'
   });
 
   const analyzed = await analyzeCvBuffer(buffer, {
     nombre: opts.nombre || existing?.nombre,
     telefono: opts.telefono || existing?.telefono
   });
+
+  const aiOk = analyzed.analysisProvider === 'ollama' || analyzed.analysisProvider === 'deepseek';
+  if (!aiOk && existing && hasEmail) {
+    // La IA falló: no pisar con regex los datos que ya teníamos (p. ej. extraídos con IA al subir).
+    warnAgenda('cv.ensureAnalyzed.iaFallo', {
+      cvId: id,
+      provider: analyzed.analysisProvider || null,
+      nota: 'se conservan los datos existentes; el panel hará su propio análisis'
+    });
+    return existing;
+  }
+
   const patch = preserveFilledLeadFields(existing, {
     ...analyzed,
     analyzedAt: new Date().toISOString()
   });
-  return cvFileStore.updateCvEntry(id, patch) || { ...existing, ...patch, cvId: id };
+  if (existing) {
+    // Nombre/teléfono ya guardados pudieron ser corregidos a mano; el teléfono liga el chat de WhatsApp.
+    const prevNombre = String(existing.nombre || '').trim();
+    if (prevNombre && !/^(no encontrado|candidato|error al procesar)$/i.test(prevNombre)) {
+      patch.nombre = existing.nombre;
+    }
+    const prevTel = String(existing.telefono || '').trim();
+    if (prevTel && prevTel !== 'No encontrado' && prevTel !== 'N/A') {
+      patch.telefono = existing.telefono;
+    }
+    for (const key of ['ultimoTrabajo', 'ultimaEmpresa']) {
+      if (!patch[key] && existing[key]) patch[key] = existing[key];
+    }
+  }
+  const saved = cvFileStore.updateCvEntry(id, patch);
+  // Devolver también lo no persistido (texto completo) para que el panel lo reciba en esta misma llamada.
+  return { ...(existing || {}), ...(saved || {}), ...patch, cvId: id };
+}
+
+/** El panel espera 4 títulos de puesto; completa con genéricos sin duplicar. */
+function padPuestos(list) {
+  const out = [...list];
+  for (const filler of ['Profesional', 'Especialista', 'Consultor', 'Analista']) {
+    if (out.length >= 4) break;
+    if (!out.some((p) => p.toLowerCase() === filler.toLowerCase())) out.push(filler);
+  }
+  return out.slice(0, 4);
 }
 
 /**
@@ -517,7 +753,7 @@ function buildPanelAnalisisCv(lead = {}) {
       ciudad: String(aiLocalidad.ciudad || ciudad).trim(),
       estado: String(aiLocalidad.estado || estado).trim()
     },
-    puesto: puesto.length ? puesto : [puestoPrincipal, 'Profesional', 'Especialista', 'Consultor'],
+    puesto: padPuestos(puesto.length ? puesto : [puestoPrincipal]),
     ultimaExperiencia: String(fromAi.ultimaExperiencia || experiencia || '').slice(0, 280),
     evaluaciones,
     recomendaciones: normalizeRecomendaciones(fromAi.recomendaciones),
@@ -584,8 +820,11 @@ async function buildPanelAgendaExtras(cvId, opts = {}) {
     }
   }
   const forceAnalyze = occReplacedPdf;
+  const requireDiagnostico = !/^(0|false|no)$/i.test(
+    String(process.env.AGENDA_MSG_DIAGNOSTICO || 'true').trim()
+  );
   const enriched =
-    (await ensureCvAnalyzed(cvId, { ...opts, force: forceAnalyze })) || null;
+    (await ensureCvAnalyzed(cvId, { ...opts, force: forceAnalyze, requireDiagnostico })) || null;
   const leadExtraido = buildPanelLeadExtraido(enriched || {});
   const analisisCV = buildPanelAnalisisCv(enriched || {});
   const cvAnalizadoEnMsg =
@@ -604,6 +843,9 @@ module.exports = {
   getProvider,
   analyzeCvText,
   analyzeCvBuffer,
+  extractCvFieldsWithAi,
+  mergeExtractedCvFields,
+  normalizeMxPhone,
   ensureCvAnalyzed,
   preserveFilledLeadFields,
   buildPanelAnalisisCv,

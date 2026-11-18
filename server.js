@@ -12,7 +12,7 @@ const {
   bindProspectCvLink
 } = require('./cvLookup');
 const cvAnalysisService = require('./cvAnalysisService');
-const { extractTextFromPDF, extractCVData } = require('./pdfProcessor');
+const { extractTextFromPDF } = require('./pdfProcessor');
 const { generateBulkMessages, buildOutboundMessageParts, formatStoredCvContext } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
 const { sendRoundRobinBulk, ROUND_ROBIN_CONTROL_ID } = WhatsAppService;
@@ -191,6 +191,14 @@ if (cvsData.length > 0) {
     `[cvs] Restaurados ${cvsData.length} CV(s) desde disco (${workspaceCount} en mesa de trabajo; archivo permanente)`
   );
 }
+
+// Otros módulos (análisis IA al agendar, datos del lead, OCC) escriben en disco: reflejarlo en memoria.
+cvFileStore.onCvEntryUpdated((cvId, patch) => {
+  const idx = cvsData.findIndex((c) => c && c.cvId === cvId);
+  if (idx >= 0 && patch && typeof patch === 'object') {
+    cvsData[idx] = { ...cvsData[idx], ...patch, cvId };
+  }
+});
 
 function persistCvsData() {
   try {
@@ -1472,13 +1480,18 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
     console.log(`Procesando ${req.files.length} archivos PDF...`);
     purgeExpiredArchive();
 
-    const incoming = [];
+    const files = req.files;
+    const incoming = new Array(files.length);
+    const concurrencyRaw = parseInt(process.env.CV_EXTRACT_CONCURRENCY || '2', 10);
+    const concurrency = Math.max(1, Math.min(8, Number.isFinite(concurrencyRaw) ? concurrencyRaw : 2));
+    console.log(
+      `🤖 Extracción de datos con IA (${cvAnalysisService.getProvider()}, concurrencia ${concurrency})`
+    );
 
-    // Procesar cada archivo PDF
-    for (let i = 0; i < req.files.length; i++) {
-      const file = req.files[i];
+    const processOne = async (i) => {
+      const file = files[i];
       console.log(
-        `Procesando archivo ${i + 1}/${req.files.length}: ${file.originalname} (${file.buffer.length} bytes)`
+        `Procesando archivo ${i + 1}/${files.length}: ${file.originalname} (${file.buffer.length} bytes)`
       );
 
       try {
@@ -1487,10 +1500,13 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
         // Extraer texto del PDF
         const text = await extractTextFromPDF(file.buffer);
 
-        // Extraer datos estructurados
-        const cvData = extractCVData(text);
+        // La IA deduce nombre, teléfono, correo, ciudad, puesto, etc. (CV sin formato fijo)
+        const cvData = await cvAnalysisService.extractCvFieldsWithAi(text);
+        console.log(
+          `  ✓ ${file.originalname} [${cvData.extractionProvider}] ${cvData.nombre} · ${cvData.telefono} · ${cvData.ultimoTrabajo || 'sin puesto'} · ${[cvData.ciudad, cvData.estado].filter(Boolean).join(', ') || 'sin ciudad'}`
+        );
 
-        incoming.push({
+        incoming[i] = {
           ...cvData,
           archivoOriginal: file.originalname,
           cvId: saved.cvId,
@@ -1502,10 +1518,10 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           procesado: true,
           inWorkspace: true,
           savedAt: new Date().toISOString()
-        });
+        };
       } catch (error) {
         console.error(`Error procesando ${file.originalname}:`, error.message);
-        incoming.push({
+        incoming[i] = {
           nombre: 'Error al procesar',
           telefono: 'N/A',
           experiencia: 'Error al extraer texto del PDF',
@@ -1519,9 +1535,18 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           procesado: false,
           inWorkspace: true,
           error: error.message
-        });
+        };
       }
-    }
+    };
+
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(concurrency, files.length) }, async () => {
+      while (nextIndex < files.length) {
+        const idx = nextIndex++;
+        await processOne(idx);
+      }
+    });
+    await Promise.all(workers);
 
     const { cvs: merged, replacedIds } = cvFileStore.mergeIncomingBatch(
       cvsData,
@@ -1630,11 +1655,14 @@ app.post('/generate-messages', async (req, res) => {
     const alreadySkipped = workspace.filter(
       (cv) => cv.procesado && cv.nombre !== 'Error al procesar' && cv.alreadyContacted
     );
+    // onlyMissing: solo CVs sin mensaje (auto-generación tras subir; no pisa mensajes editados)
+    const onlyMissing = Boolean(req.body && req.body.onlyMissing);
     const validCVs = workspace.filter(
       (cv) =>
         cv.procesado &&
         cv.nombre !== 'Error al procesar' &&
-        !cv.alreadyContacted
+        !cv.alreadyContacted &&
+        (!onlyMissing || !String(cv.mensajeIA || '').trim())
     );
 
     if (alreadySkipped.length > 0) {
@@ -1646,9 +1674,11 @@ app.post('/generate-messages', async (req, res) => {
     if (validCVs.length === 0) {
       return res.status(400).json({
         error:
-          alreadySkipped.length > 0
-            ? 'Todos los CVs válidos ya fueron contactados; no hay mensajes de IA que generar.'
-            : 'No hay CVs válidos para generar mensajes',
+          onlyMissing
+            ? 'Todos los CVs válidos ya tienen mensaje generado.'
+            : alreadySkipped.length > 0
+              ? 'Todos los CVs válidos ya fueron contactados; no hay mensajes de IA que generar.'
+              : 'No hay CVs válidos para generar mensajes',
         alreadyContactedCount: alreadySkipped.length,
         cvs: workspaceCvs()
       });
@@ -5783,7 +5813,7 @@ sessionsStore.migrateFromEnvIfEmpty();
 }
 armSendQueueTimer();
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`🚀 Servidor iniciado en http://localhost:${PORT}`);
   console.log(`📁 Interfaz web disponible en http://localhost:${PORT}`);
   console.log(`📋 Sesiones WhatsApp: data/sessions.json (${sessionsStore.getAllSessions().length} configurada(s))`);
@@ -5806,5 +5836,7 @@ app.listen(PORT, () => {
   });
   agendaWaitlistService.startWaitlistPoller();
 });
+// La extracción con IA de muchos CVs puede tardar más que el límite por defecto de Node (5 min).
+httpServer.requestTimeout = 30 * 60 * 1000;
 
 module.exports = app;

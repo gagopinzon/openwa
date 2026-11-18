@@ -1,6 +1,8 @@
 const pdfParse = require('pdf-parse');
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
+const ocrService = require('./ocrService');
+
 pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve(
   'pdfjs-dist/legacy/build/pdf.worker.js'
 );
@@ -49,7 +51,87 @@ function extractRawPdfStrings(bytes) {
   return chunks.join(' ').replace(/[ \t]+/g, ' ').trim();
 }
 
-async function extractWithPdfJs(bytes, maxPages) {
+const LETTER_RE = /[A-Za-zÁÉÍÓÚÜáéíóúüÑñ]/g;
+// Controles, carácter de reemplazo y símbolos latin-1 raros que salen de streams binarios.
+const GARBAGE_CHAR_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f�¢-©«-®±-¶¸-»¾Ð×Þð÷þ]/g;
+const PDF_SYNTAX_RE = /\b(endstream|endobj|xref|startxref)\b|\/(Type|MediaBox|Resources|Contents|FontFile\d?)\b|\\\d{3}|\(cid:\d+\)/g;
+const MIN_PAGE_LETTERS = 40;
+
+/**
+ * Evalúa si un texto extraído es legible o basura (PDF escaneado, fuentes sin mapa, streams binarios).
+ * @param {string} text
+ * @returns {{ letters: number, garbageRatio: number, syntaxHits: number, ok: boolean }}
+ */
+function assessTextQuality(text) {
+  const s = String(text || '');
+  const nonSpace = s.replace(/\s+/g, '').length || 1;
+  const letters = (s.match(LETTER_RE) || []).length;
+  const garbage = (s.match(GARBAGE_CHAR_RE) || []).length;
+  const syntaxHits = (s.match(PDF_SYNTAX_RE) || []).length;
+  const garbageRatio = garbage / nonSpace;
+  const letterRatio = letters / nonSpace;
+  const ok = garbageRatio < 0.03 && syntaxHits < 3 && (letters < 20 || letterRatio > 0.45);
+  return { letters, garbageRatio, syntaxHits, ok };
+}
+
+/**
+ * Une palabras con letras separadas por espacios ("E X P E R I E N C I A" → "EXPERIENCIA").
+ * @param {string} text
+ */
+function collapseLetterSpacing(text) {
+  return String(text || '').replace(
+    /(?:^|(?<=\s))((?:[A-Za-zÁÉÍÓÚÜáéíóúüÑñ] ){3,}[A-Za-zÁÉÍÓÚÜáéíóúüÑñ])(?=\s|$|[.,:;|/])/gm,
+    (run) => run.replace(/ /g, '')
+  );
+}
+
+/**
+ * Página con poco texto extraíble pero que sí pinta contenido: imagen escaneada,
+ * o texto con fuentes sin mapa Unicode (pdf.js dibuja glifos pero extrae vacío).
+ */
+async function pageLooksScannedOrUnmapped(page) {
+  try {
+    const ops = await page.getOperatorList();
+    const { OPS } = pdfjsLib;
+    const imageOps = new Set(
+      [OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintJpegXObject, OPS.paintImageMaskXObject]
+        .filter((v) => v != null)
+    );
+    const textOps = new Set(
+      [OPS.showText, OPS.showSpacedText, OPS.nextLineShowText, OPS.nextLineSetSpacingShowText]
+        .filter((v) => v != null)
+    );
+    let textOpCount = 0;
+    for (const fn of ops.fnArray) {
+      if (imageOps.has(fn)) return true;
+      if (textOps.has(fn)) textOpCount += 1;
+    }
+    return textOpCount >= 10;
+  } catch {
+    return false;
+  }
+}
+
+function pageTextFromContent(content) {
+  let lastY;
+  let text = '';
+  for (const item of content.items) {
+    if (!item || typeof item.str !== 'string') continue;
+    if (lastY != null && item.transform && lastY !== item.transform[5]) {
+      text += '\n';
+    }
+    text += item.str;
+    if (item.transform) lastY = item.transform[5];
+  }
+  return text;
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {number} maxPages
+ * @param {{ ocr?: boolean, silent?: boolean, stats?: object }} [opts]
+ */
+async function extractWithPdfJs(bytes, maxPages, opts = {}) {
   const loadingTask = pdfjsLib.getDocument({
     data: bytes,
     disableWorker: true,
@@ -59,21 +141,43 @@ async function extractWithPdfJs(bytes, maxPages) {
     verbosity: 0
   });
   const doc = await loadingTask.promise;
+  const ocrAllowed = opts.ocr !== false && ocrService.isEnabled();
+  const ocrBudget = ocrAllowed ? ocrService.getMaxPages() : 0;
+  let ocrPages = 0;
   try {
     const n = maxPages > 0 ? Math.min(doc.numPages, maxPages) : doc.numPages;
     const parts = [];
     for (let i = 1; i <= n; i++) {
       const page = await doc.getPage(i);
       const content = await page.getTextContent();
-      let lastY;
-      let text = '';
-      for (const item of content.items) {
-        if (!item || typeof item.str !== 'string') continue;
-        if (lastY != null && item.transform && lastY !== item.transform[5]) {
-          text += '\n';
+      let text = collapseLetterSpacing(pageTextFromContent(content));
+
+      const quality = assessTextQuality(text);
+      const needsOcr =
+        ocrPages < ocrBudget &&
+        (!quality.ok || (quality.letters < MIN_PAGE_LETTERS && (await pageLooksScannedOrUnmapped(page))));
+
+      if (needsOcr) {
+        try {
+          const started = Date.now();
+          const ocrText = await ocrService.ocrPdfPage(page, { headerPass: i === 1 });
+          ocrPages += 1;
+          const ocrQuality = assessTextQuality(ocrText);
+          if (ocrQuality.letters > quality.letters || !quality.ok) {
+            text = ocrText;
+            if (opts.stats) opts.stats.ocrPages = (opts.stats.ocrPages || 0) + 1;
+          }
+          if (!opts.silent) {
+            console.log(
+              `[ocr] página ${i}/${n}: ${ocrQuality.letters} letras en ${Date.now() - started} ms (texto original: ${quality.letters} letras${quality.ok ? '' : ', ilegible'})`
+            );
+          }
+        } catch (error) {
+          console.warn(`[ocr] falló en página ${i}:`, errorMessage(error));
+          if (!quality.ok) text = '';
         }
-        text += item.str;
-        if (item.transform) lastY = item.transform[5];
+      } else if (!quality.ok) {
+        text = '';
       }
       parts.push(text);
     }
@@ -97,7 +201,7 @@ function errorMessage(error) {
 async function verifyPdfReadable(buffer) {
   if (!buffer || buffer.length < 64) return false;
   try {
-    const text = await extractTextFromPDF(buffer, { silent: true, maxPages: 1 });
+    const text = await extractTextFromPDF(buffer, { silent: true, maxPages: 1, ocr: false });
     return Boolean(text);
   } catch {
     const bytes = toExactPdfBytes(buffer);
@@ -108,7 +212,8 @@ async function verifyPdfReadable(buffer) {
 /**
  * Extrae texto de un PDF desde un buffer
  * @param {Buffer|Uint8Array} buffer - Buffer del archivo PDF
- * @param {{ silent?: boolean, maxPages?: number }} [opts]
+ * @param {{ silent?: boolean, maxPages?: number, ocr?: boolean, stats?: object }} [opts]
+ *   ocr=false desactiva el OCR de páginas escaneadas; stats.ocrPages reporta cuántas se reconocieron.
  * @returns {Promise<string>} - Texto extraído del PDF
  */
 async function extractTextFromPDF(buffer, opts = {}) {
@@ -121,7 +226,7 @@ async function extractTextFromPDF(buffer, opts = {}) {
 
   let lastError = null;
   try {
-    const text = await extractWithPdfJs(bytes, maxPages);
+    const text = await extractWithPdfJs(bytes, maxPages, opts);
     if (text) return text;
   } catch (error) {
     lastError = error;
@@ -137,8 +242,8 @@ async function extractTextFromPDF(buffer, opts = {}) {
   try {
     const parseOpts = maxPages > 0 ? { max: maxPages } : undefined;
     const data = await pdfParse(bytes, parseOpts);
-    const text = data && data.text ? String(data.text).trim() : '';
-    if (text) return text;
+    const text = data && data.text ? collapseLetterSpacing(String(data.text)).trim() : '';
+    if (text && assessTextQuality(text).ok) return text;
   } catch (error) {
     lastError = lastError || error;
     if (!silent) {
@@ -151,7 +256,7 @@ async function extractTextFromPDF(buffer, opts = {}) {
   }
 
   const raw = extractRawPdfStrings(bytes);
-  if (raw) {
+  if (raw && assessTextQuality(raw).ok) {
     if (!silent) {
       console.warn(
         `PDF con tabla XRef dañada o no soportada; texto recuperado en fallback (${raw.length} chars)`
@@ -344,6 +449,7 @@ function looksLikeJobTitle(line) {
   if (/^liga\s+de\s+curr[ií]culo/i.test(s)) return false;
   if (/^\d{10,}$/.test(s.replace(/\D/g, ''))) return false;
   if (EMAIL_RE.test(s)) return false;
+  if (/https?:|www\.|\.(com|mx|net|org|io)\b|linkedin/i.test(s)) return false;
   if (isPhoneLine(s)) return false;
   if (looksLikeLocation(s)) return false;
   if (DATE_RANGE_RE.test(s) && s.split(/\s+/).length <= 4) return false;
@@ -411,5 +517,7 @@ module.exports = {
   verifyPdfReadable,
   extractTextFromPDF,
   extractCVData,
-  extractUltimoTrabajo
+  extractUltimoTrabajo,
+  assessTextQuality,
+  collapseLetterSpacing
 };

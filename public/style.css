@@ -3107,3 +3107,34 @@ footer p {
     opacity: 0.45;
     cursor: not-allowed;
 }
+
+/* Paneles de citas contraíbles */
+.agenda-panel-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.agenda-pending-panel[data-collapsible] h2 {
+    cursor: pointer;
+    user-select: none;
+}
+
+.agenda-collapse-icon {
+    display: inline-block;
+    transition: transform 0.15s ease;
+}
+
+.agenda-pending-panel.is-collapsed .agenda-collapse-icon {
+    transform: rotate(-90deg);
+}
+
+.agenda-pending-panel.is-collapsed .agenda-collapsible-body,
+.agenda-pending-panel.is-collapsed .agenda-pending-desc {
+    display: none;
+}
+
+.agenda-pending-panel.is-collapsed .agenda-pending-header {
+    margin-bottom: 0;
+    align-items: center;
+}

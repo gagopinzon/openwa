@@ -178,41 +178,57 @@
                 </div>
             </section>
 
-            <section class="agenda-pending-panel" id="agendaPendingPanel" style="display: none;">
+            <section class="agenda-pending-panel is-collapsed" id="agendaPendingPanel" data-collapsible="agendaPending" style="display: none;">
                 <div class="agenda-pending-header">
                     <div>
                         <h2 style="font-size: 1.1rem; margin-bottom: 4px;">
                             Citas por confirmar
                             <span id="agendaPendingCount" class="agenda-pending-count">0</span>
                         </h2>
-                        <p style="font-size: 13px; color: #64748b; margin: 0;">
+                        <p class="agenda-pending-desc" style="font-size: 13px; color: #64748b; margin: 0;">
                             El lead eligió horario con la IA. Asigna vendedor y confirma para crear la reunión; el panel genera la liga de Meet automáticamente y Msg avisa por WhatsApp.
                         </p>
                     </div>
-                    <button type="button" id="agendaPendingRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                    <div class="agenda-panel-actions">
+                        <button type="button" id="agendaPendingRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                        <button type="button" class="btn btn-secondary btn-sm agenda-collapse-btn" data-collapse-toggle="agendaPending" aria-expanded="false" aria-controls="agendaPendingBody" title="Contraer / expandir">
+                            <span class="agenda-collapse-icon" aria-hidden="true">▾</span>
+                            <span class="agenda-collapse-label">Expandir</span>
+                        </button>
+                    </div>
                 </div>
+                <div class="agenda-collapsible-body" id="agendaPendingBody">
                 <p id="agendaPendingStatus" class="disponibilidad-status"></p>
                 <div id="agendaPendingList" class="agenda-pending-list">
                     <p class="auto-reply-empty">No hay citas pendientes.</p>
                 </div>
+                </div>
             </section>
 
-            <section class="agenda-pending-panel" id="agendaConfirmedPanel" style="display: none;">
+            <section class="agenda-pending-panel is-collapsed" id="agendaConfirmedPanel" data-collapsible="agendaConfirmed" style="display: none;">
                 <div class="agenda-pending-header">
                     <div>
                         <h2 style="font-size: 1.1rem; margin-bottom: 4px;">
                             Citas confirmadas
                             <span id="agendaConfirmedCount" class="agenda-pending-count">0</span>
                         </h2>
-                        <p style="font-size: 13px; color: #64748b; margin: 0;">
+                        <p class="agenda-pending-desc" style="font-size: 13px; color: #64748b; margin: 0;">
                             Reuniones ya creadas en Panel. Si el lead pide otro horario por WhatsApp, Msg intenta moverla (mismo vendedor si está libre).
                         </p>
                     </div>
-                    <button type="button" id="agendaConfirmedRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                    <div class="agenda-panel-actions">
+                        <button type="button" id="agendaConfirmedRefreshBtn" class="btn btn-secondary btn-sm">Actualizar</button>
+                        <button type="button" class="btn btn-secondary btn-sm agenda-collapse-btn" data-collapse-toggle="agendaConfirmed" aria-expanded="false" aria-controls="agendaConfirmedBody" title="Contraer / expandir">
+                            <span class="agenda-collapse-icon" aria-hidden="true">▾</span>
+                            <span class="agenda-collapse-label">Expandir</span>
+                        </button>
+                    </div>
                 </div>
+                <div class="agenda-collapsible-body" id="agendaConfirmedBody">
                 <p id="agendaConfirmedStatus" class="disponibilidad-status"></p>
                 <div id="agendaConfirmedList" class="agenda-pending-list">
                     <p class="auto-reply-empty">No hay citas confirmadas.</p>
+                </div>
                 </div>
             </section>
 

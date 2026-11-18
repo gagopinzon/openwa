@@ -29,6 +29,7 @@ class CVAnalyzer {
         this.initDisponibilidadCalendar();
         this.initAgendaPendingPanel();
         this.initAgendaConfirmedPanel();
+        this.initCollapsibleAgendaPanels();
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
@@ -505,7 +506,7 @@ class CVAnalyzer {
 
         // Buttons
         this.uploadBtn.addEventListener('click', this.uploadFiles.bind(this));
-        this.generateMessagesBtn.addEventListener('click', this.generateMessages.bind(this));
+        this.generateMessagesBtn.addEventListener('click', () => this.generateMessages());
         this.sendWhatsAppBtn.addEventListener('click', this.sendWhatsApp.bind(this));
         this.openWhatsAppBtn.addEventListener('click', this.openWhatsApp.bind(this));
         this.clearDataBtn.addEventListener('click', this.clearData.bind(this));
@@ -5576,12 +5577,13 @@ class CVAnalyzer {
             return;
         }
 
-        this.showLoading('Procesando archivos PDF...');
+        this.showLoading('Extrayendo datos de los CVs con IA (nombre, teléfono, ciudad, puesto)... puede tardar unos segundos por CV');
 
         const formData = new FormData();
         this.selectedFiles.forEach(file => {
             formData.append('cvs', file);
         });
+        let uploadOk = false;
 
         try {
             const response = await fetch('/upload-cvs', {
@@ -5592,6 +5594,7 @@ class CVAnalyzer {
             const result = await response.json();
 
             if (result.success) {
+                uploadOk = true;
                 this.cvsData = result.cvs;
                 this.displayResults();
                 const skipped = result.alreadyContactedCount || 0;
@@ -5611,6 +5614,11 @@ class CVAnalyzer {
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
         } finally {
             this.hideLoading();
+        }
+
+        // Generar de una vez los mensajes de IA de los CVs nuevos (sin pisar los ya generados/editados)
+        if (uploadOk && this.getMissingMessageCount() > 0) {
+            await this.generateMessages({ onlyMissing: true });
         }
     }
 
@@ -5664,12 +5672,19 @@ class CVAnalyzer {
             const telefonoEscapado = (cv.telefono || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
             const experienciaEscapada = (cv.experiencia || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
             const saludoEscapadoAttr = saludoTexto.replace(/"/g, '&quot;');
+            const esc = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+            const ubicacion = [cv.ciudad, cv.estado].filter(Boolean).join(', ');
+            const metaPartes = [cv.ultimoTrabajo, ubicacion, cv.correo].filter(Boolean).map(esc);
+            const metaHtml = metaPartes.length
+                ? `<div class="cv-meta" style="font-size: 0.8em; color: #7f8c8d; margin-top: 4px;">${metaPartes.join(' · ')}</div>`
+                : '';
 
             row.innerHTML = `
                 <td>${cv.archivoOriginal}</td>
                 <td class="nombre-cell editable-cell">
                     <div class="editable-display" id="nombre-display-${index}" data-field="nombre" data-index="${index}">${nombreEscapado || '(sin nombre)'}</div>
                     <input type="text" class="editable-input" id="nombre-input-${index}" data-field="nombre" data-index="${index}" value="${(cv.nombre || '').replace(/"/g, '&quot;')}" style="display: none;">
+                    ${metaHtml}
                 </td>
                 <td class="telefono-cell editable-cell">
                     <div class="editable-display" id="telefono-display-${index}" data-field="telefono" data-index="${index}">${telefonoEscapado || '(sin teléfono)'}</div>
@@ -6694,6 +6709,46 @@ class CVAnalyzer {
         }
     }
 
+    /**
+     * Citas por confirmar / confirmadas: contraer y expandir (se recuerda por navegador).
+     */
+    initCollapsibleAgendaPanels() {
+        document.querySelectorAll('[data-collapsible]').forEach((panel) => {
+            const key = panel.getAttribute('data-collapsible');
+            const storageKey = `collapsed:${key}`;
+            const btn = panel.querySelector(`[data-collapse-toggle="${key}"]`);
+            const title = panel.querySelector('h2');
+            const label = btn ? btn.querySelector('.agenda-collapse-label') : null;
+
+            const apply = (collapsed) => {
+                panel.classList.toggle('is-collapsed', collapsed);
+                if (btn) btn.setAttribute('aria-expanded', String(!collapsed));
+                if (label) label.textContent = collapsed ? 'Expandir' : 'Contraer';
+            };
+            const toggle = () => {
+                const collapsed = !panel.classList.contains('is-collapsed');
+                apply(collapsed);
+                try {
+                    localStorage.setItem(storageKey, collapsed ? '1' : '0');
+                } catch {
+                    /* sin storage: solo dura la sesión */
+                }
+            };
+
+            let saved = null;
+            try {
+                saved = localStorage.getItem(storageKey);
+            } catch {
+                saved = null;
+            }
+            // Contraídos por defecto; solo se expanden si el usuario lo eligió antes.
+            apply(saved !== '0');
+
+            if (btn) btn.addEventListener('click', toggle);
+            if (title) title.addEventListener('click', toggle);
+        });
+    }
+
     initAgendaConfirmedPanel() {
         this.agendaConfirmedPanel = document.getElementById('agendaConfirmedPanel');
         this.agendaConfirmedList = document.getElementById('agendaConfirmedList');
@@ -7680,7 +7735,21 @@ class CVAnalyzer {
         }
     }
 
-    async generateMessages() {
+    getMissingMessageCount() {
+        return this.cvsData.filter(
+            (cv) =>
+                cv.procesado &&
+                !cv.alreadyContacted &&
+                cv.nombre !== 'Error al procesar' &&
+                !String(cv.mensajeIA || '').trim()
+        ).length;
+    }
+
+    /**
+     * @param {{ onlyMissing?: boolean }} [opts] onlyMissing=true genera solo CVs sin mensaje
+     */
+    async generateMessages(opts = {}) {
+        const onlyMissing = Boolean(opts.onlyMissing);
         if (this.cvsData.length === 0) {
             this.showStatus('No hay CVs procesados', 'error');
             return;
@@ -7705,7 +7774,8 @@ class CVAnalyzer {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
-                }
+                },
+                body: JSON.stringify({ onlyMissing })
             });
 
             const result = await response.json();
