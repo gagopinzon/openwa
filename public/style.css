@@ -3219,3 +3219,38 @@ footer p {
 .send-progress-session .sp-line { font-weight: 600; }
 .send-progress-session .sp-phase { color: #475569; }
 .send-progress-session .sp-next { margin-left: auto; color: #1e40af; font-variant-numeric: tabular-nums; }
+
+/* Carga de CVs en backend + elección de modo */
+.cv-pipeline-panel {
+    margin-top: 16px;
+    padding: 14px 16px;
+    border: 1px solid #c7d2fe;
+    border-radius: 12px;
+    background: #eef2ff;
+    text-align: left;
+}
+.cv-pipeline-panel.is-done { border-color: #bbf7d0; background: #f0fdf4; }
+.cv-pipeline-panel.is-done .send-progress-fill { background: #16a34a; }
+.cv-pipeline-panel.is-error { border-color: #fecaca; background: #fef2f2; }
+.cv-pipeline-panel h3 { font-size: 1rem; margin: 0; }
+.upload-mode-dialog { width: min(480px, 100%); }
+.upload-mode-sub { margin: 0 0 12px; font-size: 13px; color: #475569; }
+.upload-mode-options { display: grid; gap: 8px; }
+.upload-mode-option {
+    display: grid;
+    gap: 4px;
+    text-align: left;
+    padding: 12px 14px;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    background: #fff;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+}
+.upload-mode-option:hover,
+.upload-mode-option:focus-visible { border-color: #2563eb; background: #eff6ff; outline: none; }
+.upload-mode-option[disabled] { opacity: 0.5; cursor: not-allowed; }
+.upload-mode-option span { font-size: 13px; color: #64748b; }
+.upload-mode-lines { margin: 12px 0 0; font-size: 12px; color: #64748b; }
+.upload-mode-lines.is-warning { color: #b45309; }

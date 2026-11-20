@@ -566,7 +566,46 @@
                 <ul id="fileItems"></ul>
                 <button id="uploadBtn" class="btn btn-primary">Procesar</button>
             </div>
+
+            <!-- Avance de la carga: lo lleva el servidor; se ve igual desde cualquier ventana -->
+            <div class="cv-pipeline-panel" id="cvPipelinePanel" style="display: none;" aria-live="polite">
+                <div class="send-progress-head">
+                    <h3>🤖 Procesando CVs <span id="cvPipelineBadge" class="send-progress-badge"></span></h3>
+                    <span id="cvPipelineUpdated" class="send-progress-updated"></span>
+                </div>
+                <div class="send-progress-bar"><div class="send-progress-fill" id="cvPipelineFill"></div></div>
+                <div class="send-progress-stats" id="cvPipelineStats"></div>
+                <p class="send-progress-note" id="cvPipelineNote"></p>
+                <div class="send-progress-sessions" id="cvPipelineInFlight"></div>
+            </div>
         </section>
+
+        <!-- ¿Qué hacer con los mensajes generados? -->
+        <div class="line-edit-modal" id="uploadModeModal" hidden>
+            <div class="line-edit-modal-backdrop" data-upload-mode-close="1"></div>
+            <div class="line-edit-modal-dialog upload-mode-dialog" role="dialog" aria-modal="true" aria-labelledby="uploadModeTitle">
+                <div class="line-edit-modal-header">
+                    <h3 id="uploadModeTitle">¿Qué hago con los mensajes?</h3>
+                    <button type="button" class="line-edit-modal-x" data-upload-mode-close="1" aria-label="Cerrar">×</button>
+                </div>
+                <p class="upload-mode-sub" id="uploadModeSummary"></p>
+                <div class="upload-mode-options">
+                    <button type="button" class="upload-mode-option" data-upload-mode="instant">
+                        <strong>📤 Enviar al instante</strong>
+                        <span>Cada CV sale en cuanto tiene su mensaje, respetando los tiempos de cada línea/celular.</span>
+                    </button>
+                    <button type="button" class="upload-mode-option" data-upload-mode="queue">
+                        <strong>🗂️ Encolar</strong>
+                        <span>Se generan todos y quedan en la cola de envío para mandarlos o programarlos después.</span>
+                    </button>
+                    <button type="button" class="upload-mode-option" data-upload-mode="review">
+                        <strong>📝 Solo generar</strong>
+                        <span>Quedan en la mesa para revisarlos y editarlos antes de enviar.</span>
+                    </button>
+                </div>
+                <p class="upload-mode-lines" id="uploadModeLines"></p>
+            </div>
+        </div>
 
         <!-- Sección 2: Tabla de resultados -->
         <section class="results-section" id="resultsSection" style="display: none;">

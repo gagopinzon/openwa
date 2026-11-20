@@ -585,6 +585,86 @@ function requeueForResume(id, opts = {}) {
   return { batch, pending };
 }
 
+// ---------------------------------------------------------------------------
+// Lote "en streaming": se envía mientras se le siguen agregando CVs (subida + IA).
+// ---------------------------------------------------------------------------
+
+/**
+ * Crea un lote ya en sending, vacío y abierto a recibir CVs.
+ * @param {{ selectedSessions: string[], sessionWeights?: object|null, channel?: string, label?: string }} opts
+ */
+function beginStreamingSend({ selectedSessions, sessionWeights = null, channel = 'auto', label = null } = {}) {
+  if (getSendingBatch()) {
+    const err = new Error('Ya hay un lote en sending');
+    err.status = 409;
+    throw err;
+  }
+  const now = new Date().toISOString();
+  const rawChannel = String(channel || 'auto').trim().toLowerCase();
+  const batch = {
+    id: newId(),
+    status: STATUS.SENDING,
+    cvs: [],
+    selectedSessions: Array.isArray(selectedSessions) ? selectedSessions.map(String) : [],
+    sessionWeights: sessionWeights && typeof sessionWeights === 'object' ? { ...sessionWeights } : null,
+    channel: rawChannel === 'android' || rawChannel === 'openwa' ? rawChannel : 'auto',
+    scheduledAt: null,
+    slot: null,
+    label: label || 'Envío al instante',
+    createdAt: now,
+    total: 0,
+    sendingAt: now,
+    sentAt: null,
+    cancelledAt: null,
+    streaming: true,
+    streamOpen: true
+  };
+  ensureProgress(batch).startedAt = now;
+  const store = readStore();
+  store.batches.push(batch);
+  writeStore(store);
+  return batch;
+}
+
+/**
+ * Agrega CVs a un lote (sin repetir teléfono). Devuelve los que sí se agregaron.
+ * @param {string} id
+ * @param {Array} cvs
+ * @returns {Array}
+ */
+function appendCvs(id, cvs) {
+  const store = readStore();
+  const batch = findBatch(store, id);
+  if (!batch) return [];
+  const seen = new Set((batch.cvs || []).map((c) => phoneKey(c.telefono)));
+  const added = [];
+  for (const cv of Array.isArray(cvs) ? cvs : []) {
+    const clean = sanitizeCv(cv);
+    const key = phoneKey(clean.telefono);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    batch.cvs.push(clean);
+    added.push(clean);
+  }
+  if (added.length) {
+    batch.total = batch.cvs.length;
+    ensureProgress(batch).total = batch.cvs.length;
+    writeStore(store);
+  }
+  return added;
+}
+
+/** Ya no llegarán más CVs a este lote (terminó la subida). */
+function closeStream(id) {
+  const store = readStore();
+  const batch = findBatch(store, id);
+  if (!batch || !batch.streamOpen) return null;
+  batch.streamOpen = false;
+  batch.streamClosedAt = new Date().toISOString();
+  writeStore(store);
+  return batch;
+}
+
 /** Guarda el resumen del último lote terminado (los lotes terminados se limpian de la cola). */
 function setLastFinished(summary) {
   const store = readStore();
@@ -609,6 +689,7 @@ function recoverOrphanSending(opts = {}) {
   for (const b of store.batches) {
     if (b.status !== STATUS.SENDING) continue;
     count += 1;
+    if (b.streamOpen) b.streamOpen = false; // la subida que lo alimentaba murió con el proceso
     const pending = getPendingCvs(b).length;
     if (opts.resume && pending > 0) {
       const p = ensureProgress(b);
@@ -671,5 +752,8 @@ module.exports = {
   getPendingCvs,
   requeueForResume,
   setLastFinished,
-  getLastFinished
+  getLastFinished,
+  beginStreamingSend,
+  appendCvs,
+  closeStream
 };

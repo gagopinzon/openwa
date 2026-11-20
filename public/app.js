@@ -31,6 +31,8 @@ class CVAnalyzer {
         this.initAgendaConfirmedPanel();
         this.initCollapsibleAgendaPanels();
         this.initSendProgressPanel();
+        this.initCvPipelinePanel();
+        this.initUploadModeModal();
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
@@ -5572,90 +5574,272 @@ class CVAnalyzer {
         this.fileList.style.display = 'block';
     }
 
+    /** ¿Hay una edición abierta en la tabla de CVs? */
+    isEditingCvTable() {
+        const body = this.cvsTableBody;
+        if (!body) return false;
+        const active = document.activeElement;
+        if (active && body.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) return true;
+        return [...body.querySelectorAll('.mensaje-edit-wrap, .editable-input')].some(
+            (el) => el.style.display && el.style.display !== 'none'
+        );
+    }
+
+    /** Guarda la última versión de la mesa y la aplica en cuanto termines de editar. */
+    deferCvsUpdate(cvs) {
+        this.pendingCvsUpdate = cvs;
+        if (this.pendingCvsTimer) return;
+        this.pendingCvsTimer = setInterval(() => {
+            if (this.isEditingCvTable() || !this.pendingCvsUpdate) return;
+            clearInterval(this.pendingCvsTimer);
+            this.pendingCvsTimer = null;
+            this.cvsData = this.pendingCvsUpdate;
+            this.pendingCvsUpdate = null;
+            if (this.cvsData.length === 0) this.resultsSection.style.display = 'none';
+            else this.displayResults();
+            this.unlockSendControlsIfIdle();
+        }, 1500);
+    }
+
+    /** Al dar «Procesar»: preguntar qué hacer con los mensajes antes de subir. */
     async uploadFiles() {
         if (this.selectedFiles.length === 0) {
             this.showStatus('No hay archivos seleccionados', 'error');
             return;
         }
+        this.openUploadModeModal();
+    }
 
-        const total = this.selectedFiles.length;
-        // Cada CV: extraer datos con IA → mensaje. El servidor avisa el avance por SSE (cvPipelineProgress).
-        this.activeUploadId = `up_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        this.showLoading(this.formatPipelineProgress({ total, processed: 0, generated: 0 }));
-        this.startPipelineTicker();
-
-        const formData = new FormData();
-        formData.append('uploadId', this.activeUploadId);
-        formData.append('autoGenerate', 'true');
-        this.selectedFiles.forEach(file => {
-            formData.append('cvs', file);
-        });
-        let uploadOk = false;
-        let generatedCount = 0;
-
-        try {
-            const response = await fetch('/upload-cvs', {
-                method: 'POST',
-                body: formData
-            });
-
-            const result = await response.json();
-
-            if (result.success) {
-                uploadOk = true;
-                generatedCount = Number(result.generatedCount) || 0;
-                this.cvsData = result.cvs;
-                this.displayResults();
-                const skipped = result.alreadyContactedCount || 0;
-                const eligible = this.getEligibleForGenerationCount();
-                let msg = result.message;
-                if (skipped > 0) {
-                    msg += ` · ${skipped} ya contactado(s) (sin IA)`;
-                }
-                this.showStatus(msg, skipped > 0 && eligible === 0 ? 'info' : 'success');
-                this.generateMessagesBtn.disabled = eligible === 0;
-            } else {
-                this.showStatus(`Error: ${result.message}`, 'error');
+    initUploadModeModal() {
+        this.uploadModeModal = document.getElementById('uploadModeModal');
+        if (!this.uploadModeModal) return;
+        this.uploadModeModal.addEventListener('click', (event) => {
+            const choice = event.target.closest('[data-upload-mode]');
+            if (choice && !choice.disabled) {
+                this.closeUploadModeModal();
+                this.startCvUpload(choice.getAttribute('data-upload-mode'));
+                return;
             }
+            if (event.target.closest('[data-upload-mode-close]')) this.closeUploadModeModal();
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !this.uploadModeModal.hidden) this.closeUploadModeModal();
+        });
+    }
 
+    openUploadModeModal() {
+        if (!this.uploadModeModal) {
+            this.startCvUpload('review');
+            return;
+        }
+        const n = this.selectedFiles.length;
+        const lines = this.getSelectedSessionIds();
+        document.getElementById('uploadModeSummary').textContent =
+            `${n} CV${n === 1 ? '' : 's'}: la IA extrae los datos y escribe el mensaje de cada uno.`;
+        const linesEl = document.getElementById('uploadModeLines');
+        const canSend = lines.length > 0 || this.testMode;
+        this.uploadModeModal.querySelectorAll('[data-upload-mode="instant"], [data-upload-mode="queue"]').forEach((btn) => {
+            btn.disabled = !canSend;
+        });
+        if (canSend) {
+            const names = lines.map((id) => this.getSessionLabel(id) || id);
+            const reparto = lines.length > 1 ? (this.weightAdjustOpen ? ' · según las cantidades que ajustaste' : ' · repartido en partes iguales') : '';
+            linesEl.textContent = names.length ? `Líneas: ${names.join(', ')}${reparto}` : 'Modo prueba: sin líneas reales';
+            linesEl.classList.remove('is-warning');
+        } else {
+            linesEl.textContent = 'Para enviar o encolar, marca al menos una línea conectada en la sección de envío.';
+            linesEl.classList.add('is-warning');
+        }
+        this.uploadModeModal.hidden = false;
+        const first = this.uploadModeModal.querySelector('[data-upload-mode]:not([disabled])');
+        if (first) first.focus();
+    }
+
+    closeUploadModeModal() {
+        if (this.uploadModeModal) this.uploadModeModal.hidden = true;
+    }
+
+    /**
+     * Sube los PDFs y deja que el backend haga todo; el avance llega por /api/cv-pipeline.
+     * @param {'instant'|'queue'|'review'} mode
+     */
+    async startCvUpload(mode) {
+        const files = [...this.selectedFiles];
+        if (!files.length) return;
+        const lines = mode === 'review' ? [] : this.getSelectedSessionIds();
+        const formData = new FormData();
+        formData.append('mode', mode);
+        formData.append('selectedSessions', JSON.stringify(lines));
+        if (lines.length > 1 && this.weightAdjustOpen) {
+            formData.append('sessionWeights', JSON.stringify(this.getSelectedSessionWeights()));
+        }
+        files.forEach((file) => formData.append('cvs', file));
+
+        this.showLoading(`Subiendo ${files.length} archivo${files.length === 1 ? '' : 's'}…`);
+        try {
+            const response = await fetch('/upload-cvs', { method: 'POST', body: formData });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) {
+                this.showStatus(`Error: ${result.error || result.message || response.status}`, 'error');
+                return;
+            }
+            // Ya está en el servidor: limpiar la selección local; el avance se ve en el panel.
+            this.selectedFiles = [];
+            if (this.fileItems) this.fileItems.innerHTML = '';
+            if (this.fileList) this.fileList.style.display = 'none';
+            if (this.fileInput) this.fileInput.value = '';
+            const modeText = {
+                instant: 'Procesando y enviando cada CV en cuanto tenga su mensaje.',
+                queue: 'Procesando; al terminar quedan en la cola de envío.',
+                review: 'Procesando; los mensajes quedan en la mesa para revisar.'
+            };
+            this.showStatus(result.note || modeText[mode] || 'Procesando CVs…', result.note ? 'info' : 'success');
+            this.applyCvPipelineSnapshot(result);
+            this.refreshSendProgress?.();
         } catch (error) {
             console.error('Error uploading files:', error);
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
         } finally {
-            this.stopPipelineTicker();
-            this.activeUploadId = null;
             this.hideLoading();
-        }
-
-        // Los mensajes ya vienen generados: desbloquear la cola de envío como tras «Generar mensajes».
-        if (uploadOk && generatedCount > 0) {
-            await this.clearIdleSendQueue();
-            await this.refreshSendQueue();
-            this.maybeReseedSessionCounts();
-            this.updateSessionWeightUI();
         }
     }
 
-    /**
-     * Texto del overlay con el contador del pipeline (extracción + mensaje por CV).
-     * @param {{ total?: number, processed?: number, generated?: number, contacted?: number, errors?: number, stage?: string, nombre?: string, archivo?: string }} p
-     */
-    formatPipelineProgress(p = {}) {
-        const total = Number(p.total) || 0;
-        const processed = Math.min(Number(p.processed) || 0, total);
-        const current = Math.min(processed + 1, total);
-        const who = String(p.nombre || p.archivo || '').trim();
-        let linea = `Procesando CV ${current} de ${total}`;
-        if (p.stage === 'extrayendo') linea += ` · extrayendo datos${who ? ` de ${who}` : ''}`;
-        else if (p.stage === 'mensaje') linea += ` · escribiendo mensaje${who ? ` para ${who}` : ''}`;
-        else if (p.stage === 'fin' || processed >= total) linea = `Listo: ${processed} de ${total} CVs procesados`;
-        const extras = [`✉️ Mensajes generados: ${Number(p.generated) || 0} / ${total}`];
-        if (p.contacted) extras.push(`📇 Ya contactados: ${p.contacted}`);
-        if (p.errors) extras.push(`⚠️ Con error: ${p.errors}`);
-        const lines = [linea, extras.join(' · ')];
-        const tiempo = this.formatPipelineTime(p, processed, total);
-        if (tiempo) lines.push(tiempo);
-        return lines.join('\n');
+    // ------------------------------------------------------------------
+    // Avance de la carga de CVs (fuente: servidor, visible en cualquier ventana)
+    // ------------------------------------------------------------------
+    initCvPipelinePanel() {
+        this.cvPipelinePanel = document.getElementById('cvPipelinePanel');
+        if (!this.cvPipelinePanel) return;
+        this.cvPipelineSnap = null;
+        this.cvPipelineFetchError = null;
+        this.cvPipelinePollTimer = null;
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) this.refreshCvPipeline();
+        });
+        window.addEventListener('focus', () => this.refreshCvPipeline());
+        setInterval(() => {
+            if (this.cvPipelineSnap && !document.hidden) this.renderCvPipeline();
+        }, 1000);
+        this.refreshCvPipeline();
+    }
+
+    scheduleCvPipelinePoll() {
+        if (this.cvPipelinePollTimer) clearTimeout(this.cvPipelinePollTimer);
+        const running = Boolean(this.cvPipelineSnap?.data?.pipeline?.running);
+        const delay = document.hidden ? 30000 : running ? 3000 : 20000;
+        this.cvPipelinePollTimer = setTimeout(() => this.refreshCvPipeline(), delay);
+    }
+
+    async refreshCvPipeline() {
+        if (!this.cvPipelinePanel) return;
+        try {
+            const res = await fetch('/api/cv-pipeline', { cache: 'no-store' });
+            if (res.status === 401 || res.status === 403) return;
+            const data = await res.json();
+            if (!res.ok || !data || data.success === false) throw new Error((data && data.error) || `HTTP ${res.status}`);
+            this.applyCvPipelineSnapshot(data);
+            this.cvPipelineFetchError = null;
+        } catch (error) {
+            this.cvPipelineFetchError = error.message || 'sin conexión';
+            this.renderCvPipeline();
+        } finally {
+            this.scheduleCvPipelinePoll();
+        }
+    }
+
+    applyCvPipelineSnapshot(data) {
+        if (!data || !this.cvPipelinePanel) return;
+        const prev = this.cvPipelineSnap?.data?.pipeline || null;
+        this.cvPipelineSnap = { data, receivedAt: Date.now() };
+        this.renderCvPipeline();
+        const cur = data.pipeline;
+        // Terminó (o es otra carga): sincronizar mesa y cola como al terminar «Generar mensajes».
+        if (prev && prev.running && cur && (!cur.running || cur.id !== prev.id)) {
+            this.onCvPipelineFinished(cur);
+        }
+        if (Boolean(prev && prev.running) !== Boolean(cur && cur.running)) this.scheduleCvPipelinePoll();
+    }
+
+    async onCvPipelineFinished(p) {
+        try {
+            if (!this.isOpsUser()) {
+                if (!this.isEditingCvTable()) await this.refreshCvsFromServer({ silent: true });
+                await this.clearIdleSendQueue();
+                await this.refreshSendQueue();
+                this.maybeReseedSessionCounts();
+                this.updateSessionWeightUI();
+            }
+            if (this.generateMessagesBtn) {
+                this.generateMessagesBtn.disabled = this.getEligibleForGenerationCount() === 0;
+            }
+        } catch (error) {
+            console.warn('onCvPipelineFinished:', error);
+        }
+    }
+
+    renderCvPipeline() {
+        const panel = this.cvPipelinePanel;
+        if (!panel || !this.cvPipelineSnap) return;
+        const { data, receivedAt } = this.cvPipelineSnap;
+        const p = data.pipeline;
+        const sinceMs = Date.now() - receivedAt;
+        const finishedAgo = p && p.finishedAt ? Date.now() - (p.finishedAt + (receivedAt - data.serverTime)) : 0;
+        if (!p || (!p.running && finishedAgo > 30 * 60 * 1000)) {
+            panel.style.display = 'none';
+            return;
+        }
+        panel.style.display = '';
+        const fmt = (ms) => this.formatDuration(ms);
+        const n = (v) => Number(v) || 0;
+        const total = n(p.total);
+        const processed = Math.min(n(p.processed), total);
+        const pct = total ? Math.round((processed / total) * 100) : 0;
+
+        panel.classList.remove('is-done', 'is-error');
+        if (!p.running) panel.classList.add(p.error ? 'is-error' : 'is-done');
+        document.getElementById('cvPipelineBadge').textContent = p.running ? 'En proceso' : p.error ? 'Con error' : 'Terminado';
+        document.getElementById('cvPipelineFill').style.width = `${pct}%`;
+
+        const stat = (label, value) => `<span>${label}: <strong>${value}</strong></span>`;
+        const parts = [stat('📄 CVs', `${processed} / ${total}`), stat('✉️ Mensajes', n(p.generated))];
+        if (p.mode === 'instant') parts.push(stat('📤 A envío', n(p.toSend)));
+        if (p.mode === 'queue' && !p.running) parts.push(stat('🗂️ Encolados', n(p.toSend)));
+        if (p.contacted) parts.push(stat('📇 Ya contactados', p.contacted));
+        if (p.errors) parts.push(stat('⚠️ Con error', p.errors));
+        const elapsed = p.running ? n(p.elapsedMs) + sinceMs : n(p.elapsedMs);
+        parts.push(stat('⏱️ Transcurrido', fmt(elapsed)));
+        if (p.running) {
+            if (p.etaMs == null) parts.push(stat('🕒 Restante', 'calculando…'));
+            else {
+                const left = n(p.etaMs) - sinceMs;
+                parts.push(stat('🕒 Restante', left <= 1000 ? 'casi listo…' : `~${fmt(left)}`));
+            }
+        }
+        document.getElementById('cvPipelineStats').innerHTML = parts.join('');
+
+        const modeNote = {
+            instant: 'Modo: enviar al instante — el avance del envío se ve en «📤 Envío de mensajes».',
+            queue: p.running ? 'Modo: encolar — al terminar quedan en la cola de envío.' : 'Quedaron en la cola de envío.',
+            review: 'Modo: solo generar — revisa los mensajes en la mesa antes de enviar.'
+        };
+        let note = [p.note, modeNote[p.mode]].filter(Boolean).join(' ');
+        if (p.error) note = `Error: ${p.error}. ${note}`;
+        if (p.startedBy) note += ` (iniciado por ${p.startedBy})`;
+        document.getElementById('cvPipelineNote').textContent = note;
+
+        const stageText = { extrayendo: 'extrayendo datos', mensaje: 'escribiendo mensaje' };
+        document.getElementById('cvPipelineInFlight').innerHTML = (p.running ? p.inFlight || [] : [])
+            .map((f) => {
+                const who = this.escapeHtml(f.nombre || f.archivo || '');
+                return `<div class="send-progress-session"><span class="sp-line">${who}</span><span class="sp-phase">${stageText[f.stage] || f.stage || ''}</span></div>`;
+            })
+            .join('');
+
+        document.getElementById('cvPipelineUpdated').textContent = this.cvPipelineFetchError
+            ? `⚠️ Sin conexión (${this.cvPipelineFetchError}); reintentando…`
+            : p.running
+              ? `Actualizado hace ${fmt(sinceMs)}`
+              : `Terminó hace ${fmt(finishedAgo)}`;
     }
 
     /** "1:05" / "12 s" */
@@ -5666,42 +5850,6 @@ class CVAnalyzer {
         const m = Math.floor((totalSec % 3600) / 60);
         const sec = String(totalSec % 60).padStart(2, '0');
         return h > 0 ? `${h} h ${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
-    }
-
-    /**
-     * Línea de tiempo: transcurrido + restante estimado.
-     * p.elapsedMs / p.etaMs vienen del servidor; p.sinceMs es lo que pasó desde ese evento (tick local).
-     */
-    formatPipelineTime(p, processed, total) {
-        if (p.elapsedMs == null) return '';
-        const since = Number(p.sinceMs) || 0;
-        const elapsed = Number(p.elapsedMs) + since;
-        let line = `⏱️ Transcurrido ${this.formatDuration(elapsed)}`;
-        if (p.stage === 'fin' || processed >= total) return line;
-        if (p.etaMs == null) return `${line} · Tiempo restante: calculando…`;
-        const left = Number(p.etaMs) - since;
-        if (left <= 1000) return `${line} · Restante: casi listo…`;
-        const fin = new Date(Date.now() + left).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
-        const avg = p.avgMsPerCv ? ` · ~${this.formatDuration(p.avgMsPerCv)} por CV` : '';
-        return `${line} · Restante ~${this.formatDuration(left)} (termina ~${fin})${avg}`;
-    }
-
-    /** Re-dibuja el overlay cada segundo con el último avance (cuenta regresiva entre eventos). */
-    startPipelineTicker() {
-        this.stopPipelineTicker();
-        this.pipelineTicker = setInterval(() => {
-            const last = this.lastPipelineProgress;
-            if (!last || !this.activeUploadId) return;
-            this.showLoading(
-                this.formatPipelineProgress({ ...last.data, sinceMs: Date.now() - last.receivedAt })
-            );
-        }, 1000);
-    }
-
-    stopPipelineTicker() {
-        if (this.pipelineTicker) clearInterval(this.pipelineTicker);
-        this.pipelineTicker = null;
-        this.lastPipelineProgress = null;
     }
 
     displayResults() {
@@ -9539,17 +9687,14 @@ class CVAnalyzer {
             }
         });
 
-        // Avance de la subida de CVs (extracción + mensaje por CV)
+        // Avance de la carga de CVs (snapshot del servidor; lo ven todas las ventanas)
         this.eventSource.addEventListener('cvPipelineProgress', (event) => {
-            let data = null;
             try {
-                data = JSON.parse(event.data);
+                const data = JSON.parse(event.data || '{}');
+                if (data && data.success !== false) this.applyCvPipelineSnapshot(data);
             } catch {
-                return;
+                /* ignore */
             }
-            if (!data || !this.activeUploadId || data.uploadId !== this.activeUploadId) return;
-            this.lastPipelineProgress = { data, receivedAt: Date.now() };
-            this.showLoading(this.formatPipelineProgress(data));
         });
 
         // Escuchar evento cuando está listo para enviar el siguiente mensaje
@@ -9727,6 +9872,11 @@ class CVAnalyzer {
         this.eventSource.addEventListener('cvsUpdated', async (event) => {
             try {
                 const data = JSON.parse(event.data || '{}');
+                if (Array.isArray(data.cvs) && this.isEditingCvTable()) {
+                    // No redibujar mientras editas (perderías el texto o se movería la fila).
+                    this.deferCvsUpdate(data.cvs);
+                    return;
+                }
                 if (Array.isArray(data.cvs)) {
                     this.cvsData = data.cvs;
                     if (this.cvsData.length === 0) {

@@ -47,11 +47,38 @@ async function runAndroidSendJob({
   onMessageResult = null,
   shouldAbort = null,
   pollMs = 2000,
-  timeoutMs = 24 * 60 * 60 * 1000
+  timeoutMs = 24 * 60 * 60 * 1000,
+  stream = null
 } = {}) {
   let jobs;
 
-  if (Array.isArray(assignments) && assignments.length > 0) {
+  const toAssignedItem = (a) => {
+    const logicalSessionId = a.logicalSessionId || a.sessionId || null;
+    const mensaje = buildAndroidOutreachText(
+      {
+        telefono: a.telefono,
+        nombre: a.nombre,
+        saludo: a.saludo || a.meta?.saludo,
+        mensajeIA: a.mensajeIA || a.mensaje || a.meta?.mensajeIA,
+        mensaje: a.mensaje
+      },
+      logicalSessionId
+    );
+    return {
+      telefono: a.telefono,
+      mensaje,
+      deviceId: a.deviceId,
+      nombre: a.nombre || null,
+      batchId,
+      logicalSessionId,
+      meta: a.meta || null
+    };
+  };
+
+  if (stream && (!Array.isArray(assignments) || assignments.length === 0)) {
+    // Lote en streaming: arranca vacío y recibe contactos conforme la IA los genera.
+    jobs = [];
+  } else if (Array.isArray(assignments) && assignments.length > 0) {
     jobs = androidGatewayStore.enqueueAssignedJobs(
       assignments.map((a) => {
         const logicalSessionId = a.logicalSessionId || a.sessionId || null;
@@ -118,6 +145,15 @@ async function runAndroidSendJob({
   }
 
   const jobIds = jobs.map((j) => j.id);
+  if (stream && typeof stream.register === 'function') {
+    // El celular respeta su propio intervalo entre mensajes (gateway); aquí solo se encola.
+    stream.register((assignment) => {
+      const [created] = androidGatewayStore.enqueueAssignedJobs([toAssignedItem(assignment)]);
+      if (created) jobIds.push(created.id);
+      return { ok: Boolean(created), jobId: created ? created.id : null };
+    });
+  }
+  const streamOpen = () => Boolean(stream && typeof stream.isOpen === 'function' && stream.isOpen());
   const reported = new Set();
   const results = [];
   const started = Date.now();
@@ -159,7 +195,7 @@ async function runAndroidSendJob({
     }
     const current = androidGatewayStore.getJobsByIds(jobIds);
     for (const job of current) emitRow(job);
-    if (androidGatewayStore.areJobsTerminal(current)) {
+    if (androidGatewayStore.areJobsTerminal(current) && !streamOpen()) {
       return results;
     }
     await new Promise((r) => setTimeout(r, pollMs));

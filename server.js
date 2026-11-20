@@ -456,6 +456,91 @@ function finalizeSendBatch(job, opts = {}) {
   return { resumed: false, pending, delayMs: 0 };
 }
 
+// ---- Lote en streaming (subida de CVs → mensaje → envío inmediato) ----
+/** @type {Map<string, { open: boolean, listeners: Set<Function> }>} */
+const streamFeeds = new Map();
+
+/**
+ * Abre un lote que se envía mientras se le agregan CVs. Respeta los tiempos de cada línea.
+ * @param {{ selectedSessions: string[], sessionWeights?: object|null }} opts
+ */
+function startStreamingSendJob({ selectedSessions, sessionWeights = null }) {
+  if (isAnySendingInProgress() || sendQueueStore.getSendingBatch()) {
+    const err = new Error('Ya hay un envío de mensajes en curso');
+    err.status = 409;
+    throw err;
+  }
+  clearSendQueueTimer();
+  const batch = sendQueueStore.beginStreamingSend({ selectedSessions, sessionWeights, channel: 'auto' });
+  const feed = { open: true, listeners: new Set() };
+  streamFeeds.set(batch.id, feed);
+  const stream = {
+    isOpen: () => feed.open,
+    subscribe: (fn) => feed.listeners.add(fn)
+  };
+  const sessionIds = TEST_MODE
+    ? selectedSessions && selectedSessions.length
+      ? selectedSessions
+      : ['default']
+    : selectedSessions;
+  console.log(`📤 Envío al instante (streaming) ${batch.id} por: ${sessionIds.join(', ')}`);
+  broadcastEvent('sendQueueStarted', { batchId: batch.id, total: 0, streaming: true });
+  broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+  runWhatsAppSendJob({
+    finalCvsToSend: [],
+    sessionIds,
+    sessionWeights,
+    skippedAlreadyContacted: [],
+    mongoRecordHook: createMongoRecordHook(),
+    testMode: TEST_MODE,
+    channel: 'auto',
+    batchId: batch.id,
+    stream
+  }).finally(() => {
+    feed.open = false;
+    streamFeeds.delete(batch.id);
+    armSendQueueTimer();
+  });
+  broadcastSendProgressSoon();
+  return batch;
+}
+
+/** Agrega un CV con mensaje al lote en streaming (durable + aviso al job vivo). */
+function pushToStream(batchId, cv) {
+  // Lote ya cerrado (abortado/finalizado por el usuario): no agregar más envíos.
+  const live = sendQueueStore.getBatchById(batchId);
+  if (!live || live.status === sendQueueStore.STATUS.SENT || live.status === sendQueueStore.STATUS.CANCELLED) {
+    return false;
+  }
+  const added = sendQueueStore.appendCvs(batchId, [cv]);
+  if (!added.length) return false;
+  const feed = streamFeeds.get(batchId);
+  if (feed && feed.open) {
+    for (const fn of feed.listeners) {
+      try {
+        fn(added[0]);
+      } catch (err) {
+        console.warn('stream listener:', err.message);
+      }
+    }
+  }
+  noteSendActivity();
+  broadcastSendProgressSoon();
+  return true;
+}
+
+/** Ya no llegarán más CVs: las líneas terminan lo que tengan y el job cierra. */
+function closeStreamFeed(batchId) {
+  try {
+    sendQueueStore.closeStream(batchId);
+  } catch (err) {
+    console.warn('closeStream:', err.message);
+  }
+  const feed = streamFeeds.get(batchId);
+  if (feed) feed.open = false;
+  broadcastSendProgressSoon();
+}
+
 /** Job colgado: lo invalida (sus bucles se auto-abortan) y reanuda lo pendiente. */
 function recoverStalledSendJob(reason) {
   const job = lastSendJob;
@@ -496,6 +581,10 @@ setInterval(() => {
     if (!job || !job.inProgress) return;
     if (anySessionPaused()) {
       noteSendActivity(); // pausado a propósito: no es traba
+      return;
+    }
+    if (cvPipeline && cvPipeline.running && [...streamFeeds.values()].some((f) => f.open)) {
+      noteSendActivity(); // envío al instante esperando a que la IA genere más CVs
       return;
     }
     const idleMs = Date.now() - (lastSendActivityAt || job.startedAt || Date.now());
@@ -708,7 +797,8 @@ async function runWhatsAppSendJob({
   mongoRecordHook,
   testMode,
   channel = 'auto',
-  batchId = null
+  batchId = null,
+  stream = null
 }) {
   const controlId = getBulkControlId(sessionIds);
   const N = sessionIds.length;
@@ -814,6 +904,32 @@ async function runWhatsAppSendJob({
       }
 
       const { onProgress } = buildSendProgressHandlers(controlId);
+      if (stream) {
+        // Simulación en streaming (TEST_MODE): procesa conforme llegan, 2 s entre mensajes.
+        const inbox = [];
+        stream.subscribe((cv) => inbox.push(cv));
+        const simResults = [];
+        let i = 0;
+        while ((stream.isOpen() || inbox.length) && isCurrentJob() && !job.aborted) {
+          const cv = inbox.shift();
+          if (!cv) {
+            await new Promise((r) => setTimeout(r, 500));
+            noteSendActivity();
+            continue;
+          }
+          i += 1;
+          onProgress({ readyToSend: true, current: i, total: i + inbox.length, nombre: cv.nombre, telefono: cv.telefono, sessionId: sessionIds[0], sessionCurrent: i, sessionTotal: i + inbox.length, phase: 'sending' });
+          console.log(`🧪 Simulando envío (streaming) ${i} a ${cv.nombre} (${cv.telefono})`);
+          await new Promise((r) => setTimeout(r, 2000));
+          const row = { ...cv, success: true, sessionId: sessionIds[0], timestamp: new Date().toISOString(), testMode: true };
+          simResults.push(row);
+          trackMessageResult(row);
+        }
+        resetBulkControlState(controlId, sessionIds);
+        job.results = simResults;
+        job.successCount = simResults.length;
+        job.message = `Envío completado: ${simResults.length} mensajes (modo prueba, streaming)`;
+      } else {
       const results = await simulateWhatsAppSending(finalCvsToSend, (progress) => {
         onProgress({
           readyToSend: true,
@@ -838,6 +954,7 @@ async function runWhatsAppSendJob({
       job.results = results;
       job.successCount = results.filter((r) => r.success).length;
       job.message = `Envío completado: ${job.successCount}/${results.length} mensajes enviados (modo prueba)`;
+      }
     } else if (sendChannel === 'android') {
       console.log(
         `📱 Envío Android (forzado) con ${N} sesión(es): ${sessionIds.join(', ')}`
@@ -886,6 +1003,8 @@ async function runWhatsAppSendJob({
 
       /** @type {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, logicalSessionId: string }>} */
       const androidAssignments = [];
+      /** @type {Map<string, string>} línea Android → deviceId */
+      const androidDeviceBySession = new Map();
       /** @type {string[]} */
       const openwaSessionIds = [];
       /** @type {Map<string, typeof contactsToSend>} */
@@ -914,6 +1033,7 @@ async function runWhatsAppSendJob({
               `El celular vinculado a "${session.label || sId}" no está online. Inicia WA Agent.`
             );
           }
+          androidDeviceBySession.set(sId, deviceId);
           for (const c of queue) {
             androidAssignments.push({
               telefono: c.telefono,
@@ -950,7 +1070,87 @@ async function runWhatsAppSendJob({
 
       const tasks = [];
 
-      if (androidAssignments.length > 0) {
+      // ---- Streaming: los contactos llegan mientras la IA genera; se reparten por peso entre líneas ----
+      const streamEnqueue = { openwa: null, android: null };
+      const streamHeld = []; // contactos que llegaron antes de que su canal estuviera listo
+      const streamIsOpen = () => Boolean(stream && stream.isOpen()) && isCurrentJob() && !job.aborted;
+      if (stream) {
+        const weightOf = (sId) => {
+          const w = sessionWeights && sessionWeights[sId] != null ? Number(sessionWeights[sId]) : 1;
+          return Number.isFinite(w) && w > 0 ? w : sessionWeights ? 0 : 1;
+        };
+        const assignedCount = new Map(sessionIds.map((sId) => [sId, 0]));
+        const pickSessionByWeight = () => {
+          let best = null;
+          let bestScore = Infinity;
+          for (const sId of sessionIds) {
+            const w = weightOf(sId);
+            if (w <= 0) continue;
+            const score = (assignedCount.get(sId) + 1) / w;
+            if (score < bestScore) {
+              bestScore = score;
+              best = sId;
+            }
+          }
+          return best || sessionIds[0];
+        };
+        const routeContact = (cv) => {
+          const contact = {
+            nombre: cv.nombre,
+            telefono: cv.telefono,
+            saludo: cv.saludo,
+            mensajeIA: cv.mensajeIA,
+            cvId: cv.cvId || null,
+            archivoOriginal: cv.archivoOriginal || null
+          };
+          const sId = pickSessionByWeight();
+          const kind = androidDeviceBySession.has(sId) ? 'android' : 'openwa';
+          const enqueueFn = streamEnqueue[kind];
+          if (!enqueueFn) {
+            streamHeld.push(cv);
+            return;
+          }
+          assignedCount.set(sId, assignedCount.get(sId) + 1);
+          if (kind === 'android') {
+            enqueueFn({
+              telefono: contact.telefono,
+              mensajeIA: contact.mensajeIA,
+              saludo: contact.saludo,
+              deviceId: androidDeviceBySession.get(sId),
+              nombre: contact.nombre || null,
+              logicalSessionId: sId,
+              meta: {
+                cvId: contact.cvId,
+                archivoOriginal: contact.archivoOriginal,
+                saludo: contact.saludo || null,
+                mensajeIA: contact.mensajeIA || null
+              }
+            });
+          } else {
+            const r = enqueueFn(contact, sId);
+            if (!r || !r.ok) {
+              trackMessageResult({ ...contact, sessionId: sId, success: false, error: (r && r.reason) || 'no_healthy_sessions' });
+            }
+          }
+          noteSendActivity();
+          console.log(`📥 Streaming → ${contact.nombre} (${contact.telefono}) asignado a ${sId}`);
+        };
+        const flushHeld = () => {
+          const pending = streamHeld.splice(0, streamHeld.length);
+          for (const cv of pending) routeContact(cv);
+        };
+        stream.subscribe(routeContact);
+        stream.flushHeld = flushHeld;
+      }
+      const registerStream = (kind) => ({
+        isOpen: streamIsOpen,
+        register: (fn) => {
+          streamEnqueue[kind] = fn;
+          if (stream && stream.flushHeld) stream.flushHeld();
+        }
+      });
+
+      if (androidAssignments.length > 0 || (stream && androidDeviceBySession.size > 0)) {
         job.hasAndroid = true;
         tasks.push(
           runAndroidSendJob({
@@ -959,7 +1159,8 @@ async function runWhatsAppSendJob({
             onMessageResult: trackMessageResult,
             shouldAbort: () => job.aborted || !isCurrentJob(),
             pollMs: 2000,
-            timeoutMs: 24 * 60 * 60 * 1000
+            timeoutMs: 24 * 60 * 60 * 1000,
+            stream: stream ? registerStream('android') : null
           })
         );
       }
@@ -988,7 +1189,7 @@ async function runWhatsAppSendJob({
               openwaFlat.push(...(openwaContactsBySession.get(sId) || []));
             }
 
-            if (openwaSessionIds.length === 1) {
+            if (openwaSessionIds.length === 1 && !stream) {
               const singleCheck = guardControls(makeSessionCheckControls(openwaSessionIds[0], null));
               const onWaitProgress = onWaitProgressBySession(openwaSessionIds[0]);
               const sendSettings = sendSettingsStore.getSettings();
@@ -1026,7 +1227,8 @@ async function runWhatsAppSendJob({
               trackMessageResult,
               onWaitProgressBySession,
               openwaWeights,
-              delayRange
+              delayRange,
+              stream ? registerStream('openwa') : null
             );
           })()
         );
@@ -1834,221 +2036,341 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Ruta para subir y procesar CVs
+// ---------------------------------------------------------------------------
+// Subida de CVs = trabajo de backend (extraer → mensaje → [enviar/encolar]).
+// Cualquier ventana ve el avance con GET /api/cv-pipeline o el evento SSE cvPipelineProgress.
+// ---------------------------------------------------------------------------
+const CV_PIPELINE_MODES = ['instant', 'queue', 'review'];
+/** @type {object|null} estado de la carga actual o la última */
+let cvPipeline = null;
+
+function parseJsonField(raw, fallback) {
+  if (raw == null || raw === '') return fallback;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return fallback;
+  }
+}
+
+function getCvPipelineSnapshot() {
+  if (!cvPipeline) return { success: true, serverTime: Date.now(), pipeline: null };
+  const p = cvPipeline;
+  const now = Date.now();
+  const elapsedMs = (p.finishedAt || now) - p.startedAt;
+  const etaMs =
+    p.running && p.etaAnchor ? Math.max(0, p.etaAnchor.etaMs - (now - p.etaAnchor.at)) : p.running ? null : 0;
+  return {
+    success: true,
+    serverTime: now,
+    pipeline: {
+      id: p.id,
+      running: p.running,
+      mode: p.mode,
+      note: p.note || null,
+      total: p.total,
+      processed: p.processed,
+      extracted: p.extracted,
+      generated: p.generated,
+      contacted: p.contacted,
+      errors: p.errors,
+      toSend: p.toSend,
+      startedAt: p.startedAt,
+      finishedAt: p.finishedAt || null,
+      elapsedMs,
+      etaMs,
+      avgMsPerCv: p.processed > 0 ? Math.round(elapsedMs / p.processed) : null,
+      inFlight: [...p.inFlight.values()],
+      streamBatchId: p.streamBatchId || null,
+      queuedBatchId: p.queuedBatchId || null,
+      error: p.error || null,
+      startedBy: p.startedBy || null
+    }
+  };
+}
+
+function broadcastCvPipeline() {
+  try {
+    broadcastEvent('cvPipelineProgress', getCvPipelineSnapshot());
+  } catch (err) {
+    console.warn('cvPipeline broadcast:', err.message);
+  }
+}
+
+function isSendableCv(cv) {
+  return Boolean(
+    cv &&
+      cv.procesado &&
+      !cv.alreadyContacted &&
+      String(cv.mensajeIA || '').trim() &&
+      contactHistory.normalizePhone(cv.telefono) &&
+      cv.telefono !== 'No encontrado'
+  );
+}
+
+/** Agrega un CV a la mesa (sin archivar los de esta misma carga) y avisa a todas las ventanas. */
+function addCvToWorkspace(entry) {
+  const { cvs: merged, replacedIds } = cvFileStore.mergeIncomingBatch(
+    cvsData,
+    [entry],
+    contactHistory.phonesMatch,
+    { archiveWorkspace: false }
+  );
+  for (const oldId of replacedIds) {
+    if (oldId !== entry.cvId) cvFileStore.retireCvFileToHistory(oldId);
+  }
+  cvsData = merged;
+  persistCvsData();
+  broadcastEvent('cvsUpdated', { cvs: workspaceCvs(), archiveCount: cvsData.length });
+}
+
+async function runCvPipeline(files, state) {
+  const concurrencyRaw = parseInt(process.env.CV_EXTRACT_CONCURRENCY || '2', 10);
+  const concurrency = Math.max(1, Math.min(8, Number.isFinite(concurrencyRaw) ? concurrencyRaw : 2));
+  const sendable = [];
+
+  const markDone = () => {
+    state.processed += 1;
+    // ETA = ritmo real (tiempo transcurrido / CVs terminados) × restantes; se recalibra al terminar cada CV.
+    const now = Date.now();
+    const remaining = Math.max(0, state.total - state.processed);
+    state.etaAnchor = { etaMs: Math.round(((now - state.startedAt) / state.processed) * remaining), at: now };
+  };
+
+  const processOne = async (i) => {
+    const file = files[i];
+    state.inFlight.set(i, { archivo: file.originalname, nombre: '', stage: 'extrayendo' });
+    broadcastCvPipeline();
+    try {
+      const saved = cvFileStore.saveCvFile(file.buffer, file.originalname);
+      const text = await extractTextFromPDF(file.buffer);
+      const cvData = await cvAnalysisService.extractCvFieldsWithAi(text);
+      console.log(
+        `  ✓ ${file.originalname} [${cvData.extractionProvider}] ${cvData.nombre} · ${cvData.telefono} · ${cvData.ultimoTrabajo || 'sin puesto'}`
+      );
+      const entry = {
+        ...cvData,
+        archivoOriginal: file.originalname,
+        cvId: saved.cvId,
+        cvFileName: saved.cvFileName,
+        saludo: '',
+        mensajeIA: '',
+        alreadyContacted: false,
+        contactedAt: null,
+        procesado: true,
+        inWorkspace: true,
+        savedAt: new Date().toISOString()
+      };
+      state.extracted += 1;
+
+      if (contactHistory.mongoUriConfigured() && contactHistory.normalizePhone(entry.telefono)) {
+        try {
+          const [annotated] = await withTimeout(
+            contactHistory.annotateAlreadyContacted([entry]),
+            20000,
+            'historial'
+          );
+          entry.alreadyContacted = Boolean(annotated && annotated.alreadyContacted);
+          entry.contactedAt = (annotated && annotated.contactedAt) || null;
+        } catch (err) {
+          console.warn(`⚠️ historial omitido para ${file.originalname}:`, err.message);
+        }
+      }
+
+      if (entry.alreadyContacted) {
+        state.contacted += 1;
+      } else {
+        state.inFlight.set(i, { archivo: file.originalname, nombre: entry.nombre, stage: 'mensaje' });
+        broadcastCvPipeline();
+        const msg = await generateMessageForCv(entry);
+        entry.saludo = msg.saludo;
+        entry.mensajeIA = msg.mensajeIA;
+        state.generated += 1;
+      }
+
+      addCvToWorkspace(entry);
+
+      if (isSendableCv(entry)) {
+        sendable.push(entry);
+        if (state.mode === 'instant' && state.streamBatchId) {
+          if (pushToStream(state.streamBatchId, entry)) state.toSend += 1;
+        }
+      }
+    } catch (error) {
+      state.errors += 1;
+      console.error(`Error procesando ${file.originalname}:`, error.message);
+      addCvToWorkspace({
+        nombre: 'Error al procesar',
+        telefono: 'N/A',
+        experiencia: 'Error al extraer texto del PDF',
+        archivoOriginal: file.originalname,
+        cvId: null,
+        cvFileName: null,
+        saludo: '',
+        mensajeIA: '',
+        alreadyContacted: false,
+        contactedAt: null,
+        procesado: false,
+        inWorkspace: true,
+        error: error.message
+      });
+    } finally {
+      state.inFlight.delete(i);
+      markDone();
+      broadcastCvPipeline();
+    }
+  };
+
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, files.length) }, async () => {
+    while (nextIndex < files.length) {
+      const idx = nextIndex++;
+      await processOne(idx);
+    }
+  });
+  await Promise.all(workers);
+
+  if (state.mode === 'instant' && state.streamBatchId) {
+    closeStreamFeed(state.streamBatchId);
+  } else if (state.mode === 'queue' && sendable.length) {
+    try {
+      const batch = sendQueueStore.enqueue({
+        cvs: sendable,
+        selectedSessions: state.selectedSessions,
+        sessionWeights: state.sessionWeights,
+        // Si venía de "al instante" con otro envío en curso: que salga solo en cuanto se libere.
+        scheduledAt: state.autoDispatch ? new Date(Date.now() + 15000).toISOString() : null,
+        channel: 'auto'
+      });
+      state.queuedBatchId = batch.id;
+      state.toSend = sendable.length;
+      armSendQueueTimer();
+      broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+    } catch (err) {
+      state.error = `No se pudo encolar: ${err.message}`;
+      console.error('cvPipeline enqueue:', err.message);
+    }
+  }
+}
+
+app.get('/api/cv-pipeline', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(getCvPipelineSnapshot());
+});
+
+// Ruta para subir y procesar CVs (responde al instante; el trabajo sigue en el backend)
 app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
   try {
     if (!forbidOpsInfrastructure(req, res)) return;
     if (!req.files || req.files.length === 0) {
-      return res.status(400).json({
-        error: 'No se subieron archivos PDF'
+      return res.status(400).json({ error: 'No se subieron archivos PDF' });
+    }
+    if (cvPipeline && cvPipeline.running) {
+      return res.status(409).json({
+        error: 'Ya hay una carga de CVs en proceso. Espera a que termine (puedes ver el avance en el panel).'
       });
     }
 
-    console.log(`Procesando ${req.files.length} archivos PDF...`);
+    let mode = String((req.body && req.body.mode) || 'review').trim();
+    if (!CV_PIPELINE_MODES.includes(mode)) mode = 'review';
+    let selectedSessions = parseJsonField(req.body && req.body.selectedSessions, []);
+    selectedSessions = Array.isArray(selectedSessions) ? selectedSessions.map(String).filter(Boolean) : [];
+    let sessionWeights = parseJsonField(req.body && req.body.sessionWeights, null);
+    if (!sessionWeights || typeof sessionWeights !== 'object' || Array.isArray(sessionWeights)) sessionWeights = null;
+
+    if (mode !== 'review') {
+      if (!TEST_MODE && selectedSessions.length === 0) {
+        return res.status(400).json({ error: 'Marca al menos una línea para enviar o encolar los mensajes.' });
+      }
+      if (!forbidUnlessControlSessions(selectedSessions, req, res)) return;
+    }
+
     purgeExpiredArchive();
+    let note = null;
+    let streamBatchId = null;
+    let autoDispatch = false;
+    if (mode === 'instant') {
+      try {
+        streamBatchId = startStreamingSendJob({ selectedSessions, sessionWeights }).id;
+      } catch (err) {
+        if (err.status !== 409) throw err;
+        mode = 'queue';
+        autoDispatch = true;
+        note = 'Ya había un envío en curso: los mensajes se encolan y salen automáticamente en cuanto termine.';
+      }
+    }
 
     const files = req.files;
-    const incoming = new Array(files.length);
-    const concurrencyRaw = parseInt(process.env.CV_EXTRACT_CONCURRENCY || '2', 10);
-    const concurrency = Math.max(1, Math.min(8, Number.isFinite(concurrencyRaw) ? concurrencyRaw : 2));
-    // Pipeline por CV: extraer datos → revisar historial → generar mensaje (sin segunda pasada).
-    const uploadId = String((req.body && req.body.uploadId) || '').slice(0, 64);
-    const autoGenerate = String((req.body && req.body.autoGenerate) || 'true') !== 'false';
-    const pipeline = { processed: 0, extracted: 0, generated: 0, contacted: 0, errors: 0 };
-    const pipelineStartedAt = Date.now();
-    let etaAnchor = null; // { etaMs, at } fijado al terminar cada CV
-    const reportPipeline = (stage, nombre, archivo) => {
-      // ETA = ritmo real observado (tiempo transcurrido / CVs terminados) × CVs restantes.
-      // Ya incluye OCR, concurrencia y velocidad del modelo; sin datos aún → null ("calculando").
-      // Solo se recalibra cuando termina un CV; entre medio es cuenta regresiva desde ese ancla.
-      const now = Date.now();
-      const elapsedMs = now - pipelineStartedAt;
-      if (stage === 'listo' && pipeline.processed > 0) {
-        const remaining = Math.max(0, files.length - pipeline.processed);
-        etaAnchor = { etaMs: Math.round((elapsedMs / pipeline.processed) * remaining), at: now };
-      }
-      const etaMs = etaAnchor ? Math.max(0, etaAnchor.etaMs - (now - etaAnchor.at)) : null;
-      broadcastEvent('cvPipelineProgress', {
-        uploadId,
-        total: files.length,
-        ...pipeline,
-        elapsedMs,
-        etaMs,
-        avgMsPerCv: pipeline.processed > 0 ? Math.round(elapsedMs / pipeline.processed) : null,
-        stage,
-        nombre: nombre || '',
-        archivo: archivo || ''
-      });
-    };
-    console.log(
-      `🤖 Extracción con IA (${cvAnalysisService.getProvider()}, concurrencia ${concurrency})` +
-        (autoGenerate ? ' + mensaje por CV' : '')
-    );
-    reportPipeline('start');
-
-    const processOne = async (i) => {
-      const file = files[i];
-      console.log(
-        `Procesando archivo ${i + 1}/${files.length}: ${file.originalname} (${file.buffer.length} bytes)`
-      );
-
-      try {
-        const saved = cvFileStore.saveCvFile(file.buffer, file.originalname);
-        reportPipeline('extrayendo', '', file.originalname);
-
-        // Extraer texto del PDF
-        const text = await extractTextFromPDF(file.buffer);
-
-        // La IA deduce nombre, teléfono, correo, ciudad, puesto, etc. (CV sin formato fijo)
-        const cvData = await cvAnalysisService.extractCvFieldsWithAi(text);
-        console.log(
-          `  ✓ ${file.originalname} [${cvData.extractionProvider}] ${cvData.nombre} · ${cvData.telefono} · ${cvData.ultimoTrabajo || 'sin puesto'} · ${[cvData.ciudad, cvData.estado].filter(Boolean).join(', ') || 'sin ciudad'}`
-        );
-
-        const entry = {
-          ...cvData,
-          archivoOriginal: file.originalname,
-          cvId: saved.cvId,
-          cvFileName: saved.cvFileName,
-          saludo: '',
-          mensajeIA: '',
-          alreadyContacted: false,
-          contactedAt: null,
-          procesado: true,
-          inWorkspace: true,
-          savedAt: new Date().toISOString()
-        };
-        pipeline.extracted += 1;
-
-        // ¿Ya fue contactado? Entonces no se genera mensaje.
-        if (contactHistory.mongoUriConfigured() && contactHistory.normalizePhone(entry.telefono)) {
-          try {
-            const [annotated] = await contactHistory.annotateAlreadyContacted([entry]);
-            entry.alreadyContacted = Boolean(annotated && annotated.alreadyContacted);
-            entry.contactedAt = (annotated && annotated.contactedAt) || null;
-          } catch (err) {
-            console.warn(`⚠️ historial omitido para ${file.originalname}:`, err.message);
-          }
-        }
-
-        if (entry.alreadyContacted) {
-          pipeline.contacted += 1;
-        } else if (autoGenerate) {
-          reportPipeline('mensaje', entry.nombre, file.originalname);
-          const msg = await generateMessageForCv(entry);
-          entry.saludo = msg.saludo;
-          entry.mensajeIA = msg.mensajeIA;
-          pipeline.generated += 1;
-          console.log(`  ✉️ mensaje ${msg.fallback ? '(plantilla básica)' : 'IA'} para ${entry.nombre}`);
-        }
-
-        incoming[i] = entry;
-      } catch (error) {
-        pipeline.errors += 1;
-        console.error(`Error procesando ${file.originalname}:`, error.message);
-        incoming[i] = {
-          nombre: 'Error al procesar',
-          telefono: 'N/A',
-          experiencia: 'Error al extraer texto del PDF',
-          archivoOriginal: file.originalname,
-          cvId: null,
-          cvFileName: null,
-          saludo: '',
-          mensajeIA: '',
-          alreadyContacted: false,
-          contactedAt: null,
-          procesado: false,
-          inWorkspace: true,
-          error: error.message
-        };
-      }
-    };
-
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(concurrency, files.length) }, async () => {
-      while (nextIndex < files.length) {
-        const idx = nextIndex++;
-        await processOne(idx);
-        pipeline.processed += 1;
-        reportPipeline('listo', incoming[idx] && incoming[idx].nombre, files[idx].originalname);
-      }
-    });
-    await Promise.all(workers);
-
-    const { cvs: merged, replacedIds } = cvFileStore.mergeIncomingBatch(
-      cvsData,
-      incoming,
-      contactHistory.phonesMatch
-    );
-    for (const oldId of replacedIds) {
-      cvFileStore.retireCvFileToHistory(oldId);
-    }
-    cvsData = merged;
-
-    // Verificar historial antes de generar IA / mostrar en UI (solo mesa)
-    let alreadyContactedCount = 0;
-    if (contactHistory.mongoUriConfigured()) {
-      try {
-        const ws = workspaceCvs();
-        const annotated = await contactHistory.annotateAlreadyContacted(ws);
-        alreadyContactedCount = annotated.filter((cv) => cv.alreadyContacted).length;
-        for (const cv of annotated) {
-          const idx = cvsData.findIndex(
-            (c) =>
-              (cv.cvId && c.cvId === cv.cvId) ||
-              c.archivoOriginal === cv.archivoOriginal
-          );
-          if (idx >= 0) {
-            cvsData[idx].alreadyContacted = Boolean(cv.alreadyContacted);
-            cvsData[idx].contactedAt = cv.contactedAt || null;
-            if (cv.alreadyContacted) {
-              cvsData[idx].saludo = '';
-              cvsData[idx].mensajeIA = '';
-            }
-          }
-        }
-        if (alreadyContactedCount > 0) {
-          console.log(
-            `📇 ${alreadyContactedCount} CV(s) ya contactados (no se generará IA ni se enviarán).`
-          );
-        }
-      } catch (err) {
-        console.warn('⚠️ contactHistory annotate en upload omitido:', err.message);
-      }
-    }
-
+    // Nueva carga = nueva mesa (lo anterior pasa al archivo permanente, como antes).
+    cvsData = cvFileStore.archiveAllWorkspace(cvsData);
     persistCvsData();
-    const ws = workspaceCvs();
+    broadcastEvent('cvsUpdated', { cvs: workspaceCvs(), archiveCount: cvsData.length });
+
+    const user = req.user || null;
+    cvPipeline = {
+      id: `cvp_${Date.now().toString(36)}`,
+      running: true,
+      mode,
+      note,
+      total: files.length,
+      processed: 0,
+      extracted: 0,
+      generated: 0,
+      contacted: 0,
+      errors: 0,
+      toSend: 0,
+      startedAt: Date.now(),
+      finishedAt: null,
+      etaAnchor: null,
+      inFlight: new Map(),
+      selectedSessions,
+      sessionWeights,
+      streamBatchId,
+      queuedBatchId: null,
+      autoDispatch,
+      error: null,
+      startedBy: user && user.username ? user.username : null
+    };
+    const state = cvPipeline;
     console.log(
-      `Procesamiento completado. ${ws.length} CVs en mesa (${cvsData.length} en archivo permanente).`
+      `📥 Carga ${state.id}: ${files.length} CV(s), modo=${mode}` +
+        (mode !== 'review' ? `, líneas=${selectedSessions.join(',') || '(prueba)'}` : '')
     );
+    broadcastCvPipeline();
+    res.status(202).json({ success: true, started: true, note, ...getCvPipelineSnapshot() });
 
-    reportPipeline('fin');
-    res.json({
-      success: true,
-      message:
-        `Se procesaron ${pipeline.extracted} CV(s)` +
-        (autoGenerate ? ` · ${pipeline.generated} mensaje(s) generado(s)` : '') +
-        (pipeline.errors ? ` · ${pipeline.errors} con error` : ''),
-      generatedCount: pipeline.generated,
-      errorCount: pipeline.errors,
-      alreadyContactedCount,
-      cvs: ws,
-      archiveCount: cvsData.length
-    });
-
+    runCvPipeline(files, state)
+      .catch((err) => {
+        state.error = err.message;
+        console.error('cvPipeline:', err);
+        if (state.streamBatchId) closeStreamFeed(state.streamBatchId);
+      })
+      .finally(() => {
+        state.running = false;
+        state.finishedAt = Date.now();
+        state.inFlight.clear();
+        console.log(
+          `📥 Carga ${state.id} terminada: ${state.extracted} extraídos, ${state.generated} mensajes, ` +
+            `${state.contacted} ya contactados, ${state.errors} errores, ${state.toSend} a envío`
+        );
+        broadcastCvPipeline();
+        broadcastEvent('cvsUpdated', { cvs: workspaceCvs(), archiveCount: cvsData.length });
+      });
   } catch (error) {
     console.error('Error en upload-cvs:', error);
-    res.status(500).json({
-      error: 'Error interno del servidor',
-      message: error.message
-    });
+    res.status(500).json({ error: 'Error interno del servidor', message: error.message });
   }
 });
 
 // Ruta para generar mensajes con IA (responde al instante; el trabajo sigue en segundo plano)
 app.post('/generate-messages', async (req, res) => {
   try {
+    if (cvPipeline && cvPipeline.running) {
+      return res.status(409).json({
+        error: 'Hay una carga de CVs en proceso; los mensajes se están generando ahí.'
+      });
+    }
     if (generationState.inProgress) {
       return res.status(409).json({
         error: 'Ya hay una generación de mensajes en curso',

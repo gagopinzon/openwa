@@ -15,7 +15,8 @@ const {
   classifySendError,
   createFailoverContext,
   requeueContact,
-  drainSessionQueue
+  drainSessionQueue,
+  pickNextAliveSession
 } = require('./sendFailover');
 
 /** Id lógico para pausar/abortar envíos round-robin multi-sesión */
@@ -627,6 +628,9 @@ async function sendSessionQueue(
   let processedOnThisSession = 0;
   const range = normalizeDelayRange(delayRange);
   let startAborted = false;
+  let streamIdleReported = false;
+  const streamStillOpen = () =>
+    Boolean(failoverCtx && typeof failoverCtx.isStreamOpen === 'function' && failoverCtx.isStreamOpen());
 
   try {
   const initialStartupMs = Math.max(0, Math.floor(Number(startupDelayMs) || 0));
@@ -666,17 +670,37 @@ async function sendSessionQueue(
     }
 
     if (queueItems.length === 0) {
+      // Lote en streaming: llegan más contactos mientras la IA genera → esperar en vez de terminar.
+      if (failoverCtx && typeof failoverCtx.isStreamOpen === 'function' && failoverCtx.isStreamOpen()) {
+        if (onProgress && !streamIdleReported) {
+          streamIdleReported = true;
+          onProgress({
+            sessionId: logicalSessionId,
+            sessionCurrent: processedOnThisSession,
+            sessionTotal: processedOnThisSession,
+            phase: 'awaiting_contacts'
+          });
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+        continue;
+      }
       if (!failoverCtx || !failoverCtx.busySessions) break;
+      // Sin cola = ya no está ocupada. (Antes seguía marcada como ocupada y, con 2+ líneas
+      // sin contactos, cada una esperaba a la otra para siempre: el lote nunca cerraba.)
+      failoverCtx.busySessions.delete(logicalSessionId);
       const peersBusy = [...failoverCtx.busySessions].some(
         (id) => id !== logicalSessionId
       );
       if (!peersBusy) break;
+      // Otra línea sigue trabajando y podría reasignarnos contactos si falla.
       await new Promise((r) => setTimeout(r, 500));
       continue;
     }
 
     const item = queueItems.shift();
     const { contact, globalIndex } = item;
+    streamIdleReported = false;
+    if (failoverCtx && failoverCtx.busySessions) failoverCtx.busySessions.add(logicalSessionId);
 
     if (
       failoverCtx &&
@@ -805,16 +829,18 @@ async function sendSessionQueue(
         });
       }
 
-      if (queueItems.length > 0) {
-        const next = queueItems[0];
+      // En streaming también se espera aunque la cola esté vacía: el siguiente contacto que llegue
+      // debe respetar el intervalo de esta línea (no salir pegado al anterior).
+      if (queueItems.length > 0 || streamStillOpen()) {
+        const next = queueItems[0] || null;
         if (onProgress) {
           onProgress({
             sessionId: logicalSessionId,
             sessionCurrent: processedOnThisSession,
             sessionTotal: processedOnThisSession + queueItems.length,
             phase: 'waiting',
-            nombre: next.contact.nombre,
-            telefono: next.contact.telefono
+            nombre: next ? next.contact.nombre : null,
+            telefono: next ? next.contact.telefono : null
           });
         }
         const waitResult = await waitBetweenMessages(
@@ -909,12 +935,31 @@ async function sendRoundRobinBulk(
   onMessageResult = null,
   onWaitProgressBySession = null,
   sessionWeights = null,
-  delayRange = null
+  delayRange = null,
+  streamOpts = null
 ) {
   const N = sessionOrder.length;
   const counts = resolveExactCounts(sessionOrder, sessionWeights, contacts.length);
   const queues = buildQueuesFromCounts(sessionOrder, contacts, counts);
   const failoverCtx = createFailoverContext(sessionOrder, queues);
+  if (streamOpts && typeof streamOpts.isOpen === 'function') {
+    // Lote en streaming: las líneas esperan contactos nuevos mientras siga abierto.
+    failoverCtx.isStreamOpen = streamOpts.isOpen;
+    let nextGlobalIndex = contacts.length;
+    if (typeof streamOpts.register === 'function') {
+      streamOpts.register((contact, preferredSessionId = null) => {
+        const target =
+          preferredSessionId && failoverCtx.aliveSessionIds.has(preferredSessionId)
+            ? preferredSessionId
+            : pickNextAliveSession(failoverCtx);
+        if (!target || !failoverCtx.queues.get(target)) {
+          return { ok: false, reason: 'no_healthy_sessions' };
+        }
+        failoverCtx.queues.get(target).push({ contact, globalIndex: nextGlobalIndex++ });
+        return { ok: true, sessionId: target };
+      });
+    }
+  }
   const sumCounts = counts.reduce((a, b) => a + b, 0) || 1;
   const range = normalizeDelayRange(delayRange);
 

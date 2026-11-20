@@ -66,9 +66,13 @@ function hasUsablePhone(phone) {
  * Archiva el lote anterior y mete el nuevo en mesa.
  * Si un teléfono ya existía, reemplaza esa entrada y reporta el cvId viejo.
  */
-function mergeIncomingBatch(archive, incoming, phonesMatch) {
+function mergeIncomingBatch(archive, incoming, phonesMatch, opts = {}) {
   const matchFn = typeof phonesMatch === 'function' ? phonesMatch : () => false;
-  const result = archiveAllWorkspace(archive);
+  // archiveWorkspace=false: agregar a la mesa actual (subida CV por CV) sin archivar lo ya agregado.
+  const result =
+    opts.archiveWorkspace === false
+      ? (Array.isArray(archive) ? archive : []).slice()
+      : archiveAllWorkspace(archive);
   const replacedIds = [];
 
   for (const entry of Array.isArray(incoming) ? incoming : []) {
