@@ -3138,3 +3138,84 @@ footer p {
     margin-bottom: 0;
     align-items: center;
 }
+
+/* Contador de subida de CVs (2 líneas: CV actual + mensajes generados) */
+#loadingText {
+    white-space: pre-line;
+    text-align: center;
+    line-height: 1.5;
+}
+
+/* Progreso de envío (fuente: servidor) */
+.send-progress-panel {
+    margin: 16px auto;
+    max-width: 760px;
+    padding: 14px 16px;
+    border: 1px solid #bfdbfe;
+    border-radius: 12px;
+    background: #eff6ff;
+    text-align: left;
+}
+.send-progress-panel.is-warning { border-color: #fde68a; background: #fffbeb; }
+.send-progress-panel.is-error { border-color: #fecaca; background: #fef2f2; }
+.send-progress-panel.is-done { border-color: #bbf7d0; background: #f0fdf4; }
+.send-progress-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 10px;
+}
+.send-progress-head h2 { font-size: 1.05rem; margin: 0; }
+.send-progress-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    border-radius: 999px;
+    background: #dbeafe;
+    color: #1e40af;
+    vertical-align: middle;
+}
+.send-progress-panel.is-warning .send-progress-badge { background: #fde68a; color: #92400e; }
+.send-progress-panel.is-error .send-progress-badge { background: #fecaca; color: #991b1b; }
+.send-progress-panel.is-done .send-progress-badge { background: #bbf7d0; color: #166534; }
+.send-progress-updated { font-size: 12px; color: #64748b; }
+.send-progress-bar {
+    height: 12px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    overflow: hidden;
+}
+.send-progress-fill {
+    height: 100%;
+    width: 0;
+    background: #2563eb;
+    transition: width 0.4s ease;
+}
+.send-progress-panel.is-done .send-progress-fill { background: #16a34a; }
+.send-progress-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin-top: 10px;
+    font-size: 14px;
+}
+.send-progress-stats strong { font-variant-numeric: tabular-nums; }
+.send-progress-note { margin: 8px 0 0; font-size: 13px; color: #475569; }
+.send-progress-note:empty { display: none; }
+.send-progress-sessions { margin-top: 8px; display: grid; gap: 4px; }
+.send-progress-session {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 13px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.7);
+}
+.send-progress-session .sp-line { font-weight: 600; }
+.send-progress-session .sp-phase { color: #475569; }
+.send-progress-session .sp-next { margin-left: auto; color: #1e40af; font-variant-numeric: tabular-nums; }

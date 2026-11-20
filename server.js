@@ -13,7 +13,7 @@ const {
 } = require('./cvLookup');
 const cvAnalysisService = require('./cvAnalysisService');
 const { extractTextFromPDF } = require('./pdfProcessor');
-const { generateBulkMessages, buildOutboundMessageParts, formatStoredCvContext } = require('./aiService');
+const { generateBulkMessages, generateMessageForCv, buildOutboundMessageParts, formatStoredCvContext } = require('./aiService');
 const WhatsAppService = require('./openwaWhatsAppService');
 const { sendRoundRobinBulk, ROUND_ROBIN_CONTROL_ID } = WhatsAppService;
 const { previewDistribution, buildQueuesFromCounts } = require('./sessionDistribution');
@@ -355,15 +355,294 @@ let lastSendJob = {
 /** Sube al finalizar/abortar para que un job viejo no vuelva a bloquear la cola. */
 let sendJobEpoch = 0;
 
+// ---------------------------------------------------------------------------
+// Envío robusto: progreso durable, reanudación automática y watchdog anti-trabas.
+// ---------------------------------------------------------------------------
+const SEND_RESUME_ENABLED = !/^(0|false|no)$/i.test(String(process.env.SEND_RESUME_ENABLED || 'true').trim());
+const SEND_RESUME_MAX_ATTEMPTS = Math.max(0, parseInt(process.env.SEND_RESUME_MAX_ATTEMPTS || '8', 10) || 8);
+const SEND_RESUME_RESTART_DELAY_MS = Math.max(5000, parseInt(process.env.SEND_RESUME_RESTART_DELAY_MS || '30000', 10) || 30000);
+// Sin NINGUNA actividad (envío, espera, reintento) durante este tiempo = job colgado.
+const SEND_STALL_MS = Math.max(120000, parseInt(process.env.SEND_STALL_MS || String(8 * 60 * 1000), 10) || 8 * 60 * 1000);
+
+let lastSendActivityAt = 0;
+function noteSendActivity() {
+  lastSendActivityAt = Date.now();
+}
+
+/**
+ * Promesa con límite de tiempo (evita que una llamada colgada congele el envío).
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {string} label
+ * @returns {Promise<T>}
+ */
+function withTimeout(promise, ms, label = 'operación') {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timeout (${Math.round(ms / 1000)} s) en ${label}`)), ms);
+      if (typeof timer.unref === 'function') timer.unref();
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** Espera de reintento tras error: 1, 2, 4, 8 … min (tope 15 min). */
+function resumeBackoffMs(attempt) {
+  return Math.min(15 * 60 * 1000, 60 * 1000 * 2 ** Math.max(0, attempt));
+}
+
+/**
+ * Cierra el lote del job: si quedan pendientes (y no lo detuvo el usuario) lo reprograma
+ * para continuar solo con lo que falta; si no, lo marca enviado y guarda el resumen.
+ * @param {{ batchId?: string|null, userAborted?: boolean }} job
+ * @param {{ error?: string|null }} [opts]
+ * @returns {{ resumed: boolean, pending: number, delayMs: number }}
+ */
+function finalizeSendBatch(job, opts = {}) {
+  const error = opts.error || null;
+  const id = (job && job.batchId) || sendQueueStore.getSendingBatch()?.id || null;
+  const batch = id ? sendQueueStore.getBatchById(id) : null;
+  if (!batch || batch.status !== sendQueueStore.STATUS.SENDING) {
+    markSendQueueJobFinished();
+    return { resumed: false, pending: 0, delayMs: 0 };
+  }
+  const pending = sendQueueStore.getPendingCvs(batch).length;
+  const attempts = (batch.progress && batch.progress.resumeCount) || 0;
+  const canResume =
+    SEND_RESUME_ENABLED && !(job && job.userAborted) && pending > 0 && attempts < SEND_RESUME_MAX_ATTEMPTS;
+
+  if (canResume) {
+    // 1.ª vez sin error: 15 s; después (o con error) espera progresiva para no martillar una línea caída.
+    const delayMs = error || attempts > 0 ? resumeBackoffMs(attempts) : 15000;
+    sendQueueStore.requeueForResume(id, {
+      delayMs,
+      reason: error ? 'error' : 'incompleto',
+      error
+    });
+    console.warn(
+      `🔁 Lote ${id}: ${pending} pendiente(s) — se reanuda en ${Math.round(delayMs / 1000)} s` +
+        (error ? ` (error: ${error})` : '') +
+        ` [intento ${attempts + 1}/${SEND_RESUME_MAX_ATTEMPTS}]`
+    );
+    broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+    armSendQueueTimer();
+    broadcastSendProgressSoon();
+    return { resumed: true, pending, delayMs };
+  }
+
+  const p = batch.progress || {};
+  sendQueueStore.setLastFinished({
+    batchId: id,
+    total: p.total || (batch.cvs || []).length,
+    sent: p.sent || 0,
+    failed: p.failed || 0,
+    skipped: p.skipped || 0,
+    pendingLeft: pending,
+    startedAt: p.startedAt || null,
+    resumeCount: attempts,
+    error,
+    userAborted: Boolean(job && job.userAborted)
+  });
+  if (pending > 0) {
+    console.warn(
+      `⚠️ Lote ${id} cerrado con ${pending} pendiente(s)` +
+        (job && job.userAborted ? ' (abortado por el usuario)' : ` (sin más reintentos: ${attempts})`)
+    );
+  }
+  markSendQueueJobFinished();
+  broadcastSendProgressSoon();
+  return { resumed: false, pending, delayMs: 0 };
+}
+
+/** Job colgado: lo invalida (sus bucles se auto-abortan) y reanuda lo pendiente. */
+function recoverStalledSendJob(reason) {
+  const job = lastSendJob;
+  const batchId = job && job.batchId;
+  console.error(`🧯 Watchdog: ${reason}. Reiniciando el envío con lo pendiente…`);
+  sendJobEpoch += 1; // el job viejo deja de ser vigente → guardControls lo aborta
+  if (job) {
+    job.inProgress = false;
+    job.error = reason;
+    job.completedAt = Date.now();
+  }
+  for (const [, state] of sessionStates) {
+    state.sendingInProgress = false;
+    state.sendingPaused = false;
+    state.timePaused = false;
+    state.skipWait = false;
+    state.liveStatus = null;
+  }
+  const batch = batchId ? sendQueueStore.getBatchById(batchId) : sendQueueStore.getSendingBatch();
+  if (batch && batch.status === sendQueueStore.STATUS.SENDING) {
+    const r = sendQueueStore.requeueForResume(batch.id, { delayMs: 5000, reason: 'watchdog', error: reason });
+    if (r && r.pending === 0) {
+      broadcastEvent('sendQueueFinished', { batchId: batch.id, status: 'sent' });
+    }
+  }
+  broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
+  armSendQueueTimer();
+  broadcastSendProgressSoon();
+}
+
+function anySessionPaused() {
+  return [...sessionStates.values()].some((s) => s.sendingInProgress && (s.sendingPaused || s.timePaused));
+}
+
+setInterval(() => {
+  try {
+    const job = lastSendJob;
+    if (!job || !job.inProgress) return;
+    if (anySessionPaused()) {
+      noteSendActivity(); // pausado a propósito: no es traba
+      return;
+    }
+    const idleMs = Date.now() - (lastSendActivityAt || job.startedAt || Date.now());
+    if (idleMs < SEND_STALL_MS) {
+      job.stalled = false;
+      return;
+    }
+    if (job.hasAndroid) {
+      // El celular marca su propio ritmo: solo avisar, no reiniciar.
+      if (!job.stalled) {
+        job.stalled = true;
+        console.warn(`⚠️ Envío Android sin avance hace ${Math.round(idleMs / 60000)} min`);
+        broadcastSendProgressSoon();
+      }
+      return;
+    }
+    recoverStalledSendJob(`sin actividad de envío hace ${Math.round(idleMs / 60000)} min`);
+  } catch (err) {
+    console.warn('send watchdog:', err.message);
+  }
+}, 30000).unref();
+
+/**
+ * Foto completa del envío para cualquier navegador/dispositivo (no depende del front que lo inició).
+ */
+function getSendProgressSnapshot() {
+  const now = Date.now();
+  const job = lastSendJob || {};
+  const batches = sendQueueStore.getBatches();
+  const sending = batches.find((b) => b.status === sendQueueStore.STATUS.SENDING) || null;
+  const resuming =
+    batches
+      .filter((b) => b.resumePending && b.status === sendQueueStore.STATUS.SCHEDULED)
+      .sort((a, b) => Date.parse(a.scheduledAt || 0) - Date.parse(b.scheduledAt || 0))[0] || null;
+  const batch = sending || resuming;
+
+  let status = 'idle';
+  if (sending && job.inProgress) status = job.stalled ? 'stalled' : anySessionPaused() ? 'paused' : 'sending';
+  else if (sending) status = 'starting';
+  else if (resuming) status = 'resuming';
+
+  const sessionIdsForView =
+    Array.isArray(batch?.selectedSessions) && batch.selectedSessions.length
+      ? batch.selectedSessions
+      : Array.isArray(job.sessionIds)
+        ? job.sessionIds
+        : [];
+  const sessions = sessionIdsForView.map((sessionId) => {
+    const st = sessionStates.get(sessionId);
+    const live = st && st.liveStatus ? { ...st.liveStatus } : null;
+    return {
+      sessionId,
+      sendingInProgress: Boolean(st && st.sendingInProgress),
+      paused: Boolean(st && st.sendingPaused),
+      timePaused: Boolean(st && st.timePaused),
+      phase: live ? live.phase : null,
+      nombre: live ? live.nombre || null : null,
+      sessionCurrent: live ? live.sessionCurrent ?? null : null,
+      sessionTotal: live ? live.sessionTotal ?? null : null,
+      remainingMs: live && live.remainingMs != null ? live.remainingMs : null,
+      liveAt: live ? live.at || null : null
+    };
+  });
+
+  let progress = null;
+  if (batch) {
+    const p = batch.progress || {};
+    const total = p.total || (batch.cvs || []).length;
+    const sent = p.sent || 0;
+    const failed = p.failed || 0;
+    const skipped = p.skipped || 0;
+    const pending = sendQueueStore.getPendingCvs(batch).length;
+    const startedMs = p.startedAt ? Date.parse(p.startedAt) : null;
+    const doneCount = sent + failed;
+    // ETA con el ritmo real de este lote (incluye esperas entre mensajes y pausas reales).
+    const etaMs =
+      startedMs && doneCount > 0 && pending > 0 && status !== 'resuming'
+        ? Math.round(((now - startedMs) / doneCount) * pending)
+        : null;
+    progress = {
+      batchId: batch.id,
+      label: batch.label || null,
+      total,
+      sent,
+      failed,
+      skipped,
+      pending,
+      startedAt: p.startedAt || null,
+      lastResultAt: p.lastResultAt || null,
+      resumeCount: p.resumeCount || 0,
+      lastResumeReason: p.lastResumeReason || null,
+      lastError: p.lastError || null,
+      nextRetryAt: status === 'resuming' ? batch.scheduledAt || null : null,
+      etaMs
+    };
+  }
+
+  const queued = batches.filter(
+    (b) => (b.status === 'queued' || b.status === 'scheduled') && !b.resumePending
+  );
+  return {
+    success: true,
+    serverTime: now,
+    status,
+    active: status !== 'idle',
+    progress,
+    sessions,
+    lastActivityAt: lastSendActivityAt || null,
+    stallAfterMs: SEND_STALL_MS,
+    queued: queued.map((b) => ({
+      batchId: b.id,
+      status: b.status,
+      scheduledAt: b.scheduledAt || null,
+      total: (b.cvs || []).length,
+      label: b.label || null
+    })),
+    lastFinished: sendQueueStore.getLastFinished()
+  };
+}
+
+let sendProgressBroadcastTimer = null;
+/** Agrupa cambios y avisa por SSE (los clientes igual hacen polling; esto solo acelera). */
+function broadcastSendProgressSoon() {
+  if (sendProgressBroadcastTimer) return;
+  sendProgressBroadcastTimer = setTimeout(() => {
+    sendProgressBroadcastTimer = null;
+    try {
+      broadcastEvent('sendProgress', getSendProgressSnapshot());
+    } catch (err) {
+      console.warn('sendProgress broadcast:', err.message);
+    }
+  }, 400);
+  if (typeof sendProgressBroadcastTimer.unref === 'function') sendProgressBroadcastTimer.unref();
+}
+
 function isAnySendingInProgress() {
   return lastSendJob.inProgress || [...sessionStates.values()].some((s) => s.sendingInProgress);
 }
 
 function buildSendProgressHandlers(controlId) {
   const onProgress = (progressData) => {
+    noteSendActivity();
+    broadcastSendProgressSoon();
     if (progressData.sessionId) {
       const st = getSessionState(progressData.sessionId);
       st.liveStatus = {
+        at: Date.now(),
         phase: progressData.phase || (progressData.readyToSend ? 'sending' : 'sent'),
         nombre: progressData.nombre,
         telefono: progressData.telefono,
@@ -401,9 +680,11 @@ function buildSendProgressHandlers(controlId) {
   };
 
   const onWaitProgressBySession = (sId) => (remainingMs, totalWaitMs) => {
+    noteSendActivity();
     const st = getSessionState(sId);
     st.liveStatus = {
       ...(st.liveStatus || {}),
+      at: Date.now(),
       phase: st.sendingPaused ? 'paused' : st.timePaused ? 'time_paused' : 'waiting',
       remainingMs,
       totalWaitMs
@@ -436,43 +717,76 @@ async function runWhatsAppSendJob({
     sendChannelRaw === 'android' || sendChannelRaw === 'openwa' ? sendChannelRaw : 'auto';
 
   const epoch = ++sendJobEpoch;
-  lastSendJob.inProgress = true;
-  lastSendJob.aborted = false;
-  lastSendJob.batchId = batchId || null;
-  lastSendJob.total = finalCvsToSend.length;
-  lastSendJob.successCount = 0;
-  lastSendJob.completedCount = 0;
-  lastSendJob.sessionIds = sessionIds;
-  lastSendJob.startedAt = Date.now();
-  lastSendJob.completedAt = null;
-  lastSendJob.error = null;
-  lastSendJob.message = null;
-  lastSendJob.results = [];
-  lastSendJob.skippedAlreadyContacted = skippedAlreadyContacted;
-  lastSendJob.testMode = testMode;
-  lastSendJob.channel = sendChannel;
+  // Objeto propio por job: si un job viejo (colgado) despierta tarde, no pisa el estado del nuevo.
+  const job = {
+    inProgress: true,
+    aborted: false,
+    userAborted: false,
+    hasAndroid: sendChannel === 'android',
+    batchId: batchId || null,
+    total: finalCvsToSend.length,
+    successCount: 0,
+    completedCount: 0,
+    sessionIds,
+    startedAt: Date.now(),
+    completedAt: null,
+    error: null,
+    message: null,
+    results: [],
+    skippedAlreadyContacted,
+    testMode,
+    channel: sendChannel,
+    epoch
+  };
+  lastSendJob = job;
+  noteSendActivity();
+  const isCurrentJob = () => epoch === sendJobEpoch;
+  // Controles de pausa/aborto + aborto automático si este job dejó de ser el vigente (watchdog/finalizar).
+  const guardControls = (check) => () => {
+    const c = check ? check() : { paused: false, aborted: false, skipWait: false, timePaused: false };
+    return isCurrentJob() ? c : { ...c, aborted: true, paused: false, timePaused: false };
+  };
 
   if (batchId) {
     const liveBatch = sendQueueStore.getBatchById(batchId);
     if (!liveBatch || liveBatch.status !== sendQueueStore.STATUS.SENDING) {
-      lastSendJob.inProgress = false;
-      lastSendJob.aborted = true;
+      job.inProgress = false;
+      job.aborted = true;
       return;
     }
   }
 
   const trackMessageResult = (row) => {
-    lastSendJob.completedCount = (lastSendJob.completedCount || 0) + 1;
+    // Progreso durable (sobrevive reinicios) aunque el job ya no sea el vigente: es lo que pasó de verdad.
+    if (batchId && row) {
+      try {
+        sendQueueStore.recordResult(batchId, row);
+      } catch (err) {
+        console.warn('send-queue recordResult:', err.message);
+      }
+    }
+    // Historial (evita reenvíos futuros): también aunque el job ya no sea el vigente.
+    if (typeof mongoRecordHook === 'function') {
+      try {
+        mongoRecordHook(row);
+      } catch (err) {
+        console.warn('mongoRecordHook:', err.message);
+      }
+    }
+    if (!isCurrentJob()) return;
+    noteSendActivity();
+    broadcastSendProgressSoon();
+    job.completedCount = (job.completedCount || 0) + 1;
     if (row) {
-      lastSendJob.results = lastSendJob.results || [];
-      lastSendJob.results.push(row);
+      job.results = job.results || [];
+      job.results.push(row);
     }
     if (row && row.success) {
-      lastSendJob.successCount = (lastSendJob.successCount || 0) + 1;
+      job.successCount = (job.successCount || 0) + 1;
       broadcastEvent('sendSuccess', {
-        successCount: lastSendJob.successCount,
-        completedCount: lastSendJob.completedCount,
-        total: lastSendJob.total,
+        successCount: job.successCount,
+        completedCount: job.completedCount,
+        total: job.total,
         nombre: row.nombre,
         telefono: row.telefono,
         sessionId: row.sessionId || null,
@@ -480,22 +794,15 @@ async function runWhatsAppSendJob({
       });
     } else if (row) {
       broadcastEvent('sendSuccess', {
-        successCount: lastSendJob.successCount || 0,
-        completedCount: lastSendJob.completedCount,
-        total: lastSendJob.total,
+        successCount: job.successCount || 0,
+        completedCount: job.completedCount,
+        total: job.total,
         nombre: row.nombre,
         telefono: row.telefono,
         sessionId: row.sessionId || null,
         success: false,
         error: row.error || null
       });
-    }
-    if (typeof mongoRecordHook === 'function') {
-      try {
-        mongoRecordHook(row);
-      } catch (err) {
-        console.warn('mongoRecordHook:', err.message);
-      }
     }
   };
 
@@ -528,9 +835,9 @@ async function runWhatsAppSendJob({
       });
 
       resetBulkControlState(controlId, sessionIds);
-      lastSendJob.results = results;
-      lastSendJob.successCount = results.filter((r) => r.success).length;
-      lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes enviados (modo prueba)`;
+      job.results = results;
+      job.successCount = results.filter((r) => r.success).length;
+      job.message = `Envío completado: ${job.successCount}/${results.length} mensajes enviados (modo prueba)`;
     } else if (sendChannel === 'android') {
       console.log(
         `📱 Envío Android (forzado) con ${N} sesión(es): ${sessionIds.join(', ')}`
@@ -545,15 +852,15 @@ async function runWhatsAppSendJob({
         sessionIds,
         batchId,
         onMessageResult: trackMessageResult,
-        shouldAbort: () => lastSendJob.aborted || epoch !== sendJobEpoch,
+        shouldAbort: () => job.aborted || !isCurrentJob(),
         pollMs: 2000,
         timeoutMs: 24 * 60 * 60 * 1000
       });
 
       resetBulkControlState(controlId, sessionIds);
-      lastSendJob.results = results;
-      lastSendJob.successCount = results.filter((r) => r.success).length;
-      lastSendJob.message = `Envío Android: ${lastSendJob.successCount}/${results.length} mensajes`;
+      job.results = results;
+      job.successCount = results.filter((r) => r.success).length;
+      job.message = `Envío Android: ${job.successCount}/${results.length} mensajes`;
     } else {
       // auto | openwa → respetar outreachChannel por línea (openwa forzado = todas openwa)
       const contactsToSend = finalCvsToSend.map((cv) => ({
@@ -639,17 +946,18 @@ async function runWhatsAppSendJob({
       }
 
       const { onProgress, onWaitProgressBySession } = buildSendProgressHandlers(controlId);
-      const checkControlsBySession = (sId) => makeSessionCheckControls(sId, controlId);
+      const checkControlsBySession = (sId) => guardControls(makeSessionCheckControls(sId, controlId));
 
       const tasks = [];
 
       if (androidAssignments.length > 0) {
+        job.hasAndroid = true;
         tasks.push(
           runAndroidSendJob({
             assignments: androidAssignments,
             batchId,
             onMessageResult: trackMessageResult,
-            shouldAbort: () => lastSendJob.aborted || epoch !== sendJobEpoch,
+            shouldAbort: () => job.aborted || !isCurrentJob(),
             pollMs: 2000,
             timeoutMs: 24 * 60 * 60 * 1000
           })
@@ -681,7 +989,7 @@ async function runWhatsAppSendJob({
             }
 
             if (openwaSessionIds.length === 1) {
-              const singleCheck = makeSessionCheckControls(openwaSessionIds[0], null);
+              const singleCheck = guardControls(makeSessionCheckControls(openwaSessionIds[0], null));
               const onWaitProgress = onWaitProgressBySession(openwaSessionIds[0]);
               const sendSettings = sendSettingsStore.getSettings();
               const delayRange = {
@@ -736,24 +1044,27 @@ async function runWhatsAppSendJob({
         resetBulkControlState(controlId, sessionIds);
       }
 
-      lastSendJob.results = results;
-      lastSendJob.completedCount = results.length;
-      lastSendJob.successCount = results.filter((r) => r.success).length;
-      lastSendJob.message = `Envío completado: ${lastSendJob.successCount}/${results.length} mensajes (por línea: Android/OpenWA)`;
+      job.results = results;
+      job.completedCount = results.length;
+      job.successCount = results.filter((r) => r.success).length;
+      job.message = `Envío completado: ${job.successCount}/${results.length} mensajes (por línea: Android/OpenWA)`;
     }
 
-    lastSendJob.completedAt = Date.now();
-    console.log(`Envío completado. ${lastSendJob.message}`);
+    job.completedAt = Date.now();
+    console.log(`Envío completado. ${job.message}`);
 
-    if (epoch !== sendJobEpoch) {
+    if (!isCurrentJob()) {
       return;
     }
 
-    const workspaceCleanup = removeSuccessfullySentFromWorkspace(lastSendJob.results || []);
+    const workspaceCleanup = removeSuccessfullySentFromWorkspace(job.results || []);
 
-    // Marcar cola como sent ANTES de liberar inProgress / sendComplete,
+    // Marcar cola como sent (o reprogramar lo pendiente) ANTES de liberar inProgress / sendComplete,
     // para que la UI no refresque viendo aún "sending".
-    markSendQueueJobFinished();
+    const finalized = finalizeSendBatch(job, { error: null });
+    if (finalized.resumed) {
+      job.message = `${job.message} · ${finalized.pending} pendiente(s) se reanudan automáticamente`;
+    }
     try {
       sendQueueStore.clearTerminalBatches();
     } catch (err) {
@@ -769,27 +1080,30 @@ async function runWhatsAppSendJob({
     broadcastEvent('sendQueueUpdated', sendQueueStore.getPublicState());
 
     broadcastEvent('sendComplete', {
-      message: lastSendJob.message,
+      message: job.message,
       total: finalCvsToSend.length,
-      successCount: lastSendJob.successCount,
-      completedCount: lastSendJob.completedCount,
+      successCount: job.successCount,
+      completedCount: job.completedCount,
       testMode,
       removedFromWorkspace: workspaceCleanup.removed,
       remainingInWorkspace: workspaceCleanup.remaining
     });
   } catch (error) {
     console.error('Error en envío en segundo plano:', error);
-    if (epoch !== sendJobEpoch) {
+    if (!isCurrentJob()) {
       return;
     }
-    lastSendJob.error = error.message;
+    job.error = error.message;
     resetBulkControlState(controlId, sessionIds);
-    markSendQueueJobFinished();
-    broadcastEvent('sendError', { error: error.message });
+    const finalized = finalizeSendBatch(job, { error: error.message });
+    broadcastEvent('sendError', {
+      error: finalized.resumed
+        ? `${error.message} — se reintentará automáticamente en ${Math.round(finalized.delayMs / 1000)} s (${finalized.pending} pendiente(s))`
+        : error.message
+    });
   } finally {
-    if (epoch === sendJobEpoch) {
-      lastSendJob.inProgress = false;
-    }
+    job.inProgress = false;
+    if (isCurrentJob()) broadcastSendProgressSoon();
   }
 }
 
@@ -934,6 +1248,32 @@ async function prepareCvsForSend(cvsFromClient) {
   return { finalCvsToSend, skippedAlreadyContacted, duplicates };
 }
 
+/**
+ * Antes de reanudar un lote: lo que el celular ya resolvió se registra, lo que aún no tomó
+ * se cancela (se vuelve a encolar limpio) y lo que tiene en curso no se reenvía.
+ * @param {string} batchId
+ * @returns {Set<string>} teléfonos (phoneKey) en curso en el celular
+ */
+function reconcileAndroidJobsForResume(batchId) {
+  const inFlight = new Set();
+  try {
+    const jobs = androidGatewayStore.listJobs({ batchId, limit: 5000 });
+    for (const j of jobs) {
+      const key = sendQueueStore.phoneKey(j.telefono);
+      if (j.status === 'sent') {
+        sendQueueStore.recordResult(batchId, { telefono: j.telefono, success: true, sessionId: j.meta?.logicalSessionId || null });
+      } else if (j.status === 'claimed') {
+        inFlight.add(key);
+      }
+    }
+    const cancelled = androidGatewayStore.failPendingJobsByBatchId(batchId, 'batch_resumed');
+    if (cancelled) console.log(`📱 Reanudación: ${cancelled} job(s) Android pendientes cancelados para reencolar`);
+  } catch (err) {
+    console.warn('reconcileAndroidJobsForResume:', err.message);
+  }
+  return inFlight;
+}
+
 async function dispatchQueuedBatch(_user, batchId = null) {
   if (isAnySendingInProgress() || sendQueueStore.getSendingBatch()) {
     const err = new Error('Ya hay un envío de mensajes en curso');
@@ -965,11 +1305,29 @@ async function dispatchQueuedBatch(_user, batchId = null) {
       : ['default']
     : batch.selectedSessions;
 
-  let finalCvsToSend = Array.isArray(batch.cvs) ? [...batch.cvs] : [];
+  const isResume = Boolean(batch.resumePending || (batch.progress && batch.progress.startedAt));
+  const androidInFlight = isResume ? reconcileAndroidJobsForResume(batch.id) : new Set();
+  // Solo lo que falta: si el lote se reanuda (reinicio, error, watchdog) no se repite a nadie.
+  let finalCvsToSend = sendQueueStore
+    .getPendingCvs(sendQueueStore.getBatchById(batch.id) || batch)
+    .filter((cv) => !androidInFlight.has(sendQueueStore.phoneKey(cv.telefono)));
+  if (androidInFlight.size) {
+    console.log(`📱 ${androidInFlight.size} contacto(s) en curso en el celular: no se reenvían en esta ronda`);
+  }
+  if (isResume) {
+    console.log(
+      `🔁 Reanudando lote ${batch.id}: ${finalCvsToSend.length} pendiente(s) de ${(batch.cvs || []).length}` +
+        (batch.progress?.lastResumeReason ? ` (motivo: ${batch.progress.lastResumeReason})` : '')
+    );
+  }
   let skippedAlreadyContacted = [];
   if (contactHistory.mongoUriConfigured() && finalCvsToSend.length) {
     try {
-      const filtered = await contactHistory.filterOutAlreadyContacted(finalCvsToSend);
+      const filtered = await withTimeout(
+        contactHistory.filterOutAlreadyContacted(finalCvsToSend),
+        30000,
+        'filtro de historial'
+      );
       finalCvsToSend = filtered.toSend;
       skippedAlreadyContacted = filtered.skippedAlreadyContacted;
     } catch (err) {
@@ -980,6 +1338,15 @@ async function dispatchQueuedBatch(_user, batchId = null) {
   finalCvsToSend = unique;
   if (queuedDupes.length) {
     console.log(`⚠️ Cola: ${queuedDupes.length} teléfono(s) duplicado(s) omitidos al disparar.`);
+  }
+
+  sendQueueStore.startProgress(batch.id, {
+    total: Array.isArray(batch.cvs) ? batch.cvs.length : finalCvsToSend.length,
+    skipped: skippedAlreadyContacted.length
+  });
+  // Ya contactados / duplicados: cuentan como resueltos para que el lote pueda cerrar.
+  for (const cv of [...skippedAlreadyContacted, ...queuedDupes]) {
+    sendQueueStore.recordResult(batch.id, { telefono: cv.telefono, success: false, skipped: true, error: 'ya_contactado' });
   }
 
   broadcastEvent('sendQueueStarted', { batchId: batch.id, total: finalCvsToSend.length });
@@ -1484,9 +1851,40 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
     const incoming = new Array(files.length);
     const concurrencyRaw = parseInt(process.env.CV_EXTRACT_CONCURRENCY || '2', 10);
     const concurrency = Math.max(1, Math.min(8, Number.isFinite(concurrencyRaw) ? concurrencyRaw : 2));
+    // Pipeline por CV: extraer datos → revisar historial → generar mensaje (sin segunda pasada).
+    const uploadId = String((req.body && req.body.uploadId) || '').slice(0, 64);
+    const autoGenerate = String((req.body && req.body.autoGenerate) || 'true') !== 'false';
+    const pipeline = { processed: 0, extracted: 0, generated: 0, contacted: 0, errors: 0 };
+    const pipelineStartedAt = Date.now();
+    let etaAnchor = null; // { etaMs, at } fijado al terminar cada CV
+    const reportPipeline = (stage, nombre, archivo) => {
+      // ETA = ritmo real observado (tiempo transcurrido / CVs terminados) × CVs restantes.
+      // Ya incluye OCR, concurrencia y velocidad del modelo; sin datos aún → null ("calculando").
+      // Solo se recalibra cuando termina un CV; entre medio es cuenta regresiva desde ese ancla.
+      const now = Date.now();
+      const elapsedMs = now - pipelineStartedAt;
+      if (stage === 'listo' && pipeline.processed > 0) {
+        const remaining = Math.max(0, files.length - pipeline.processed);
+        etaAnchor = { etaMs: Math.round((elapsedMs / pipeline.processed) * remaining), at: now };
+      }
+      const etaMs = etaAnchor ? Math.max(0, etaAnchor.etaMs - (now - etaAnchor.at)) : null;
+      broadcastEvent('cvPipelineProgress', {
+        uploadId,
+        total: files.length,
+        ...pipeline,
+        elapsedMs,
+        etaMs,
+        avgMsPerCv: pipeline.processed > 0 ? Math.round(elapsedMs / pipeline.processed) : null,
+        stage,
+        nombre: nombre || '',
+        archivo: archivo || ''
+      });
+    };
     console.log(
-      `🤖 Extracción de datos con IA (${cvAnalysisService.getProvider()}, concurrencia ${concurrency})`
+      `🤖 Extracción con IA (${cvAnalysisService.getProvider()}, concurrencia ${concurrency})` +
+        (autoGenerate ? ' + mensaje por CV' : '')
     );
+    reportPipeline('start');
 
     const processOne = async (i) => {
       const file = files[i];
@@ -1496,6 +1894,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
 
       try {
         const saved = cvFileStore.saveCvFile(file.buffer, file.originalname);
+        reportPipeline('extrayendo', '', file.originalname);
 
         // Extraer texto del PDF
         const text = await extractTextFromPDF(file.buffer);
@@ -1506,7 +1905,7 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           `  ✓ ${file.originalname} [${cvData.extractionProvider}] ${cvData.nombre} · ${cvData.telefono} · ${cvData.ultimoTrabajo || 'sin puesto'} · ${[cvData.ciudad, cvData.estado].filter(Boolean).join(', ') || 'sin ciudad'}`
         );
 
-        incoming[i] = {
+        const entry = {
           ...cvData,
           archivoOriginal: file.originalname,
           cvId: saved.cvId,
@@ -1519,7 +1918,33 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           inWorkspace: true,
           savedAt: new Date().toISOString()
         };
+        pipeline.extracted += 1;
+
+        // ¿Ya fue contactado? Entonces no se genera mensaje.
+        if (contactHistory.mongoUriConfigured() && contactHistory.normalizePhone(entry.telefono)) {
+          try {
+            const [annotated] = await contactHistory.annotateAlreadyContacted([entry]);
+            entry.alreadyContacted = Boolean(annotated && annotated.alreadyContacted);
+            entry.contactedAt = (annotated && annotated.contactedAt) || null;
+          } catch (err) {
+            console.warn(`⚠️ historial omitido para ${file.originalname}:`, err.message);
+          }
+        }
+
+        if (entry.alreadyContacted) {
+          pipeline.contacted += 1;
+        } else if (autoGenerate) {
+          reportPipeline('mensaje', entry.nombre, file.originalname);
+          const msg = await generateMessageForCv(entry);
+          entry.saludo = msg.saludo;
+          entry.mensajeIA = msg.mensajeIA;
+          pipeline.generated += 1;
+          console.log(`  ✉️ mensaje ${msg.fallback ? '(plantilla básica)' : 'IA'} para ${entry.nombre}`);
+        }
+
+        incoming[i] = entry;
       } catch (error) {
+        pipeline.errors += 1;
         console.error(`Error procesando ${file.originalname}:`, error.message);
         incoming[i] = {
           nombre: 'Error al procesar',
@@ -1544,6 +1969,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
       while (nextIndex < files.length) {
         const idx = nextIndex++;
         await processOne(idx);
+        pipeline.processed += 1;
+        reportPipeline('listo', incoming[idx] && incoming[idx].nombre, files[idx].originalname);
       }
     });
     await Promise.all(workers);
@@ -1574,6 +2001,10 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
           if (idx >= 0) {
             cvsData[idx].alreadyContacted = Boolean(cv.alreadyContacted);
             cvsData[idx].contactedAt = cv.contactedAt || null;
+            if (cv.alreadyContacted) {
+              cvsData[idx].saludo = '';
+              cvsData[idx].mensajeIA = '';
+            }
           }
         }
         if (alreadyContactedCount > 0) {
@@ -1592,9 +2023,15 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
       `Procesamiento completado. ${ws.length} CVs en mesa (${cvsData.length} en archivo permanente).`
     );
 
+    reportPipeline('fin');
     res.json({
       success: true,
-      message: `Se procesaron ${ws.length} CVs exitosamente`,
+      message:
+        `Se procesaron ${pipeline.extracted} CV(s)` +
+        (autoGenerate ? ` · ${pipeline.generated} mensaje(s) generado(s)` : '') +
+        (pipeline.errors ? ` · ${pipeline.errors} con error` : ''),
+      generatedCount: pipeline.generated,
+      errorCount: pipeline.errors,
       alreadyContactedCount,
       cvs: ws,
       archiveCount: cvsData.length
@@ -3346,6 +3783,16 @@ app.post('/send-whatsapp', async (req, res) => {
 });
 
 // Estado del envío masivo (para polling desde el cliente)
+// Progreso de envío para cualquier navegador/dispositivo (fuente de verdad = backend + disco).
+app.get('/api/send-progress', (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json(getSendProgressSnapshot());
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/send-job-status', (req, res) => {
   const anyInProgress = [...sessionStates.values()].some((s) => s.sendingInProgress);
 
@@ -3652,6 +4099,7 @@ app.post('/abort-sending', (req, res) => {
       return res.status(400).json({ error: 'No hay envíos en progreso' });
     }
     abortAllActiveSessions();
+    if (lastSendJob) lastSendJob.userAborted = true; // no reanudar automáticamente
     console.log('🛑 Envíos abortados en todas las sesiones activas');
     return res.json({ success: true, message: 'Envíos abortados en todas las sesiones' });
   }
@@ -3666,6 +4114,7 @@ app.post('/abort-sending', (req, res) => {
 
   sessionState.sendingAborted = true;
   sessionState.sendingPaused = false;
+  if (lastSendJob) lastSendJob.userAborted = true; // no reanudar automáticamente
   console.log(`🛑 Envíos abortados por el usuario (Sesión: ${sessionId})`);
 
   res.json({
@@ -5804,10 +6253,16 @@ process.on('SIGTERM', async () => {
 // Iniciar servidor
 sessionsStore.migrateFromEnvIfEmpty();
 {
-  const recovered = sendQueueStore.recoverOrphanSending();
+  // Reinicio/caída a medio envío: reprogramar lo pendiente en vez de darlo por enviado.
+  const recovered = sendQueueStore.recoverOrphanSending({
+    resume: SEND_RESUME_ENABLED,
+    delayMs: SEND_RESUME_RESTART_DELAY_MS
+  });
   if (recovered > 0) {
     console.log(
-      `⚠️ Cola: ${recovered} lote(s) en sending sin job vivo → marcados como sent (huérfanos)`
+      SEND_RESUME_ENABLED
+        ? `🔁 Cola: ${recovered} lote(s) interrumpidos por reinicio → se reanudan en ${Math.round(SEND_RESUME_RESTART_DELAY_MS / 1000)} s con lo pendiente`
+        : `⚠️ Cola: ${recovered} lote(s) en sending sin job vivo → marcados como sent (huérfanos)`
     );
   }
 }

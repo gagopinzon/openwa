@@ -86,3 +86,44 @@ describe('mergeExtractedCvFields', () => {
     }
   });
 });
+
+describe('generateMessageForCv', () => {
+  const ollamaService = require('../ollamaService');
+  const { generateMessageForCv } = require('../aiService');
+
+  it('usa la IA cuando responde', async () => {
+    const origChat = ollamaService.chatReply;
+    const origUrl = process.env.OLLAMA_URL;
+    process.env.OLLAMA_URL = 'http://127.0.0.1:1/api/chat';
+    ollamaService.chatReply = async () =>
+      'SALUDO: Hola Juan,\nMENSAJE: Vi tu perfil como Gerente de Abastecimiento y me pareció muy sólido.\n\nEn PROTALENT ayudamos a perfiles como el tuyo.\n\n¿Te interesaría una sesión de diagnóstico?';
+    try {
+      const out = await generateMessageForCv({ nombre: 'Juan Pérez', experiencia: 'x', ultimoTrabajo: 'Gerente de Abastecimiento' });
+      assert.equal(out.fallback, false);
+      assert.match(out.mensajeIA, /PROTALENT/);
+      assert.ok(out.saludo);
+    } finally {
+      ollamaService.chatReply = origChat;
+      if (origUrl == null) delete process.env.OLLAMA_URL;
+      else process.env.OLLAMA_URL = origUrl;
+    }
+  });
+
+  it('nunca deja el CV sin mensaje si la IA falla', async () => {
+    const origChat = ollamaService.chatReply;
+    const origUrl = process.env.OLLAMA_URL;
+    process.env.OLLAMA_URL = 'http://127.0.0.1:1/api/chat';
+    ollamaService.chatReply = async () => {
+      throw new Error('ECONNREFUSED');
+    };
+    try {
+      const out = await generateMessageForCv({ nombre: 'Juan Pérez', experiencia: 'x', ultimoTrabajo: 'Gerente' });
+      assert.ok(out.mensajeIA && out.mensajeIA.length > 20);
+      assert.ok(out.saludo);
+    } finally {
+      ollamaService.chatReply = origChat;
+      if (origUrl == null) delete process.env.OLLAMA_URL;
+      else process.env.OLLAMA_URL = origUrl;
+    }
+  });
+});

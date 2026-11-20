@@ -468,6 +468,29 @@ function failOpenJobsByBatchId(batchId, error = 'batch_finished') {
 }
 
 /**
+ * Solo PENDING (el celular aún no los tomó): se pueden cancelar sin riesgo de duplicar.
+ * @param {string} batchId
+ * @param {string} [error]
+ * @returns {number}
+ */
+function failPendingJobsByBatchId(batchId, error = 'batch_resumed') {
+  const id = batchId != null ? String(batchId).trim() : '';
+  if (!id) return 0;
+  const store = readStore();
+  const now = new Date().toISOString();
+  let count = 0;
+  for (const job of store.jobs) {
+    if (String(job.batchId || '') !== id || job.status !== JOB_STATUS.PENDING) continue;
+    job.status = JOB_STATUS.FAILED;
+    job.error = error;
+    job.finishedAt = now;
+    count += 1;
+  }
+  if (count) writeStore(store);
+  return count;
+}
+
+/**
  * Encola jobs ya asignados a deviceId concreto.
  * @param {Array<{ telefono: string, mensaje: string, deviceId: string, nombre?: string, batchId?: string|null, logicalSessionId?: string|null, meta?: object }>} items
  */
@@ -528,6 +551,7 @@ module.exports = {
   linkDeviceToLogicalSession,
   deleteDevice,
   failOpenJobsByBatchId,
+  failPendingJobsByBatchId,
   getJob,
   listJobs,
   pickOnlineDevices,

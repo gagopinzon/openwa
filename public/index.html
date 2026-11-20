@@ -520,6 +520,20 @@
                 </div>
             </section>
 
+            <!-- Progreso de envío: lo calcula el servidor; se ve igual desde cualquier pestaña o dispositivo -->
+            <section class="send-progress-panel" id="sendProgressPanel" style="display: none;" aria-live="polite">
+                <div class="send-progress-head">
+                    <h2>📤 Envío de mensajes <span id="sendProgressBadge" class="send-progress-badge"></span></h2>
+                    <span id="sendProgressUpdated" class="send-progress-updated"></span>
+                </div>
+                <div class="send-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="sendProgressBar">
+                    <div class="send-progress-fill" id="sendProgressFill"></div>
+                </div>
+                <div class="send-progress-stats" id="sendProgressStats"></div>
+                <p class="send-progress-note" id="sendProgressNote"></p>
+                <div class="send-progress-sessions" id="sendProgressSessions"></div>
+            </section>
+
             <section class="session-sending-panel" id="sessionSendingPanel" style="display: none;">
                 <h2 style="font-size: 1.1rem; margin-bottom: 12px;">Envío en progreso</h2>
                 <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">

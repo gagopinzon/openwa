@@ -150,12 +150,32 @@ function clearLocalSentCache() {
  */
 async function shouldSendToPhone(telefono) {
   if (wasAlreadySentLocal(telefono)) return false;
-  const status = await lookupContactStatus(telefono);
+  let status;
+  try {
+    // Nunca dejar que Mongo congele o tumbe el envío masivo.
+    status = await withTimeout(lookupContactStatus(telefono), LOOKUP_TIMEOUT_MS, 'historial Mongo');
+  } catch (err) {
+    console.warn(`📇 historial no disponible para ${telefono} (${err.message}); se continúa con el envío`);
+    return true;
+  }
   if (status.alreadyContacted) {
     rememberSuccessfulSend(telefono);
     return false;
   }
   return true;
+}
+
+const LOOKUP_TIMEOUT_MS = 15000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timeout ${Math.round(ms / 1000)}s en ${label}`)), ms);
+      if (typeof timer.unref === 'function') timer.unref();
+    })
+  ]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -176,17 +196,28 @@ function dedupeCvsByPhone(cvsArray) {
   return { unique, duplicates };
 }
 
+let indexEnsured = false;
+
 async function getCollection() {
   if (!mongoUriConfigured()) return null;
 
   try {
     if (!clientPromise) {
-      clientPromise = MongoClient.connect(process.env.MONGODB_URI);
+      // Sin socketTimeoutMS una conexión medio muerta deja la consulta esperando para siempre.
+      clientPromise = MongoClient.connect(process.env.MONGODB_URI, {
+        serverSelectionTimeoutMS: 10000,
+        connectTimeoutMS: 10000,
+        socketTimeoutMS: 30000
+      });
+      indexEnsured = false;
     }
     const client = await clientPromise;
     const db = client.db();
     const coll = db.collection(COLLECTION);
-    await coll.createIndex({ normalizedPhone: 1 }, { unique: true });
+    if (!indexEnsured) {
+      await coll.createIndex({ normalizedPhone: 1 }, { unique: true });
+      indexEnsured = true;
+    }
     return coll;
   } catch (err) {
     clientPromise = null;

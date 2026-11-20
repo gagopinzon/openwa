@@ -30,6 +30,7 @@ class CVAnalyzer {
         this.initAgendaPendingPanel();
         this.initAgendaConfirmedPanel();
         this.initCollapsibleAgendaPanels();
+        this.initSendProgressPanel();
         this.attachEventListeners();
         this.setupSendingControls();
         this.applyPermissionUI();
@@ -5577,13 +5578,20 @@ class CVAnalyzer {
             return;
         }
 
-        this.showLoading('Extrayendo datos de los CVs con IA (nombre, teléfono, ciudad, puesto)... puede tardar unos segundos por CV');
+        const total = this.selectedFiles.length;
+        // Cada CV: extraer datos con IA → mensaje. El servidor avisa el avance por SSE (cvPipelineProgress).
+        this.activeUploadId = `up_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        this.showLoading(this.formatPipelineProgress({ total, processed: 0, generated: 0 }));
+        this.startPipelineTicker();
 
         const formData = new FormData();
+        formData.append('uploadId', this.activeUploadId);
+        formData.append('autoGenerate', 'true');
         this.selectedFiles.forEach(file => {
             formData.append('cvs', file);
         });
         let uploadOk = false;
+        let generatedCount = 0;
 
         try {
             const response = await fetch('/upload-cvs', {
@@ -5595,6 +5603,7 @@ class CVAnalyzer {
 
             if (result.success) {
                 uploadOk = true;
+                generatedCount = Number(result.generatedCount) || 0;
                 this.cvsData = result.cvs;
                 this.displayResults();
                 const skipped = result.alreadyContactedCount || 0;
@@ -5613,13 +5622,86 @@ class CVAnalyzer {
             console.error('Error uploading files:', error);
             this.showStatus(`Error de conexión: ${error.message}`, 'error');
         } finally {
+            this.stopPipelineTicker();
+            this.activeUploadId = null;
             this.hideLoading();
         }
 
-        // Generar de una vez los mensajes de IA de los CVs nuevos (sin pisar los ya generados/editados)
-        if (uploadOk && this.getMissingMessageCount() > 0) {
-            await this.generateMessages({ onlyMissing: true });
+        // Los mensajes ya vienen generados: desbloquear la cola de envío como tras «Generar mensajes».
+        if (uploadOk && generatedCount > 0) {
+            await this.clearIdleSendQueue();
+            await this.refreshSendQueue();
+            this.maybeReseedSessionCounts();
+            this.updateSessionWeightUI();
         }
+    }
+
+    /**
+     * Texto del overlay con el contador del pipeline (extracción + mensaje por CV).
+     * @param {{ total?: number, processed?: number, generated?: number, contacted?: number, errors?: number, stage?: string, nombre?: string, archivo?: string }} p
+     */
+    formatPipelineProgress(p = {}) {
+        const total = Number(p.total) || 0;
+        const processed = Math.min(Number(p.processed) || 0, total);
+        const current = Math.min(processed + 1, total);
+        const who = String(p.nombre || p.archivo || '').trim();
+        let linea = `Procesando CV ${current} de ${total}`;
+        if (p.stage === 'extrayendo') linea += ` · extrayendo datos${who ? ` de ${who}` : ''}`;
+        else if (p.stage === 'mensaje') linea += ` · escribiendo mensaje${who ? ` para ${who}` : ''}`;
+        else if (p.stage === 'fin' || processed >= total) linea = `Listo: ${processed} de ${total} CVs procesados`;
+        const extras = [`✉️ Mensajes generados: ${Number(p.generated) || 0} / ${total}`];
+        if (p.contacted) extras.push(`📇 Ya contactados: ${p.contacted}`);
+        if (p.errors) extras.push(`⚠️ Con error: ${p.errors}`);
+        const lines = [linea, extras.join(' · ')];
+        const tiempo = this.formatPipelineTime(p, processed, total);
+        if (tiempo) lines.push(tiempo);
+        return lines.join('\n');
+    }
+
+    /** "1:05" / "12 s" */
+    formatDuration(ms) {
+        const totalSec = Math.max(0, Math.round(Number(ms) / 1000));
+        if (totalSec < 60) return `${totalSec} s`;
+        const h = Math.floor(totalSec / 3600);
+        const m = Math.floor((totalSec % 3600) / 60);
+        const sec = String(totalSec % 60).padStart(2, '0');
+        return h > 0 ? `${h} h ${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+    }
+
+    /**
+     * Línea de tiempo: transcurrido + restante estimado.
+     * p.elapsedMs / p.etaMs vienen del servidor; p.sinceMs es lo que pasó desde ese evento (tick local).
+     */
+    formatPipelineTime(p, processed, total) {
+        if (p.elapsedMs == null) return '';
+        const since = Number(p.sinceMs) || 0;
+        const elapsed = Number(p.elapsedMs) + since;
+        let line = `⏱️ Transcurrido ${this.formatDuration(elapsed)}`;
+        if (p.stage === 'fin' || processed >= total) return line;
+        if (p.etaMs == null) return `${line} · Tiempo restante: calculando…`;
+        const left = Number(p.etaMs) - since;
+        if (left <= 1000) return `${line} · Restante: casi listo…`;
+        const fin = new Date(Date.now() + left).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+        const avg = p.avgMsPerCv ? ` · ~${this.formatDuration(p.avgMsPerCv)} por CV` : '';
+        return `${line} · Restante ~${this.formatDuration(left)} (termina ~${fin})${avg}`;
+    }
+
+    /** Re-dibuja el overlay cada segundo con el último avance (cuenta regresiva entre eventos). */
+    startPipelineTicker() {
+        this.stopPipelineTicker();
+        this.pipelineTicker = setInterval(() => {
+            const last = this.lastPipelineProgress;
+            if (!last || !this.activeUploadId) return;
+            this.showLoading(
+                this.formatPipelineProgress({ ...last.data, sinceMs: Date.now() - last.receivedAt })
+            );
+        }, 1000);
+    }
+
+    stopPipelineTicker() {
+        if (this.pipelineTicker) clearInterval(this.pipelineTicker);
+        this.pipelineTicker = null;
+        this.lastPipelineProgress = null;
     }
 
     displayResults() {
@@ -6706,6 +6788,195 @@ class CVAnalyzer {
                     this.cancelAgendaPending(cancelBtn.getAttribute('data-agenda-cancel'));
                 }
             });
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Progreso de envío: fuente de verdad = servidor (/api/send-progress).
+    // Funciona desde cualquier pestaña/dispositivo; no depende de quién inició el envío.
+    // ------------------------------------------------------------------
+    initSendProgressPanel() {
+        this.sendProgressPanel = document.getElementById('sendProgressPanel');
+        if (!this.sendProgressPanel) return;
+        this.sendProgressEls = {
+            badge: document.getElementById('sendProgressBadge'),
+            updated: document.getElementById('sendProgressUpdated'),
+            bar: document.getElementById('sendProgressBar'),
+            fill: document.getElementById('sendProgressFill'),
+            stats: document.getElementById('sendProgressStats'),
+            note: document.getElementById('sendProgressNote'),
+            sessions: document.getElementById('sendProgressSessions')
+        };
+        this.sendProgressSnap = null; // { data, receivedAt }
+        this.sendProgressFetchError = null;
+        this.sendProgressPollTimer = null;
+
+        document.addEventListener('visibilitychange', () => {
+            // Al volver a la pestaña: refrescar ya (los navegadores frenan timers en segundo plano).
+            if (!document.hidden) this.refreshSendProgress();
+        });
+        window.addEventListener('focus', () => this.refreshSendProgress());
+        window.addEventListener('online', () => this.refreshSendProgress());
+
+        // Cuenta regresiva / "actualizado hace" sin pedir nada al servidor.
+        setInterval(() => {
+            if (this.sendProgressSnap && !document.hidden) this.renderSendProgress();
+        }, 1000);
+
+        this.refreshSendProgress();
+    }
+
+    scheduleSendProgressPoll() {
+        if (this.sendProgressPollTimer) clearTimeout(this.sendProgressPollTimer);
+        const active = Boolean(this.sendProgressSnap && this.sendProgressSnap.data.active);
+        const delay = document.hidden ? 30000 : active ? 4000 : 20000;
+        this.sendProgressPollTimer = setTimeout(() => this.refreshSendProgress(), delay);
+    }
+
+    async refreshSendProgress() {
+        try {
+            const res = await fetch('/api/send-progress', { cache: 'no-store' });
+            if (res.status === 401) return; // sesión expirada: el login se encarga
+            const data = await res.json();
+            if (!res.ok || !data || data.success === false) {
+                throw new Error((data && data.error) || `HTTP ${res.status}`);
+            }
+            this.applySendProgressSnapshot(data);
+            this.sendProgressFetchError = null;
+        } catch (error) {
+            this.sendProgressFetchError = error.message || 'sin conexión';
+            this.renderSendProgress();
+        } finally {
+            this.scheduleSendProgressPoll();
+        }
+    }
+
+    applySendProgressSnapshot(data) {
+        const prev = this.sendProgressSnap ? this.sendProgressSnap.data : null;
+        this.sendProgressSnap = { data, receivedAt: Date.now() };
+        this.renderSendProgress();
+        // Si pasó de activo a inactivo, refrescar la mesa / cola como al terminar un envío.
+        if (prev && prev.active && !data.active && !this.isOpsUser()) {
+            Promise.resolve(this.refreshCvsFromServer({ silent: true })).catch(() => {});
+            Promise.resolve(this.refreshSendQueue()).catch(() => {});
+        }
+        if (prev && prev.active !== data.active) this.scheduleSendProgressPoll();
+    }
+
+    renderSendProgress() {
+        const panel = this.sendProgressPanel;
+        const els = this.sendProgressEls;
+        if (!panel || !els || !this.sendProgressSnap) return;
+        const { data, receivedAt } = this.sendProgressSnap;
+        const sinceMs = Date.now() - receivedAt;
+        const p = data.progress;
+        const last = data.lastFinished;
+        const lastAgeMs = last && last.finishedAt ? Date.now() - Date.parse(last.finishedAt) : Infinity;
+        const showLast = !data.active && last && lastAgeMs < 60 * 60 * 1000;
+
+        if (!data.active && !showLast) {
+            panel.style.display = 'none';
+            return;
+        }
+        panel.style.display = '';
+        const fmt = (ms) => this.formatDuration(ms);
+        const n = (v) => Number(v) || 0;
+
+        let total, sent, failed, skipped, pending;
+        if (data.active && p) {
+            ({ total, sent, failed, skipped, pending } = p);
+        } else {
+            total = last.total; sent = last.sent; failed = last.failed; skipped = last.skipped; pending = last.pendingLeft;
+        }
+        total = n(total); sent = n(sent); failed = n(failed); skipped = n(skipped); pending = n(pending);
+        const resolved = Math.min(total, sent + failed + skipped);
+        const pct = total > 0 ? Math.round((resolved / total) * 100) : 0;
+
+        const badges = {
+            sending: ['Enviando', ''],
+            starting: ['Iniciando', ''],
+            paused: ['En pausa', 'is-warning'],
+            resuming: ['Reanudando', 'is-warning'],
+            stalled: ['Sin avance', 'is-error'],
+            idle: [last && (last.error || last.pendingLeft) ? 'Terminó con pendientes' : 'Terminado', last && (last.error || last.pendingLeft) ? 'is-warning' : 'is-done']
+        };
+        const [badgeText, tone] = badges[data.status] || badges.sending;
+        panel.classList.remove('is-warning', 'is-error', 'is-done');
+        if (tone) panel.classList.add(tone);
+        els.badge.textContent = badgeText;
+
+        els.fill.style.width = `${pct}%`;
+        els.bar.setAttribute('aria-valuenow', String(pct));
+
+        const stat = (label, value) => `<span>${label}: <strong>${value}</strong></span>`;
+        const parts = [
+            stat('✅ Enviados', `${sent} / ${total}`),
+            stat('⏳ Faltan', pending)
+        ];
+        if (failed) parts.push(stat('❌ Fallidos', failed));
+        if (skipped) parts.push(stat('📇 Ya contactados', skipped));
+        if (data.active && p && p.etaMs != null && pending > 0) {
+            const left = Math.max(0, p.etaMs - sinceMs);
+            const fin = new Date(Date.now() + left).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+            parts.push(stat('🕒 Restante', `~${fmt(left)} (≈ ${fin})`));
+        }
+        els.stats.innerHTML = parts.join('');
+
+        // Nota de estado
+        let note = '';
+        if (data.active && p) {
+            const reasons = { restart: 'reinicio del servidor', error: 'un error', watchdog: 'una traba detectada', incompleto: 'contactos pendientes' };
+            if (data.status === 'resuming' && p.nextRetryAt) {
+                const inMs = Math.max(0, Date.parse(p.nextRetryAt) - (Date.now() + (data.serverTime ? data.serverTime - receivedAt : 0)));
+                note = `🔁 Se reanuda automáticamente en ${fmt(inMs)} con los ${pending} pendientes` +
+                    (p.lastResumeReason ? ` (tras ${reasons[p.lastResumeReason] || p.lastResumeReason})` : '') + '.';
+                if (p.lastError) note += ` Último error: ${p.lastError}`;
+            } else if (data.status === 'stalled') {
+                note = '⚠️ Hace varios minutos que no hay avance. Si es una línea Android, revisa que WA Agent siga abierto.';
+            } else if (p.resumeCount > 0) {
+                note = `🔁 Envío reanudado ${p.resumeCount} vez/veces` +
+                    (p.lastResumeReason ? ` (última: ${reasons[p.lastResumeReason] || p.lastResumeReason})` : '') +
+                    '. No se repite a nadie que ya recibió mensaje.';
+            }
+            if (Array.isArray(data.queued) && data.queued.length) {
+                note += `${note ? ' · ' : ''}En cola después: ${data.queued.length} lote(s).`;
+            }
+        } else if (showLast) {
+            note = `Terminó hace ${fmt(lastAgeMs)}.`;
+            if (last.userAborted) note += ' Detenido por el usuario.';
+            else if (last.error) note += ` Error: ${last.error}`;
+        }
+        els.note.textContent = note;
+
+        // Líneas
+        const sessions = data.active && Array.isArray(data.sessions) ? data.sessions : [];
+        const phaseText = {
+            starting: 'Iniciando', sending: 'Enviando', sent: 'Enviado', waiting: 'Esperando turno',
+            paused: 'Pausado', time_paused: 'Espera pausada', retrying: 'Reintentando',
+            requeued: 'Reasignando contacto', done: 'Terminó', drained: 'Línea caída'
+        };
+        els.sessions.innerHTML = sessions
+            .filter((s) => s.sendingInProgress || s.phase)
+            .map((s) => {
+                const label = this.escapeHtml(this.getSessionLabel(s.sessionId) || s.sessionId);
+                const phase = s.paused ? 'Pausado' : s.timePaused ? 'Espera pausada' : phaseText[s.phase] || s.phase || '—';
+                const who = s.nombre ? ` · ${this.escapeHtml(s.nombre)}` : '';
+                const count = s.sessionTotal ? ` · ${n(s.sessionCurrent)}/${n(s.sessionTotal)}` : '';
+                let next = '';
+                if (s.phase === 'waiting' && s.remainingMs != null && !s.paused && !s.timePaused) {
+                    // remainingMs es del momento del evento en el servidor (liveAt); descontar lo transcurrido
+                    const age = (data.serverTime && s.liveAt ? data.serverTime - s.liveAt : 0) + sinceMs;
+                    next = `<span class="sp-next">próximo en ${fmt(Math.max(0, s.remainingMs - age))}</span>`;
+                }
+                return `<div class="send-progress-session"><span class="sp-line">${label}</span><span class="sp-phase">${phase}${who}${count}</span>${next}</div>`;
+            })
+            .join('');
+
+        // Frescura del dato
+        if (this.sendProgressFetchError) {
+            els.updated.textContent = `⚠️ Sin conexión con el servidor (${this.sendProgressFetchError}); reintentando…`;
+        } else {
+            els.updated.textContent = `Actualizado hace ${fmt(sinceMs)}`;
         }
     }
 
@@ -9257,6 +9528,29 @@ class CVAnalyzer {
 
         // Crear nueva conexión SSE
         this.eventSource = new EventSource('/events');
+
+        // Progreso de envío calculado por el servidor (también llega por polling)
+        this.eventSource.addEventListener('sendProgress', (event) => {
+            try {
+                const data = JSON.parse(event.data || '{}');
+                if (data && data.success !== false) this.applySendProgressSnapshot(data);
+            } catch {
+                /* ignore */
+            }
+        });
+
+        // Avance de la subida de CVs (extracción + mensaje por CV)
+        this.eventSource.addEventListener('cvPipelineProgress', (event) => {
+            let data = null;
+            try {
+                data = JSON.parse(event.data);
+            } catch {
+                return;
+            }
+            if (!data || !this.activeUploadId || data.uploadId !== this.activeUploadId) return;
+            this.lastPipelineProgress = { data, receivedAt: Date.now() };
+            this.showLoading(this.formatPipelineProgress(data));
+        });
 
         // Escuchar evento cuando está listo para enviar el siguiente mensaje
         this.eventSource.addEventListener('readyToSend', (event) => {

@@ -364,6 +364,24 @@ async function asyncPool(items, fn, concurrency = 3) {
 }
 
 /**
+ * Genera saludo + mensaje para UN CV (con plantilla básica si la IA falla).
+ * Se usa en la subida (extracción → mensaje en un solo paso) y en la generación masiva.
+ * @param {{ nombre?: string, experiencia?: string, ultimoTrabajo?: string }} cv
+ * @returns {Promise<{ saludo: string, mensajeIA: string, fallback: boolean }>}
+ */
+async function generateMessageForCv(cv) {
+  const ultimoTrabajo = String(cv.ultimoTrabajo || '').trim();
+  try {
+    const generated = await generatePersonalizedMessage(cv.nombre, cv.experiencia, ultimoTrabajo);
+    return { saludo: generated.saludo, mensajeIA: generated.mensajeIA, fallback: false };
+  } catch (error) {
+    console.error(`Error generando mensaje para ${cv.nombre}:`, error.message);
+    const fallback = generateBasicMessage(cv.nombre, cv.experiencia, ultimoTrabajo);
+    return { saludo: fallback.saludo, mensajeIA: fallback.mensajeIA, fallback: true };
+  }
+}
+
+/**
  * Genera mensajes personalizados para múltiples CVs con concurrencia controlada.
  * @param {Array} cvs - Array de objetos CV con nombre, experiencia y opcional ultimoTrabajo
  * @returns {Promise<Array>} - Array de mensajes generados
@@ -383,41 +401,16 @@ async function generateBulkMessages(cvs, onProgress = null) {
   };
 
   const processOne = async (cv, i) => {
-    const label = `${i + 1}/${total}`;
-    console.log(`Generando mensaje ${label} para ${cv.nombre}`);
-
+    console.log(`Generando mensaje ${i + 1}/${total} para ${cv.nombre}`);
     report('generating', cv.nombre);
-
-    const ultimoTrabajo = String(cv.ultimoTrabajo || '').trim();
-
-    try {
-      const generated = await generatePersonalizedMessage(
-        cv.nombre,
-        cv.experiencia,
-        ultimoTrabajo
-      );
-
-      completedIndexes.add(i);
-      report('done', cv.nombre);
-
-      return {
-        ...cv,
-        saludo: generated.saludo,
-        mensajeIA: generated.mensajeIA
-      };
-    } catch (error) {
-      console.error(`Error generando mensaje para ${cv.nombre}:`, error.message);
-      completedIndexes.add(i);
-      report('error', cv.nombre);
-
-      // Fallback inmediato a plantilla básica en vez de devolver un error crudo
-      const fallback = generateBasicMessage(cv.nombre, cv.experiencia, ultimoTrabajo);
-      return {
-        ...cv,
-        saludo: fallback.saludo,
-        mensajeIA: fallback.mensajeIA
-      };
-    }
+    const generated = await generateMessageForCv(cv);
+    completedIndexes.add(i);
+    report(generated.fallback ? 'error' : 'done', cv.nombre);
+    return {
+      ...cv,
+      saludo: generated.saludo,
+      mensajeIA: generated.mensajeIA
+    };
   };
 
   return asyncPool(cvs, processOne, 3);
@@ -828,6 +821,7 @@ Genera SOLO el texto del mensaje de WhatsApp, sin explicaciones ni alternativas.
 }
 
 module.exports = {
+  generateMessageForCv,
   generatePersonalizedMessage,
   generateBulkMessages,
   generateReplyMessage,
