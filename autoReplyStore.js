@@ -5,6 +5,12 @@ const crypto = require('crypto');
 const DATA_DIR = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'auto-reply-config.json');
 
+/** Logs detallados de webhooks (ids, payloads de OpenWA) solo con WEBHOOK_DEBUG=true. */
+function webhookDebugLog(...args) {
+  const raw = String(process.env.WEBHOOK_DEBUG || '').trim().toLowerCase();
+  if (raw === '1' || raw === 'true' || raw === 'yes') console.log(...args);
+}
+
 /** Playbook editable: identidad, objetivo y encuadre del servicio. */
 const DEFAULT_BASE_PROMPT = `Sé profesional y lo más humana posible. Tu rol es simular una agendadora femenina llamada Mónica: carismática y con habilidad para conectar con cada contacto.
 
@@ -361,7 +367,7 @@ function setWebhookId(logicalSessionId, webhookId) {
     delete cfg.webhookIdsBySession[logicalSessionId];
   }
   writeConfig(cfg);
-  console.log(
+  webhookDebugLog(
     `[auto-reply-store] setWebhookId ${logicalSessionId}=${webhookId || '(deleted)'} before=${JSON.stringify(
       before
     )} after=${JSON.stringify(cfg.webhookIdsBySession)}`
@@ -373,7 +379,7 @@ function clearAllWebhookIds() {
   const before = { ...(cfg.webhookIdsBySession || {}) };
   cfg.webhookIdsBySession = {};
   writeConfig(cfg);
-  console.log(
+  webhookDebugLog(
     `[auto-reply-store] clearAllWebhookIds before=${JSON.stringify(before)}`
   );
 }
@@ -438,6 +444,7 @@ function setSessionEnabled(sessionId, enabled, allSessionIds) {
 }
 
 module.exports = {
+  webhookDebugLog,
   getConfig,
   getPublicConfig,
   getRecommendedDefaults,

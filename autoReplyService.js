@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const contactHistory = require('./contactHistoryStore');
 const autoReplyStore = require('./autoReplyStore');
+const { webhookDebugLog } = autoReplyStore;
 const sessionsStore = require('./sessionsStore');
 const incomingMessagesStore = require('./incomingMessagesStore');
 const { generateReplyMessage, splitSpeechParts, getReplyProvider, formatConversationHistoryForPrompt } = require('./aiService');
@@ -3018,7 +3019,7 @@ async function removeExistingWebhooksForUrl(openwaSessionId, webhookUrl, knownId
     try {
       await deleteWebhook(openwaSessionId, knownId);
       deleted.add(String(knownId));
-      console.log(`[auto-reply] deleted known webhook ${knownId} for ${openwaSessionId}`);
+      webhookDebugLog(`[auto-reply] deleted known webhook ${knownId} for ${openwaSessionId}`);
     } catch (err) {
       console.warn(`[auto-reply] delete known webhook ${knownId} failed: ${err.message}`);
     }
@@ -3039,7 +3040,7 @@ async function removeExistingWebhooksForUrl(openwaSessionId, webhookUrl, knownId
     try {
       await deleteWebhook(openwaSessionId, id);
       deleted.add(String(id));
-      console.log(`[auto-reply] deleted orphan webhook ${id} for ${openwaSessionId}`);
+      webhookDebugLog(`[auto-reply] deleted orphan webhook ${id} for ${openwaSessionId}`);
     } catch (err) {
       console.warn(`[auto-reply] delete orphan webhook ${id} failed: ${err.message}`);
     }
@@ -3061,7 +3062,7 @@ async function activateWebhooks() {
     throw new Error('No hay sesiones configuradas');
   }
 
-  console.log(
+  webhookDebugLog(
     `[auto-reply] activateWebhooks start url=${webhookUrl} sessions=${sessions.length} secret=${
       secret ? 'yes' : 'no'
     }`
@@ -3078,7 +3079,7 @@ async function activateWebhooks() {
     const openwaSessionId = session.openwaSessionId;
     try {
       const status = await getSessionStatus(openwaSessionId);
-      console.log(
+      webhookDebugLog(
         `[auto-reply] session ${session.id} openwa=${openwaSessionId} status=${status.status}`
       );
       if (!isConnectedStatus(status.status)) {
@@ -3104,7 +3105,7 @@ async function activateWebhooks() {
 
       const keys =
         created && typeof created === 'object' ? Object.keys(created).join(',') : typeof created;
-      console.log(
+      webhookDebugLog(
         `[auto-reply] createWebhook raw keys=[${keys}] preview=${JSON.stringify(created).slice(
           0,
           500
@@ -3127,7 +3128,7 @@ async function activateWebhooks() {
       }
 
       autoReplyStore.setWebhookId(session.id, webhookId);
-      console.log(`[auto-reply] saved webhookId ${webhookId} → ${session.id}`);
+      webhookDebugLog(`[auto-reply] saved webhookId ${webhookId} → ${session.id}`);
 
       results.push({
         logicalSessionId: session.id,
@@ -3150,11 +3151,12 @@ async function activateWebhooks() {
 
   const after = autoReplyStore.getConfig().webhookIdsBySession || {};
   const ok = results.filter((r) => r.success).length;
+  const failed = results.filter((r) => !r.success).map((r) => r.logicalSessionId);
   console.log(
-    `[auto-reply] activateWebhooks done ok=${ok}/${results.length} persistedIds=${JSON.stringify(
-      after
-    )}`
+    `[auto-reply] webhooks activos ${ok}/${results.length}` +
+      (failed.length ? ` (sin activar: ${failed.join(', ')})` : '')
   );
+  webhookDebugLog(`[auto-reply] activateWebhooks persistedIds=${JSON.stringify(after)}`);
 
   // Los webhooks alimentan la bandeja; la auto-respuesta se controla con el switch aparte.
   return { webhookUrl, results, webhookIdsBySession: after };
@@ -3338,9 +3340,10 @@ async function tryActivateWebhooksOnStartup(attempt = 1) {
 
     if (failed.some((r) => isRetryableWebhookError(r.error))) {
       const retryMs = getStartupWebhookRetryMs();
-      console.warn(
-        `[webhooks] auto-activate parcial ${ok}/${result.results.length}; reintento ${attempt + 1} en ${retryMs}ms (${errors})`
-      );
+      // Con líneas desconectadas esto se repite cada retryMs: avisar la 1.ª vez y luego cada 10 intentos.
+      const partialMsg = `[webhooks] auto-activate parcial ${ok}/${result.results.length}; reintento ${attempt + 1} en ${retryMs}ms (${errors})`;
+      if (attempt % 10 === 0) console.warn(partialMsg);
+      else webhookDebugLog(partialMsg);
       startupWebhookTimer = setTimeout(
         () => tryActivateWebhooksOnStartup(attempt + 1),
         retryMs
