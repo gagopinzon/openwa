@@ -235,7 +235,7 @@ function deriveExpertiseFromExperiencia(experiencia) {
  * @param {string} [ultimoTrabajo] - Último puesto de trabajo extraído del CV
  * @returns {Promise<{ saludo: string, mensajeIA: string }>}
  */
-async function generatePersonalizedMessage(nombre, experiencia, ultimoTrabajo) {
+async function generatePersonalizedMessage(nombre, experiencia, ultimoTrabajo, opts = {}) {
   const expertise = String(ultimoTrabajo || '').trim();
 
   if (!ollamaService.isConfigured()) {
@@ -330,6 +330,8 @@ IMPORTANTE - VARIACIÓN:
       `[bulk-msg] Ollama (${ollamaService.getModel()}):`,
       error.message
     );
+    // La carga de CVs reintenta por su cuenta (al final de la cola) en vez de usar la plantilla.
+    if (opts.throwOnError) throw error;
     return generateBasicMessage(nombre, experiencia, expertise);
   }
 }
@@ -367,14 +369,16 @@ async function asyncPool(items, fn, concurrency = 3) {
  * Genera saludo + mensaje para UN CV (con plantilla básica si la IA falla).
  * Se usa en la subida (extracción → mensaje en un solo paso) y en la generación masiva.
  * @param {{ nombre?: string, experiencia?: string, ultimoTrabajo?: string }} cv
+ * @param {{ throwOnError?: boolean }} [opts] throwOnError: si la IA falla, lanza el error (sin plantilla)
  * @returns {Promise<{ saludo: string, mensajeIA: string, fallback: boolean }>}
  */
-async function generateMessageForCv(cv) {
+async function generateMessageForCv(cv, opts = {}) {
   const ultimoTrabajo = String(cv.ultimoTrabajo || '').trim();
   try {
-    const generated = await generatePersonalizedMessage(cv.nombre, cv.experiencia, ultimoTrabajo);
+    const generated = await generatePersonalizedMessage(cv.nombre, cv.experiencia, ultimoTrabajo, opts);
     return { saludo: generated.saludo, mensajeIA: generated.mensajeIA, fallback: false };
   } catch (error) {
+    if (opts.throwOnError) throw error;
     console.error(`Error generando mensaje para ${cv.nombre}:`, error.message);
     const fallback = generateBasicMessage(cv.nombre, cv.experiencia, ultimoTrabajo);
     return { saludo: fallback.saludo, mensajeIA: fallback.mensajeIA, fallback: true };

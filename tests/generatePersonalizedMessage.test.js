@@ -122,4 +122,18 @@ Atte:
     assert.match(out.mensajeIA, /PROTALENT|Pro Talent/i);
     assert.match(out.mensajeIA, /Directora de Operaciones/);
   });
+
+  it('timeout de Ollama: por defecto usa plantilla; con throwOnError lanza (la carga reintenta)', async () => {
+    const { generateMessageForCv } = require('../aiService');
+    ollamaService.isConfigured = () => true;
+    ollamaService.chatReply = async () => {
+      throw new Error('timeout of 60000ms exceeded');
+    };
+    const cv = { nombre: 'Luis Pérez', experiencia: 'Contador', ultimoTrabajo: 'Contador Senior' };
+
+    const fallback = await generateMessageForCv(cv);
+    assert.match(fallback.mensajeIA, /Contador Senior/);
+
+    await assert.rejects(generateMessageForCv(cv, { throwOnError: true }), /timeout of 60000ms/);
+  });
 });

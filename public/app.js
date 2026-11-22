@@ -5525,20 +5525,56 @@ class CVAnalyzer {
     handleDrop(e) {
         e.preventDefault();
         this.dropzone.classList.remove('dragover');
-        const files = Array.from(e.dataTransfer.files).filter(file =>
-            file.type === 'application/pdf'
-        );
+        const files = Array.from(e.dataTransfer.files).filter((file) => this.isPdfFile(file));
         this.processSelectedFiles(files);
     }
 
     handleFileSelect(e) {
-        const files = Array.from(e.target.files).filter(file =>
-            file.type === 'application/pdf'
-        );
+        const files = Array.from(e.target.files).filter((file) => this.isPdfFile(file));
         this.processSelectedFiles(files);
     }
 
-    processSelectedFiles(files) {
+    /** Algunas apps (WhatsApp Desktop, Outlook) sueltan el PDF sin MIME type: aceptar también por extensión. */
+    isPdfFile(file) {
+        return file && (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || ''));
+    }
+
+    /**
+     * Copia cada PDF a memoria en cuanto se suelta/selecciona. Un File arrastrado solo apunta al archivo en
+     * disco: si era temporal (WhatsApp, Outlook, .zip, descargas) y cambia o se borra antes de «Procesar»,
+     * Chrome aborta la subida con «Failed to fetch» (ERR_UPLOAD_FILE_CHANGED).
+     */
+    async snapshotFiles(files) {
+        const ok = [];
+        const failed = [];
+        await Promise.all(
+            files.map(async (file) => {
+                try {
+                    const buf = await file.arrayBuffer();
+                    ok.push(new File([buf], file.name, { type: 'application/pdf', lastModified: file.lastModified }));
+                } catch {
+                    failed.push(file.name);
+                }
+            })
+        );
+        const order = new Map(files.map((f, i) => [f.name, i]));
+        ok.sort((a, b) => (order.get(a.name) ?? 0) - (order.get(b.name) ?? 0));
+        return { ok, failed };
+    }
+
+    async processSelectedFiles(rawFiles) {
+        if (rawFiles.length === 0) {
+            this.showStatus('Solo se pueden cargar archivos PDF', 'error');
+            return;
+        }
+        const { ok: files, failed } = await this.snapshotFiles(rawFiles);
+        if (failed.length) {
+            this.showStatus(
+                `No se pudieron leer: ${failed.join(', ')}. Guárdalos primero en una carpeta (Descargas/Escritorio) y arrástralos desde ahí.`,
+                'error'
+            );
+            if (!files.length) return;
+        }
         if (files.length === 0) {
             this.showStatus('Solo se pueden cargar archivos PDF', 'error');
             return;
@@ -5558,7 +5594,7 @@ class CVAnalyzer {
 
         this.selectedFiles = files;
         this.displaySelectedFiles();
-        this.showStatus(`${files.length} archivos seleccionados`, 'success');
+        if (!failed.length) this.showStatus(`${files.length} archivos seleccionados`, 'success');
     }
 
     displaySelectedFiles() {
@@ -5698,7 +5734,27 @@ class CVAnalyzer {
             this.refreshSendProgress?.();
         } catch (error) {
             console.error('Error uploading files:', error);
-            this.showStatus(`Error de conexión: ${error.message}`, 'error');
+            // «Failed to fetch» = la petición no llegó a completarse. ¿El servidor sí la recibió?
+            let started = false;
+            try {
+                const res = await fetch('/api/cv-pipeline', { cache: 'no-store' });
+                const data = await res.json();
+                const p = data && data.pipeline;
+                started = Boolean(p && p.running && p.total === files.length);
+                if (started) this.applyCvPipelineSnapshot(data);
+            } catch {
+                /* servidor no alcanzable */
+            }
+            if (started) {
+                this.showStatus('La conexión se cortó, pero el servidor sí recibió los CVs y los está procesando.', 'info');
+            } else {
+                const totalMb = files.reduce((n, f) => n + f.size, 0) / 1024 / 1024;
+                this.showStatus(
+                    `No se pudo subir (${error.message}). Revisa tu conexión y vuelve a intentar; ` +
+                        `si son muchos CVs (${totalMb.toFixed(1)} MB), sube menos a la vez.`,
+                    'error'
+                );
+            }
         } finally {
             this.hideLoading();
         }
@@ -5806,6 +5862,8 @@ class CVAnalyzer {
         if (p.mode === 'queue' && !p.running) parts.push(stat('🗂️ Encolados', n(p.toSend)));
         if (p.contacted) parts.push(stat('📇 Ya contactados', p.contacted));
         if (p.errors) parts.push(stat('⚠️ Con error', p.errors));
+        if (p.msgRetrying) parts.push(stat('🔁 Mensajes por reintentar', p.msgRetrying));
+        if (p.msgFailed) parts.push(stat('🚫 Sin mensaje (IA no respondió)', p.msgFailed));
         const elapsed = p.running ? n(p.elapsedMs) + sinceMs : n(p.elapsedMs);
         parts.push(stat('⏱️ Transcurrido', fmt(elapsed)));
         if (p.running) {
@@ -5872,7 +5930,13 @@ class CVAnalyzer {
                     ? `Ya contactado (${contactedLabel})`
                     : 'Ya contactado'
                 : cv.procesado
-                  ? 'Procesado'
+                  ? cv.mensajeIA
+                      ? 'Procesado'
+                      : cv.mensajePendiente
+                        ? 'Reintentando mensaje'
+                        : cv.mensajeError
+                          ? 'Sin mensaje'
+                          : 'Procesado'
                   : 'Error';
 
             const mensajeId = `mensaje-${index}`;
@@ -5881,7 +5945,12 @@ class CVAnalyzer {
                 ? contactedLabel
                     ? `No se genera mensaje: este número ya fue contactado el ${contactedLabel}.`
                     : 'No se genera mensaje: este número ya fue contactado.'
-                : cv.mensajeIA || 'Pendiente de generar...';
+                : cv.mensajeIA ||
+                  (cv.mensajePendiente
+                      ? 'La IA no respondió a tiempo: se reintenta al final de la cola…'
+                      : cv.mensajeError
+                        ? `⚠️ No se pudo generar el mensaje (no se enviará). ${cv.mensajeError}`
+                        : 'Pendiente de generar...');
             const mensajeCompleto = cv.alreadyContacted
                 ? mensajeTexto
                 : saludoTexto

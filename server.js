@@ -2075,6 +2075,8 @@ function getCvPipelineSnapshot() {
       generated: p.generated,
       contacted: p.contacted,
       errors: p.errors,
+      msgRetrying: p.msgRetrying || 0,
+      msgFailed: p.msgFailed || 0,
       toSend: p.toSend,
       startedAt: p.startedAt,
       finishedAt: p.finishedAt || null,
@@ -2125,10 +2127,38 @@ function addCvToWorkspace(entry) {
   broadcastEvent('cvsUpdated', { cvs: workspaceCvs(), archiveCount: cvsData.length });
 }
 
+/** Reemplaza en la mesa el CV (por cvId) con su versión actualizada y avisa a todas las ventanas. */
+function updateWorkspaceCv(entry) {
+  const idx = entry.cvId ? cvsData.findIndex((c) => c && c.cvId === entry.cvId && c.inWorkspace !== false) : -1;
+  if (idx < 0) return addCvToWorkspace(entry);
+  cvsData[idx] = { ...entry, inWorkspace: true };
+  persistCvsData();
+  broadcastEvent('cvsUpdated', { cvs: workspaceCvs(), archiveCount: cvsData.length });
+}
+
+/** Intentos totales por CV para generar su mensaje con IA (el 1.º en orden, los demás al final de la cola). */
+function cvMessageMaxAttempts() {
+  const v = parseInt(process.env.CV_MSG_ATTEMPTS || '3', 10);
+  return Number.isFinite(v) ? Math.max(1, Math.min(6, v)) : 3;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function runCvPipeline(files, state) {
   const concurrencyRaw = parseInt(process.env.CV_EXTRACT_CONCURRENCY || '2', 10);
   const concurrency = Math.max(1, Math.min(8, Number.isFinite(concurrencyRaw) ? concurrencyRaw : 2));
   const sendable = [];
+  /** CVs cuyo mensaje falló (timeout de Ollama, etc.): se reintentan al final, sin frenar a los demás. */
+  const deferred = [];
+  const maxAttempts = cvMessageMaxAttempts();
+
+  const acceptForSend = (entry) => {
+    if (!isSendableCv(entry)) return;
+    sendable.push(entry);
+    if (state.mode === 'instant' && state.streamBatchId) {
+      if (pushToStream(state.streamBatchId, entry)) state.toSend += 1;
+    }
+  };
 
   const markDone = () => {
     state.processed += 1;
@@ -2183,20 +2213,24 @@ async function runCvPipeline(files, state) {
       } else {
         state.inFlight.set(i, { archivo: file.originalname, nombre: entry.nombre, stage: 'mensaje' });
         broadcastCvPipeline();
-        const msg = await generateMessageForCv(entry);
-        entry.saludo = msg.saludo;
-        entry.mensajeIA = msg.mensajeIA;
-        state.generated += 1;
+        try {
+          const msg = await generateMessageForCv(entry, { throwOnError: true });
+          entry.saludo = msg.saludo;
+          entry.mensajeIA = msg.mensajeIA;
+          state.generated += 1;
+        } catch (err) {
+          console.warn(
+            `⏭️ Mensaje de ${entry.nombre || file.originalname} falló (intento 1/${maxAttempts}): ${err.message}. Va al final de la cola.`
+          );
+          entry.mensajePendiente = maxAttempts > 1;
+          entry.mensajeError = err.message;
+          deferred.push({ entry, attempts: 1, lastError: err.message });
+          state.msgRetrying += 1;
+        }
       }
 
       addCvToWorkspace(entry);
-
-      if (isSendableCv(entry)) {
-        sendable.push(entry);
-        if (state.mode === 'instant' && state.streamBatchId) {
-          if (pushToStream(state.streamBatchId, entry)) state.toSend += 1;
-        }
-      }
+      acceptForSend(entry);
     } catch (error) {
       state.errors += 1;
       console.error(`Error procesando ${file.originalname}:`, error.message);
@@ -2230,6 +2264,46 @@ async function runCvPipeline(files, state) {
     }
   });
   await Promise.all(workers);
+
+  // Reintentos al final de la cola: de uno en uno y con pausa, para darle aire a Ollama.
+  for (const item of deferred) {
+    const { entry } = item;
+    const label = entry.nombre || entry.archivoOriginal;
+    while (item.attempts < maxAttempts) {
+      item.attempts += 1;
+      state.inFlight.set(`retry:${entry.cvId}`, {
+        archivo: entry.archivoOriginal,
+        nombre: entry.nombre,
+        stage: `reintento mensaje ${item.attempts}/${maxAttempts}`
+      });
+      broadcastCvPipeline();
+      await sleep(5000);
+      try {
+        const msg = await generateMessageForCv(entry, { throwOnError: true });
+        entry.saludo = msg.saludo;
+        entry.mensajeIA = msg.mensajeIA;
+        delete entry.mensajePendiente;
+        delete entry.mensajeError;
+        state.generated += 1;
+        console.log(`  ✓ mensaje de ${label} generado en el intento ${item.attempts}/${maxAttempts}`);
+        break;
+      } catch (err) {
+        item.lastError = err.message;
+        console.warn(`⚠️ Mensaje de ${label} falló (intento ${item.attempts}/${maxAttempts}): ${err.message}`);
+      }
+    }
+    state.inFlight.delete(`retry:${entry.cvId}`);
+    state.msgRetrying = Math.max(0, state.msgRetrying - 1);
+    if (!String(entry.mensajeIA || '').trim()) {
+      delete entry.mensajePendiente;
+      entry.mensajeError = `No se pudo generar el mensaje tras ${item.attempts} intento(s): ${item.lastError}`;
+      state.msgFailed += 1;
+      console.warn(`❌ ${label}: descartado del envío (${entry.mensajeError})`);
+    }
+    updateWorkspaceCv(entry);
+    acceptForSend(entry);
+    broadcastCvPipeline();
+  }
 
   if (state.mode === 'instant' && state.streamBatchId) {
     closeStreamFeed(state.streamBatchId);
@@ -2319,6 +2393,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
       generated: 0,
       contacted: 0,
       errors: 0,
+      msgRetrying: 0,
+      msgFailed: 0,
       toSend: 0,
       startedAt: Date.now(),
       finishedAt: null,
@@ -2352,7 +2428,8 @@ app.post('/upload-cvs', upload.array('cvs', 100), async (req, res) => {
         state.inFlight.clear();
         console.log(
           `📥 Carga ${state.id} terminada: ${state.extracted} extraídos, ${state.generated} mensajes, ` +
-            `${state.contacted} ya contactados, ${state.errors} errores, ${state.toSend} a envío`
+            `${state.contacted} ya contactados, ${state.errors} errores, ` +
+            `${state.msgFailed} sin mensaje, ${state.toSend} a envío`
         );
         broadcastCvPipeline();
         broadcastEvent('cvsUpdated', { cvs: workspaceCvs(), archiveCount: cvsData.length });
@@ -2489,6 +2566,10 @@ app.post('/generate-messages', async (req, res) => {
           if (index !== -1) {
             cvsData[index].saludo = cvWithMessage.saludo;
             cvsData[index].mensajeIA = cvWithMessage.mensajeIA;
+            if (String(cvWithMessage.mensajeIA || '').trim()) {
+              delete cvsData[index].mensajeError;
+              delete cvsData[index].mensajePendiente;
+            }
           }
         });
 
