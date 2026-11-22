@@ -2250,6 +2250,8 @@ async function runCvPipeline(files, state) {
         error: error.message
       });
     } finally {
+      // El PDF ya quedó en disco (saveCvFile): soltar el buffer para no retener toda la carga en memoria.
+      file.buffer = null;
       state.inFlight.delete(i);
       markDone();
       broadcastCvPipeline();

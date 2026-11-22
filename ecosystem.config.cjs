@@ -13,7 +13,9 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      max_memory_restart: '512M',
+      // Procesar CVs (PDFs en memoria + OCR Tesseract + render de páginas) supera fácil 512M;
+      // si PM2 reinicia a media carga, el navegador ve «Failed to fetch» y la carga se pierde.
+      max_memory_restart: process.env.MSG_MAX_MEMORY || '2G',
       time: true,
       env: {
         NODE_ENV: 'production',
